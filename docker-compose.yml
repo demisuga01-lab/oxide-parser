@@ -1,0 +1,22 @@
+services:
+  oxide:
+    build: .
+    image: oxide-server:latest
+    container_name: oxide
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      OXIDE_PORT: "8080"
+      OXIDE_LOG_LEVEL: "info"
+      OXIDE_MAX_FILE_SIZE: "52428800"
+      OXIDE_MAX_DPI: "600"
+      OXIDE_MAX_PAGES: "200"
+      OXIDE_API_KEYS: ""
+      OXIDE_RATE_LIMIT_PER_MIN: "60"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

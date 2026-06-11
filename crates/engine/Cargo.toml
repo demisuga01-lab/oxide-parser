@@ -1,0 +1,25 @@
+[package]
+name = "oxide-engine"
+version = "0.1.0"
+edition = "2021"
+include = ["src/**/*", "fonts/*.ttf"]
+
+[dependencies]
+aes = "0.8"
+cbc = "0.1"
+flate2 = "1"
+jpeg-decoder = "0.3"
+jpeg-encoder = "0.6"
+log = "0.4"
+md-5 = "0.10"
+png = "0.17"
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+ttf-parser = "0.21"
+
+# webp = "0.3"   # MIT, wraps libwebp (BSD-3, requires C toolchain)
+#                # TODO(webp): enable once libwebp/cmake setup is verified.
+
+[dev-dependencies]
+env_logger = "0.11"
+zip = "2"
