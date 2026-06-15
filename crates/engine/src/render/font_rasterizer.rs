@@ -59,6 +59,17 @@ mod fallback_fonts {
         env!("CARGO_MANIFEST_DIR"),
         "/fonts/LiberationMono-BoldItalic.ttf"
     ));
+
+    /// DejaVu Sans — symbolic-font fallback for Symbol / ZapfDingbats /
+    /// Wingdings. Chosen because it has broad Unicode coverage:
+    /// the Greek block and Mathematical Operators (for Symbol), and the Dingbats
+    /// / Miscellaneous Symbols blocks (for ZapfDingbats and Wingdings, which are
+    /// mapped through Unicode). Licence: Bitstream Vera / DejaVu (Bitstream
+    /// portions © Bitstream Inc.; DejaVu changes are public domain) — a
+    /// permissive free licence, at least as permissive as the OFL used by the
+    /// bundled Liberation fonts. Source: http://dejavu.sourceforge.net/.
+    pub static DEJAVU_SANS: &[u8] =
+        include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/DejaVuSans.ttf"));
 }
 
 /// Map a PDF font name to a bundled fallback font byte slice.
@@ -78,8 +89,17 @@ pub fn get_fallback_font(font_name: &str) -> Option<&'static [u8]> {
         || name.ends_with("-i")
         || name.ends_with("-o");
 
-    if name.contains("symbol") || name.contains("dingbat") || name.contains("wingding") {
-        return None;
+    // Symbolic fonts (Symbol, ZapfDingbats, Wingdings, Webdings) have glyph sets
+    // that the Latin Liberation fonts can't represent. Route them to DejaVu Sans,
+    // which covers the Greek/math (Symbol) and Dingbats/Misc-Symbols (ZapfDingbats
+    // / Wingdings via Unicode) ranges. The char-code → glyph mapping uses the
+    // built-in Symbol/ZapfDingbats encodings (Appendix D) → Unicode → DejaVu cmap.
+    if name.contains("symbol")
+        || name.contains("dingbat")
+        || name.contains("wingding")
+        || name.contains("webding")
+    {
+        return Some(fallback_fonts::DEJAVU_SANS);
     }
 
     if name.contains("courier")
@@ -185,6 +205,86 @@ impl OutlineBuilder for GlyphToPath {
 
     fn close(&mut self) {
         self.path.close();
+    }
+}
+
+/// Bare-CFF (Compact Font Format) glyph support.
+///
+/// PDF embeds CFF/Type2 fonts via `/FontFile3` with `/Subtype /Type1C` (simple
+/// fonts) or `/CIDFontType0C` (CID-keyed, used by Type0 composite fonts, common
+/// in CJK). These are a *raw* `CFF ` table, NOT wrapped in an sfnt/OpenType
+/// container, so [`ttf_parser::Face::parse`] rejects them (it requires `head`,
+/// `hhea`, and `maxp` tables and an sfnt magic). `ttf_parser` does, however,
+/// expose a standalone [`ttf_parser::cff::Table`] parser for exactly this case.
+///
+/// These helpers are a *fallback*: callers try `Face::parse` first (handling
+/// TrueType and CFF-flavoured OpenType, which are sfnt-wrapped) and only reach
+/// for the bare-CFF path when that fails. This keeps the existing, working font
+/// paths completely untouched (minimal blast radius).
+///
+/// CFF charstring coordinates are already in a 1000-unit em by convention (the
+/// FontMatrix default is `0.001`), so we report a units-per-em of `1000` and
+/// scale advances accordingly, matching the glyf path's `/1000` convention.
+pub(crate) mod cff_support {
+    use super::{GlyphToPath, Path};
+    use ttf_parser::GlyphId;
+
+    /// Parse a bare CFF table, returning `None` if the bytes are not a usable
+    /// standalone CFF font (e.g. they are actually an sfnt — handled elsewhere).
+    fn parse(font_bytes: &[u8]) -> Option<ttf_parser::cff::Table<'_>> {
+        ttf_parser::cff::Table::parse(font_bytes)
+    }
+
+    /// True if the bytes parse as a bare CFF table.
+    pub(crate) fn is_bare_cff(font_bytes: &[u8]) -> bool {
+        parse(font_bytes).is_some()
+    }
+
+    /// The effective units-per-em for a bare CFF font. CFF charstrings use the
+    /// FontMatrix (default 0.001 → a 1000-unit em); we normalise everything to
+    /// 1000 so the renderer's existing `/1000` advance math applies unchanged.
+    pub(crate) fn units_per_em() -> f64 {
+        1000.0
+    }
+
+    /// Extract a glyph outline and advance width (in 1000-unit em) for a glyph
+    /// index. Returns `(None, advance)` when the glyph has no outline (e.g.
+    /// whitespace) and `None` entirely when the font is not bare CFF.
+    pub(crate) fn outline_by_gid(font_bytes: &[u8], gid: u16) -> Option<(Option<Path>, f64)> {
+        let table = parse(font_bytes)?;
+        let glyph_id = GlyphId(gid);
+        let advance = table
+            .glyph_width(glyph_id)
+            .map(f64::from)
+            // CID-keyed CFF returns None for glyph_width; the descendant font's
+            // /W array (handled by the caller) supplies the real advance, so a
+            // neutral 1000 here is only a fallback.
+            .unwrap_or(1000.0);
+        let mut builder = GlyphToPath::new();
+        match table.outline(glyph_id, &mut builder) {
+            Ok(_) => Some((Some(builder.into_path()), advance)),
+            Err(_) => Some((None, advance)),
+        }
+    }
+
+    /// Extract a glyph outline and advance for a Unicode scalar in a *simple*
+    /// (SID-keyed) CFF font, mapping the code point through the CFF encoding +
+    /// charset. Latin-1 code points only (CFF simple-font encoding is 8-bit).
+    /// Returns `None` when the font is not bare CFF.
+    pub(crate) fn outline_by_char(font_bytes: &[u8], ch: char) -> Option<(Option<Path>, f64)> {
+        let table = parse(font_bytes)?;
+        let code = u32::from(ch);
+        let glyph_id = if code <= 0xFF {
+            table.glyph_index(code as u8).unwrap_or(GlyphId(0))
+        } else {
+            GlyphId(0)
+        };
+        let advance = table.glyph_width(glyph_id).map(f64::from).unwrap_or(1000.0);
+        let mut builder = GlyphToPath::new();
+        match table.outline(glyph_id, &mut builder) {
+            Ok(_) => Some((Some(builder.into_path()), advance)),
+            Err(_) => Some((None, advance)),
+        }
     }
 }
 
@@ -449,9 +549,33 @@ mod tests {
     }
 
     #[test]
-    fn fallback_font_skips_symbolic_fonts() {
-        assert!(get_fallback_font("Symbol").is_none());
-        assert!(get_fallback_font("ZapfDingbats").is_none());
+    fn fallback_font_routes_symbolic_fonts_to_dejavu() {
+        // Symbolic fonts now get the DejaVu Sans fallback rather
+        // than rendering as nothing.
+        for name in ["Symbol", "ZapfDingbats", "Wingdings", "ABCDEF+Symbol"] {
+            let font = get_fallback_font(name)
+                .unwrap_or_else(|| panic!("{name} should get a symbolic fallback"));
+            assert!(font.len() > 100_000, "{name} -> DejaVu (large TTF)");
+        }
+        // Symbolic fallback is a different font than the Latin Liberation Sans.
+        let symbol = get_fallback_font("Symbol").unwrap();
+        let helv = get_fallback_font("Helvetica").unwrap();
+        assert_ne!(symbol.as_ptr(), helv.as_ptr());
+    }
+
+    #[test]
+    fn symbolic_fallback_font_has_greek_math_and_dingbat_glyphs() {
+        let font = get_fallback_font("Symbol").expect("symbol fallback");
+        let face = ttf_parser::Face::parse(font, 0).expect("DejaVu should parse");
+        // Greek alpha (Symbol), summation/integral (math), check mark + black
+        // circle (ZapfDingbats), right arrow (Wingdings-ish).
+        for ch in ['\u{03B1}', '\u{2211}', '\u{222B}', '\u{2713}', '\u{25CF}', '\u{2192}'] {
+            assert!(
+                face.glyph_index(ch).is_some(),
+                "DejaVu should cover U+{:04X}",
+                ch as u32
+            );
+        }
     }
 
     #[test]
@@ -537,5 +661,64 @@ mod tests {
             .flat_map(|y| (0..200i32).map(move |x| (x, y)))
             .any(|(x, y)| buf.get_pixel(x, y) != WHITE);
         assert!(!changed);
+    }
+
+    // ── Bare CFF (OpenType-CFF / Type1C) support ────────────────────────────
+    //
+    // `sample_type1c.cff` is a real `/FontFile3 /Subtype /Type1C` program
+    // extracted from the `freeculture.pdf` corpus fixture (a bare CFF table,
+    // header 01 00 04 02). It exercises the standalone-CFF fallback that the
+    // sfnt-based `Face::parse` cannot handle.
+    const SAMPLE_CFF: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample_type1c.cff"
+    ));
+
+    #[test]
+    fn bare_cff_is_not_accepted_by_sfnt_parser() {
+        // Confirms the gap this code closes: ttf_parser::Face::parse (sfnt-only)
+        // rejects a bare CFF table, so the CFF fallback is genuinely needed.
+        assert!(
+            ttf_parser::Face::parse(SAMPLE_CFF, 0).is_err(),
+            "bare CFF must NOT parse as an sfnt face"
+        );
+    }
+
+    #[test]
+    fn bare_cff_is_detected() {
+        assert!(cff_support::is_bare_cff(SAMPLE_CFF));
+        // A non-CFF blob is not misdetected.
+        assert!(!cff_support::is_bare_cff(b"not a font at all"));
+    }
+
+    #[test]
+    fn bare_cff_extracts_a_glyph_outline_by_gid() {
+        // Glyph 0 is .notdef; scan for the first glyph index that yields a
+        // non-empty outline, proving the CFF charstring interpreter runs.
+        let mut found_outline = false;
+        for gid in 0..64u16 {
+            if let Some((Some(path), advance)) = cff_support::outline_by_gid(SAMPLE_CFF, gid) {
+                if !path.segments.is_empty() {
+                    assert!(advance >= 0.0, "advance should be non-negative");
+                    found_outline = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            found_outline,
+            "at least one CFF glyph should produce outline segments"
+        );
+    }
+
+    #[test]
+    fn bare_cff_reports_1000_unit_em() {
+        assert_eq!(cff_support::units_per_em(), 1000.0);
+    }
+
+    #[test]
+    fn bare_cff_helpers_return_none_for_non_cff() {
+        assert!(cff_support::outline_by_gid(b"garbage", 1).is_none());
+        assert!(cff_support::outline_by_char(b"garbage", 'A').is_none());
     }
 }

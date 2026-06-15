@@ -155,36 +155,183 @@ impl BlendMode {
         }
     }
 
-    /// Apply this blend mode to one normalized color channel.
-    ///
-    /// Unsupported extended PDF blend modes currently fall back to Normal.
+    /// True for *separable* blend modes (spec Table 136 / §11.3.5.2), whose
+    /// result is computed channel-by-channel via [`Self::blend_channel`]. The
+    /// four non-separable modes (Hue/Saturation/Color/Luminosity) instead operate
+    /// on the whole RGB triple via [`Self::blend_rgb`].
+    #[inline]
+    pub fn is_separable(self) -> bool {
+        !matches!(
+            self,
+            BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity
+        )
+    }
+
+    /// Apply a *separable* blend mode to one normalized colour channel
+    /// (spec Table 137). For non-separable modes this returns `src` unchanged —
+    /// callers must use [`Self::blend_rgb`] for those (gated by
+    /// [`Self::is_separable`]).
     #[inline]
     pub fn blend_channel(self, src: f32, dst: f32) -> f32 {
         match self {
             BlendMode::Normal => src,
             BlendMode::Multiply => src * dst,
             BlendMode::Screen => src + dst - src * dst,
-            BlendMode::Overlay => {
-                if dst < 0.5 {
-                    2.0 * src * dst
-                } else {
-                    1.0 - 2.0 * (1.0 - src) * (1.0 - dst)
-                }
-            }
+            BlendMode::Overlay => Self::hard_light_channel(dst, src), // Overlay(s,d)=HardLight(d,s)
             BlendMode::Darken => src.min(dst),
             BlendMode::Lighten => src.max(dst),
+            BlendMode::ColorDodge => {
+                // Spec §11.3.5.2: backdrop 0 -> 0; src 1 -> 1; else min(1, d/(1-s)).
+                if dst <= 0.0 {
+                    0.0
+                } else if src >= 1.0 {
+                    1.0
+                } else {
+                    (dst / (1.0 - src)).min(1.0)
+                }
+            }
+            BlendMode::ColorBurn => {
+                // backdrop 1 -> 1; src 0 -> 0; else 1 - min(1, (1-d)/s).
+                if dst >= 1.0 {
+                    1.0
+                } else if src <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - dst) / src).min(1.0)
+                }
+            }
+            BlendMode::HardLight => Self::hard_light_channel(src, dst),
+            BlendMode::SoftLight => Self::soft_light_channel(src, dst),
             BlendMode::Difference => (dst - src).abs(),
             BlendMode::Exclusion => src + dst - 2.0 * src * dst,
-            BlendMode::ColorDodge
-            | BlendMode::ColorBurn
-            | BlendMode::HardLight
-            | BlendMode::SoftLight
-            | BlendMode::Hue
+            // Non-separable: handled by blend_rgb; per-channel fallback = src.
+            BlendMode::Hue
             | BlendMode::Saturation
             | BlendMode::Color
             | BlendMode::Luminosity => src,
         }
     }
+
+    /// HardLight per-channel formula (spec Table 137). Overlay is the same with
+    /// the operands swapped.
+    #[inline]
+    fn hard_light_channel(src: f32, dst: f32) -> f32 {
+        if src <= 0.5 {
+            2.0 * src * dst
+        } else {
+            1.0 - 2.0 * (1.0 - src) * (1.0 - dst)
+        }
+    }
+
+    /// SoftLight per-channel formula (spec Table 137).
+    #[inline]
+    fn soft_light_channel(src: f32, dst: f32) -> f32 {
+        if src <= 0.5 {
+            dst - (1.0 - 2.0 * src) * dst * (1.0 - dst)
+        } else {
+            let d = if dst <= 0.25 {
+                ((16.0 * dst - 12.0) * dst + 4.0) * dst
+            } else {
+                dst.sqrt()
+            };
+            dst + (2.0 * src - 1.0) * (d - dst)
+        }
+    }
+
+    /// Apply a *non-separable* blend mode (Hue/Saturation/Color/Luminosity,
+    /// spec Table 138 + §11.3.5.3) to the full RGB triples. For separable modes
+    /// this applies [`Self::blend_channel`] per channel, so it is a correct
+    /// general entry point for any mode.
+    #[inline]
+    pub fn blend_rgb(self, src: [f32; 3], dst: [f32; 3]) -> [f32; 3] {
+        match self {
+            BlendMode::Hue => set_lum(set_sat(src, sat(dst)), lum(dst)),
+            BlendMode::Saturation => set_lum(set_sat(dst, sat(src)), lum(dst)),
+            BlendMode::Color => set_lum(src, lum(dst)),
+            BlendMode::Luminosity => set_lum(dst, lum(src)),
+            _ => [
+                self.blend_channel(src[0], dst[0]),
+                self.blend_channel(src[1], dst[1]),
+                self.blend_channel(src[2], dst[2]),
+            ],
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Non-separable blend-mode helpers (spec §11.3.5.3)
+// ---------------------------------------------------------------------------
+
+/// Luminosity of an RGB colour using the PDF-spec weights (Lum(C), §11.3.5.3).
+/// These are the spec's exact coefficients (0.30 / 0.59 / 0.11), which differ
+/// slightly from the Rec.601 weights (0.299 / 0.587 / 0.114) used elsewhere for
+/// soft-mask luminosity — the spec mandates these specific values here.
+#[inline]
+fn lum(c: [f32; 3]) -> f32 {
+    0.30 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+/// Saturation of an RGB colour (Sat(C), §11.3.5.3): max component − min.
+#[inline]
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+/// Clip a colour into gamut while preserving its luminosity (ClipColor(C)).
+#[inline]
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut out = c;
+    if n < 0.0 {
+        let denom = l - n;
+        if denom.abs() > f32::EPSILON {
+            for v in &mut out {
+                *v = l + (*v - l) * l / denom;
+            }
+        } else {
+            out = [l, l, l];
+        }
+    }
+    if x > 1.0 {
+        let denom = x - l;
+        if denom.abs() > f32::EPSILON {
+            for v in &mut out {
+                *v = l + (*v - l) * (1.0 - l) / denom;
+            }
+        } else {
+            out = [l, l, l];
+        }
+    }
+    out
+}
+
+/// Set the luminosity of `c` to `l` (SetLum(C, l), §11.3.5.3), clipping to gamut.
+#[inline]
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color([c[0] + d, c[1] + d, c[2] + d])
+}
+
+/// Set the saturation of `c` to `s` (SetSat(C, s), §11.3.5.3) by mapping the
+/// mid/max components relative to the min, preserving relative ordering.
+#[inline]
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    // Identify indices of min/mid/max by value (stable ordering by index on ties).
+    let mut idx = [0usize, 1, 2];
+    idx.sort_by(|&a, &b| c[a].partial_cmp(&c[b]).unwrap_or(std::cmp::Ordering::Equal));
+    let (i_min, i_mid, i_max) = (idx[0], idx[1], idx[2]);
+    let mut out = [0.0f32; 3];
+    if c[i_max] > c[i_min] {
+        out[i_mid] = (c[i_mid] - c[i_min]) * s / (c[i_max] - c[i_min]);
+        out[i_max] = s;
+    } else {
+        out[i_mid] = 0.0;
+        out[i_max] = 0.0;
+    }
+    out[i_min] = 0.0;
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -870,5 +1017,172 @@ mod tests {
         let r2 = concat_matrix(&translate, &t2);
         assert_eq!(r2[4], 15.0);
         assert_eq!(r2[5], 25.0);
+    }
+
+    // ---- Blend modes ---------------------------------------------------
+
+    fn approx(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-3
+    }
+
+    #[test]
+    fn blend_from_name_parses_all_extended_modes() {
+        assert_eq!(BlendMode::from_name("ColorDodge"), BlendMode::ColorDodge);
+        assert_eq!(BlendMode::from_name("ColorBurn"), BlendMode::ColorBurn);
+        assert_eq!(BlendMode::from_name("HardLight"), BlendMode::HardLight);
+        assert_eq!(BlendMode::from_name("SoftLight"), BlendMode::SoftLight);
+        assert_eq!(BlendMode::from_name("Difference"), BlendMode::Difference);
+        assert_eq!(BlendMode::from_name("Exclusion"), BlendMode::Exclusion);
+        assert_eq!(BlendMode::from_name("Hue"), BlendMode::Hue);
+        assert_eq!(BlendMode::from_name("Saturation"), BlendMode::Saturation);
+        assert_eq!(BlendMode::from_name("Color"), BlendMode::Color);
+        assert_eq!(BlendMode::from_name("Luminosity"), BlendMode::Luminosity);
+    }
+
+    #[test]
+    fn separable_classification() {
+        for m in [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::ColorDodge,
+            BlendMode::HardLight,
+            BlendMode::Difference,
+        ] {
+            assert!(m.is_separable(), "{m:?} should be separable");
+        }
+        for m in [
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ] {
+            assert!(!m.is_separable(), "{m:?} should be non-separable");
+        }
+    }
+
+    #[test]
+    fn color_dodge_edge_and_midrange() {
+        // backdrop 0 -> 0 regardless of source.
+        assert!(approx(BlendMode::ColorDodge.blend_channel(0.5, 0.0), 0.0));
+        // source 1 -> 1 (clamps) for any non-zero backdrop.
+        assert!(approx(BlendMode::ColorDodge.blend_channel(1.0, 0.4), 1.0));
+        // mid: d/(1-s) = 0.4/(1-0.5) = 0.8.
+        assert!(approx(BlendMode::ColorDodge.blend_channel(0.5, 0.4), 0.8));
+        // saturates to 1.
+        assert!(approx(BlendMode::ColorDodge.blend_channel(0.6, 0.5), 1.0));
+    }
+
+    #[test]
+    fn color_burn_edge_and_midrange() {
+        // backdrop 1 -> 1.
+        assert!(approx(BlendMode::ColorBurn.blend_channel(0.5, 1.0), 1.0));
+        // source 0 -> 0.
+        assert!(approx(BlendMode::ColorBurn.blend_channel(0.0, 0.5), 0.0));
+        // mid: 1 - (1-d)/s = 1 - (1-0.6)/0.5 = 1 - 0.8 = 0.2.
+        assert!(approx(BlendMode::ColorBurn.blend_channel(0.5, 0.6), 0.2));
+    }
+
+    #[test]
+    fn hard_light_matches_overlay_swapped() {
+        // HardLight(s,d) == Overlay(d,s).
+        for &(s, d) in &[(0.3, 0.7), (0.8, 0.2), (0.5, 0.5), (0.1, 0.9)] {
+            let hl = BlendMode::HardLight.blend_channel(s, d);
+            let ov = BlendMode::Overlay.blend_channel(d, s);
+            assert!(approx(hl, ov), "HardLight({s},{d})={hl} Overlay({d},{s})={ov}");
+        }
+        // src <= 0.5: 2*s*d. src 0.25, d 0.6 -> 0.3.
+        assert!(approx(BlendMode::HardLight.blend_channel(0.25, 0.6), 0.3));
+        // src > 0.5: 1 - 2(1-s)(1-d). src 0.75, d 0.6 -> 1-2*0.25*0.4=0.8.
+        assert!(approx(BlendMode::HardLight.blend_channel(0.75, 0.6), 0.8));
+    }
+
+    #[test]
+    fn soft_light_neutral_at_half() {
+        // src = 0.5 leaves the backdrop unchanged.
+        for &d in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            assert!(
+                approx(BlendMode::SoftLight.blend_channel(0.5, d), d),
+                "SoftLight(0.5,{d}) should equal {d}"
+            );
+        }
+        // src < 0.5 darkens, src > 0.5 lightens a mid backdrop.
+        assert!(BlendMode::SoftLight.blend_channel(0.2, 0.5) < 0.5);
+        assert!(BlendMode::SoftLight.blend_channel(0.8, 0.5) > 0.5);
+    }
+
+    #[test]
+    fn difference_and_exclusion_values() {
+        assert!(approx(BlendMode::Difference.blend_channel(0.2, 0.7), 0.5));
+        assert!(approx(BlendMode::Difference.blend_channel(0.7, 0.2), 0.5));
+        // Exclusion: s + d - 2sd. 0.5,0.5 -> 0.5.
+        assert!(approx(BlendMode::Exclusion.blend_channel(0.5, 0.5), 0.5));
+        // black source is a no-op (s=0 -> d).
+        assert!(approx(BlendMode::Exclusion.blend_channel(0.0, 0.42), 0.42));
+    }
+
+    #[test]
+    fn nonsep_helpers_lum_sat() {
+        // Spec weights: Lum(red)=0.30, Lum(green)=0.59, Lum(blue)=0.11.
+        assert!(approx(lum([1.0, 0.0, 0.0]), 0.30));
+        assert!(approx(lum([0.0, 1.0, 0.0]), 0.59));
+        assert!(approx(lum([0.0, 0.0, 1.0]), 0.11));
+        // Sat = max - min.
+        assert!(approx(sat([0.2, 0.8, 0.5]), 0.6));
+        assert!(approx(sat([0.4, 0.4, 0.4]), 0.0));
+    }
+
+    #[test]
+    fn nonsep_set_lum_preserves_chroma_shifts_luma() {
+        // SetLum increases each channel by (l - Lum(c)) then clips.
+        let c = [0.2, 0.4, 0.6];
+        let out = set_lum(c, 0.8);
+        assert!(approx(lum(out), 0.8), "lum should be set to 0.8: {out:?}");
+    }
+
+    #[test]
+    fn nonsep_set_sat_sets_target_saturation() {
+        let out = set_sat([0.2, 0.5, 0.9], 0.5);
+        assert!(approx(sat(out), 0.5), "sat should be 0.5: {out:?}");
+        // Min channel goes to 0.
+        let min = out[0].min(out[1]).min(out[2]);
+        assert!(approx(min, 0.0));
+    }
+
+    #[test]
+    fn nonsep_color_blend_takes_src_chroma_dst_luma() {
+        // Color: result has source hue+sat but backdrop luminosity.
+        let src = [1.0, 0.0, 0.0]; // red
+        let dst = [0.5, 0.5, 0.5]; // gray, lum 0.5
+        let out = BlendMode::Color.blend_rgb(src, dst);
+        assert!(approx(lum(out), lum(dst)), "Color keeps dst luma: {out:?}");
+    }
+
+    #[test]
+    fn nonsep_luminosity_blend_takes_src_luma_dst_chroma() {
+        let src = [0.9, 0.9, 0.9]; // bright, lum 0.9
+        let dst = [0.8, 0.1, 0.1]; // reddish
+        let out = BlendMode::Luminosity.blend_rgb(src, dst);
+        assert!(approx(lum(out), lum(src)), "Luminosity takes src luma: {out:?}");
+    }
+
+    #[test]
+    fn nonsep_hue_and_saturation_keep_dst_luma() {
+        let src = [0.0, 0.0, 1.0];
+        let dst = [0.6, 0.4, 0.2];
+        let hue = BlendMode::Hue.blend_rgb(src, dst);
+        let satm = BlendMode::Saturation.blend_rgb(src, dst);
+        assert!(approx(lum(hue), lum(dst)), "Hue keeps dst luma: {hue:?}");
+        assert!(approx(lum(satm), lum(dst)), "Saturation keeps dst luma: {satm:?}");
+    }
+
+    #[test]
+    fn blend_rgb_separable_matches_per_channel() {
+        // For a separable mode, blend_rgb must equal per-channel blend_channel.
+        let src = [0.3, 0.6, 0.9];
+        let dst = [0.5, 0.5, 0.5];
+        let out = BlendMode::Multiply.blend_rgb(src, dst);
+        for i in 0..3 {
+            assert!(approx(out[i], BlendMode::Multiply.blend_channel(src[i], dst[i])));
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! PDF shading and function evaluation (Mega 20).
+//! PDF shading and function evaluation.
 //!
 //! Implements the subset of PDF shading needed for the common cases:
 //!
@@ -21,42 +21,40 @@ use crate::reader::PdfReader;
 use crate::render::buffer::{PixelBuffer, PixelColor};
 use crate::render::transform::{Transform2D, Viewport};
 
+/// A minimal valid PDF used by render tests that need a `PdfReader` but never
+/// resolve indirect objects. Crate-visible so sibling render modules can reuse
+/// it for function/shading tests.
+#[cfg(test)]
+pub(crate) fn tests_minimal_pdf() -> Vec<u8> {
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut off = vec![0usize; 4];
+    off[1] = pdf.len();
+    pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    off[2] = pdf.len();
+    pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    off[3] = pdf.len();
+    pdf.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>\nendobj\n");
+    let xref = pdf.len();
+    pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+    for i in 1..=3 {
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off[i]).as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    pdf
+}
+
 // ---------------------------------------------------------------------------
 // PDF function evaluation
 // ---------------------------------------------------------------------------
 
-/// Evaluate a PDF function object at input `t`, returning its output
-/// components. Returns an empty `Vec` for unsupported function types or
-/// malformed input (never panics).
+/// Evaluate a single-input PDF function object at input `t`, returning its
+/// output components. Delegates to the multi-input dispatcher in
+/// [`crate::render::function`], which supports Function Types 0, 2, 3, and 4.
+/// Returns an empty `Vec` for unsupported types or malformed input.
 pub(crate) fn eval_function(func_obj: &PdfObject, t: f64, reader: &PdfReader) -> Vec<f64> {
-    let dict = match resolve_to_dict(func_obj, reader) {
-        Some(d) => d,
-        None => return Vec::new(),
-    };
-    match dict.get_integer("FunctionType").unwrap_or(-1) {
-        2 => eval_type2(&dict, t),
-        3 => eval_type3(&dict, t, reader),
-        other => {
-            log::debug!("PDF Function Type {other} not supported");
-            Vec::new()
-        }
-    }
-}
-
-/// Resolve a function reference / dict / stream to its dictionary.
-fn resolve_to_dict(obj: &PdfObject, reader: &PdfReader) -> Option<PdfDictionary> {
-    match obj {
-        PdfObject::Dictionary(d) => Some(d.clone()),
-        PdfObject::Stream { dict, .. } => Some(dict.clone()),
-        PdfObject::Reference { number, generation } => {
-            match reader.get_object(*number, *generation).ok()? {
-                PdfObject::Dictionary(d) => Some(d),
-                PdfObject::Stream { dict, .. } => Some(dict),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    crate::render::function::eval_function_n(func_obj, &[t], reader)
 }
 
 /// Type 2 (exponential interpolation): `f(t) = C0 + t^N * (C1 - C0)`.
@@ -215,17 +213,85 @@ pub struct ShadingRenderer;
 impl ShadingRenderer {
     /// Paint a shading dictionary into `buf`, bounded by the buffer's current
     /// clip mask. `ctm` is the current user-space → media-box transform.
+    /// `mesh_data` is the shading's decoded stream body, required for mesh
+    /// shadings (Types 4–7 store vertex/patch data in the stream); it is `None`
+    /// for dictionary-only shadings (Types 1–3).
     pub fn paint(
         shading_dict: &PdfDictionary,
         ctm: &Transform2D,
         viewport: &Viewport,
         buf: &mut PixelBuffer,
         reader: &PdfReader,
+        mesh_data: Option<&[u8]>,
     ) {
         match shading_dict.get_integer("ShadingType").unwrap_or(0) {
+            1 => Self::paint_function_based(shading_dict, ctm, viewport, buf, reader),
             2 => Self::paint_axial(shading_dict, ctm, viewport, buf, reader),
             3 => Self::paint_radial(shading_dict, ctm, viewport, buf, reader),
+            4 | 5 => Self::paint_gouraud_mesh(shading_dict, ctm, viewport, buf, reader, mesh_data),
+            6 | 7 => Self::paint_patch_mesh(shading_dict, ctm, viewport, buf, reader, mesh_data),
             other => log::debug!("ShadingRenderer: ShadingType {other} not supported"),
+        }
+    }
+
+    /// ShadingType 1 (function-based): color at each point (x, y) within /Domain
+    /// is the result of a 2-input function, optionally pre-transformed by the
+    /// shading's /Matrix. We iterate device pixels, map back to domain space, and
+    /// evaluate.
+    fn paint_function_based(
+        dict: &PdfDictionary,
+        ctm: &Transform2D,
+        viewport: &Viewport,
+        buf: &mut PixelBuffer,
+        reader: &PdfReader,
+    ) {
+        let func_obj = match dict.get("Function") {
+            Some(f) => f.clone(),
+            None => {
+                log::warn!("function-based shading: missing /Function");
+                return;
+            }
+        };
+        // Domain [x0 x1 y0 y1] (defaults to the unit square).
+        let domain = get_float_array(dict, "Domain").unwrap_or_else(|| vec![0.0, 1.0, 0.0, 1.0]);
+        let (dx0, dx1) = (
+            domain.first().copied().unwrap_or(0.0),
+            domain.get(1).copied().unwrap_or(1.0),
+        );
+        let (dy0, dy1) = (
+            domain.get(2).copied().unwrap_or(0.0),
+            domain.get(3).copied().unwrap_or(1.0),
+        );
+        // /Matrix maps domain space → the shading's target user space.
+        let shading_matrix = match get_float_array(dict, "Matrix") {
+            Some(m) if m.len() >= 6 => Transform2D::from([m[0], m[1], m[2], m[3], m[4], m[5]]),
+            _ => Transform2D::identity(),
+        };
+        let color_space = shading_color_space_name(dict);
+
+        // device pixel → user space → domain space.
+        let pixel_to_user = Self::pixel_to_user(ctm, viewport);
+        let user_to_domain = shading_matrix.inverse().unwrap_or_else(Transform2D::identity);
+
+        let w = buf.width as i32;
+        let h = buf.height as i32;
+        for py in 0..h {
+            for px in 0..w {
+                if !buf.clip_allows(px, py) {
+                    continue;
+                }
+                let (ux, uy) = pixel_to_user.transform_point(px as f64 + 0.5, py as f64 + 0.5);
+                let (mx, my) = user_to_domain.transform_point(ux, uy);
+                if mx < dx0.min(dx1) || mx > dx0.max(dx1) || my < dy0.min(dy1) || my > dy0.max(dy1) {
+                    continue;
+                }
+                let comps = crate::render::function::eval_function_n(&func_obj, &[mx, my], reader);
+                if comps.is_empty() {
+                    continue;
+                }
+                let color = components_to_pixel(&comps, &color_space);
+                buf.blend_pixel(px, py, color, 1.0);
+            }
         }
     }
 
@@ -433,6 +499,628 @@ impl ShadingRenderer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mesh shadings (Types 4-7): shared vertex model + Gouraud triangle rasterizer
+// ---------------------------------------------------------------------------
+
+/// A mesh vertex in device space with an associated RGBA color.
+#[derive(Debug, Clone, Copy)]
+struct MeshVertex {
+    /// Device-space x, y (already mapped through CTM + viewport).
+    dx: f64,
+    dy: f64,
+    color: [f64; 4],
+}
+
+/// Decode parameters shared by the mesh vertex stream readers.
+struct MeshDecode {
+    bits_per_coord: usize,
+    bits_per_comp: usize,
+    bits_per_flag: usize,
+    /// Decode array: [xmin xmax ymin ymax c1min c1max ...].
+    decode: Vec<f64>,
+    /// Number of color components per vertex when colors are given directly
+    /// (no /Function); 1 when a /Function maps a single parametric value.
+    n_color: usize,
+    has_function: bool,
+}
+
+impl MeshDecode {
+    fn from_dict(dict: &PdfDictionary, color_space: &str) -> Option<Self> {
+        let bits_per_coord = dict.get_integer("BitsPerCoordinate")? as usize;
+        let bits_per_comp = dict.get_integer("BitsPerComponent")? as usize;
+        let bits_per_flag = dict.get_integer("BitsPerFlag").unwrap_or(8) as usize;
+        let decode = get_float_array(dict, "Decode")?;
+        let has_function = dict.get("Function").is_some();
+        let n_color = if has_function {
+            1
+        } else {
+            color_space_component_count(color_space)
+        };
+        Some(Self {
+            bits_per_coord,
+            bits_per_comp,
+            bits_per_flag,
+            decode,
+            n_color,
+            has_function,
+        })
+    }
+
+    /// Read one coordinate pair, mapping through Decode + CTM/viewport to device
+    /// space, plus the raw color components (parametric or direct).
+    fn read_vertex(
+        &self,
+        br: &mut crate::render::function::BitReader,
+        to_device: &Transform2D,
+        func_obj: Option<&PdfObject>,
+        color_space: &str,
+        reader: &PdfReader,
+    ) -> Option<MeshVertex> {
+        let xr = br.read(self.bits_per_coord)? as f64;
+        let yr = br.read(self.bits_per_coord)? as f64;
+        let xmax_raw = crate::render::function::max_value(self.bits_per_coord);
+        let x = decode_value(xr, xmax_raw, self.decode.first().copied().unwrap_or(0.0),
+            self.decode.get(1).copied().unwrap_or(1.0));
+        let y = decode_value(yr, xmax_raw, self.decode.get(2).copied().unwrap_or(0.0),
+            self.decode.get(3).copied().unwrap_or(1.0));
+        let (dx, dy) = to_device.transform_point(x, y);
+
+        let cmax_raw = crate::render::function::max_value(self.bits_per_comp);
+        let mut comps = Vec::with_capacity(self.n_color);
+        for k in 0..self.n_color {
+            let raw = br.read(self.bits_per_comp)? as f64;
+            let dlo = self.decode.get(4 + 2 * k).copied().unwrap_or(0.0);
+            let dhi = self.decode.get(5 + 2 * k).copied().unwrap_or(1.0);
+            comps.push(decode_value(raw, cmax_raw, dlo, dhi));
+        }
+        let color = resolve_vertex_color(&comps, self.has_function, func_obj, color_space, reader);
+        Some(MeshVertex { dx, dy, color })
+    }
+}
+
+/// Map a raw integer sample in [0, max] onto [lo, hi].
+fn decode_value(raw: f64, max: f64, lo: f64, hi: f64) -> f64 {
+    if max <= 0.0 {
+        lo
+    } else {
+        lo + (raw / max) * (hi - lo)
+    }
+}
+
+fn color_space_component_count(name: &str) -> usize {
+    match name {
+        "DeviceGray" | "CalGray" | "G" => 1,
+        "DeviceCMYK" | "CMYK" => 4,
+        _ => 3,
+    }
+}
+
+/// Turn a vertex's raw color components into an RGBA color. With a /Function the
+/// single parametric value is mapped through it first.
+fn resolve_vertex_color(
+    comps: &[f64],
+    has_function: bool,
+    func_obj: Option<&PdfObject>,
+    color_space: &str,
+    reader: &PdfReader,
+) -> [f64; 4] {
+    let resolved = if has_function {
+        match func_obj {
+            Some(f) => {
+                let t = comps.first().copied().unwrap_or(0.0);
+                crate::render::function::eval_function_n(f, &[t], reader)
+            }
+            None => comps.to_vec(),
+        }
+    } else {
+        comps.to_vec()
+    };
+    let px = components_to_pixel(&resolved, color_space);
+    [
+        px[0] as f64 / 255.0,
+        px[1] as f64 / 255.0,
+        px[2] as f64 / 255.0,
+        1.0,
+    ]
+}
+
+impl ShadingRenderer {
+    /// ShadingType 4 (free-form) and 5 (lattice-form) Gouraud triangle meshes.
+    fn paint_gouraud_mesh(
+        dict: &PdfDictionary,
+        ctm: &Transform2D,
+        viewport: &Viewport,
+        buf: &mut PixelBuffer,
+        reader: &PdfReader,
+        mesh_data: Option<&[u8]>,
+    ) {
+        let shading_type = dict.get_integer("ShadingType").unwrap_or(4);
+        let color_space = shading_color_space_name(dict);
+        let Some(dec) = MeshDecode::from_dict(dict, &color_space) else {
+            log::warn!("mesh shading: missing BitsPerCoordinate/BitsPerComponent/Decode");
+            return;
+        };
+        let data = match mesh_data {
+            Some(d) => d.to_vec(),
+            None => {
+                log::warn!("mesh shading: vertex stream not available");
+                return;
+            }
+        };
+        let func_obj = dict.get("Function").cloned();
+        let to_device = ctm.concat(&viewport.to_transform());
+        let mut br = crate::render::function::BitReader::new(&data);
+
+        if shading_type == 5 {
+            // Lattice-form: a grid of /VerticesPerRow columns; each 2x2 cell of
+            // adjacent rows makes two triangles. No flags, no colors-as-flags.
+            let per_row = dict.get_integer("VerticesPerRow").unwrap_or(0).max(0) as usize;
+            if per_row < 2 {
+                log::warn!("lattice mesh: VerticesPerRow < 2");
+                return;
+            }
+            let mut prev_row: Vec<MeshVertex> = Vec::new();
+            loop {
+                // Read one row.
+                let mut row = Vec::with_capacity(per_row);
+                let mut complete = true;
+                for _ in 0..per_row {
+                    match dec.read_vertex(&mut br, &to_device, func_obj.as_ref(), &color_space, reader)
+                    {
+                        Some(v) => row.push(v),
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if !complete || row.len() < per_row {
+                    break;
+                }
+                if !prev_row.is_empty() {
+                    for c in 0..per_row - 1 {
+                        // Two triangles per cell.
+                        fill_gouraud_triangle(buf, prev_row[c], prev_row[c + 1], row[c]);
+                        fill_gouraud_triangle(buf, prev_row[c + 1], row[c + 1], row[c]);
+                    }
+                }
+                prev_row = row;
+            }
+            return;
+        }
+
+        // Free-form (Type 4): each vertex prefixed by a flag byte.
+        // flag 0 starts a new triangle (needs 3 consecutive flag-0 vertices);
+        // flag 1 reuses (vb, vc) -> (vc, new); flag 2 reuses (va, vc) -> (vc,new).
+        let mut va: Option<MeshVertex> = None;
+        let mut vb: Option<MeshVertex> = None;
+        let mut vc: Option<MeshVertex> = None;
+        while br.bits_remaining() >= dec.bits_per_flag + 2 * dec.bits_per_coord {
+            let flag = match br.read(dec.bits_per_flag) {
+                Some(f) => f,
+                None => break,
+            };
+            let v = match dec.read_vertex(&mut br, &to_device, func_obj.as_ref(), &color_space, reader)
+            {
+                Some(v) => v,
+                None => break,
+            };
+            br.align_to_byte();
+            match flag {
+                0 => {
+                    // Shift in as the next of a fresh triangle.
+                    if va.is_none() {
+                        va = Some(v);
+                    } else if vb.is_none() {
+                        vb = Some(v);
+                    } else {
+                        vc = Some(v);
+                        if let (Some(a), Some(b), Some(c)) = (va, vb, vc) {
+                            fill_gouraud_triangle(buf, a, b, c);
+                        }
+                    }
+                }
+                1 => {
+                    // (vb, vc, v): reuse the last edge (b, c).
+                    if let (Some(b), Some(c)) = (vb, vc) {
+                        va = Some(b);
+                        vb = Some(c);
+                        vc = Some(v);
+                        fill_gouraud_triangle(buf, b, c, v);
+                    }
+                }
+                2 => {
+                    // (va, vc, v): reuse edge (a, c).
+                    if let (Some(a), Some(c)) = (va, vc) {
+                        vb = Some(c);
+                        vc = Some(v);
+                        fill_gouraud_triangle(buf, a, c, v);
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    /// ShadingType 6 (Coons) and 7 (tensor-product) patch meshes. Each patch is
+    /// subdivided into a fixed grid of Gouraud quads using bilinear corner-color
+    /// interpolation and bicubic Bezier surface positions.
+    fn paint_patch_mesh(
+        dict: &PdfDictionary,
+        ctm: &Transform2D,
+        viewport: &Viewport,
+        buf: &mut PixelBuffer,
+        reader: &PdfReader,
+        mesh_data: Option<&[u8]>,
+    ) {
+        let shading_type = dict.get_integer("ShadingType").unwrap_or(6);
+        let n_points_new = if shading_type == 7 { 16 } else { 12 };
+        let color_space = shading_color_space_name(dict);
+        let Some(dec) = MeshDecode::from_dict(dict, &color_space) else {
+            log::warn!("patch mesh: missing BitsPerCoordinate/BitsPerComponent/Decode");
+            return;
+        };
+        let data = match mesh_data {
+            Some(d) => d.to_vec(),
+            None => return,
+        };
+        let func_obj = dict.get("Function").cloned();
+        let to_device = ctm.concat(&viewport.to_transform());
+        let mut br = crate::render::function::BitReader::new(&data);
+
+        let coord_max = crate::render::function::max_value(dec.bits_per_coord);
+        let comp_max = crate::render::function::max_value(dec.bits_per_comp);
+
+        // Previous patch's control points (in patch/user space, pre-device) and
+        // corner colors, for edge sharing (flags 1/2/3).
+        let mut prev_pts: Vec<(f64, f64)> = Vec::new();
+        let mut prev_cols: Vec<[f64; 4]> = Vec::new();
+
+        loop {
+            if br.bits_remaining() < dec.bits_per_flag {
+                break;
+            }
+            let flag = match br.read(dec.bits_per_flag) {
+                Some(f) => f,
+                None => break,
+            };
+            let new_pts_count = if flag == 0 { n_points_new } else { n_points_new - 4 };
+            let new_cols_count = if flag == 0 { 4 } else { 2 };
+
+            // Read new control points (user space).
+            let mut new_pts = Vec::with_capacity(new_pts_count);
+            let mut ok = true;
+            for _ in 0..new_pts_count {
+                let (Some(xr), Some(yr)) =
+                    (br.read(dec.bits_per_coord), br.read(dec.bits_per_coord))
+                else {
+                    ok = false;
+                    break;
+                };
+                let x = decode_value(xr as f64, coord_max,
+                    dec.decode.first().copied().unwrap_or(0.0),
+                    dec.decode.get(1).copied().unwrap_or(1.0));
+                let y = decode_value(yr as f64, coord_max,
+                    dec.decode.get(2).copied().unwrap_or(0.0),
+                    dec.decode.get(3).copied().unwrap_or(1.0));
+                new_pts.push((x, y));
+            }
+            if !ok {
+                break;
+            }
+            // Read new corner colors.
+            let mut new_cols = Vec::with_capacity(new_cols_count);
+            for _ in 0..new_cols_count {
+                let mut comps = Vec::with_capacity(dec.n_color);
+                for k in 0..dec.n_color {
+                    let Some(raw) = br.read(dec.bits_per_comp) else {
+                        ok = false;
+                        break;
+                    };
+                    let dlo = dec.decode.get(4 + 2 * k).copied().unwrap_or(0.0);
+                    let dhi = dec.decode.get(5 + 2 * k).copied().unwrap_or(1.0);
+                    comps.push(decode_value(raw as f64, comp_max, dlo, dhi));
+                }
+                if !ok {
+                    break;
+                }
+                new_cols.push(resolve_vertex_color(
+                    &comps,
+                    dec.has_function,
+                    func_obj.as_ref(),
+                    &color_space,
+                    reader,
+                ));
+            }
+            if !ok {
+                break;
+            }
+            br.align_to_byte();
+
+            // Assemble the full 12 (Coons) control points and 4 corner colors,
+            // sharing an edge from the previous patch when flag != 0.
+            let (pts12, cols4) = match assemble_patch(
+                flag,
+                &new_pts,
+                &new_cols,
+                &prev_pts,
+                &prev_cols,
+                shading_type,
+            ) {
+                Some(v) => v,
+                None => break,
+            };
+
+            // Render the patch by fixed-grid subdivision.
+            render_coons_patch(buf, &pts12, &cols4, &to_device);
+
+            prev_pts = pts12;
+            prev_cols = cols4;
+        }
+    }
+}
+
+/// A point in patch/user space (pre-device).
+type PatchPoint = (f64, f64);
+/// A patch's resolved control points and 4 corner colors.
+type PatchData = (Vec<PatchPoint>, Vec<[f64; 4]>);
+
+/// Assemble a patch's full 12 Coons boundary control points and 4 corner colors,
+/// honoring edge-sharing flags 1/2/3 (the new patch shares one edge with the
+/// previous one). For tensor patches (type 7) the 4 internal points (p13..p16,
+/// stream indices 12..15) are dropped here — the Coons surface in
+/// [`coons_point`] uses only the 12 boundary points, which is visually very
+/// close for the smooth fills these files use.
+///
+/// **Spec mapping (ISO 32000-1 §8.7.4.5.7, Table 85; cross-checked against
+/// Apache PDFBox `Patch`/`CoonsPatch`, GSoC 2014, Apache-2.0).** The boundary
+/// point order p1..p12 (0-based 0..11) traces the four cubic Bézier edges:
+/// `C1`: p1 p2 p3 p4 (v at u=0); `D2`: p4 p5 p6 p7 (u at v=1);
+/// `C2` reversed: p7 p8 p9 p10 (v at u=1); `D1` reversed: p10 p11 p12 p1
+/// (u at v=0). Corners and their colors: p1↔c1, p4↔c2, p7↔c3, p10↔c4
+/// (0-based corner indices 0, 3, 6, 9 ↔ colors 0, 1, 2, 3).
+///
+/// For a flagged patch (flag f), the new patch's first 4 boundary points
+/// (its `p1..p4`, i.e. the shared edge) and its first 2 corner colors (`c1, c2`)
+/// are taken from the *previous* patch; the stream then supplies the remaining 8
+/// points (`p5..p12`) and 2 colors (`c3, c4`). The exact previous-patch indices
+/// reused for each flag are:
+///
+/// | flag | shared points (prev idx) | shared colors (prev idx) |
+/// |------|--------------------------|--------------------------|
+/// | 1    | p4 p5 p6 p7   = [3,4,5,6]   | c2 c3 = [1,2] |
+/// | 2    | p7 p8 p9 p10  = [6,7,8,9]   | c3 c4 = [2,3] |
+/// | 3    | p10 p11 p12 p1 = [9,10,11,0] | c4 c1 = [3,0] |
+fn assemble_patch(
+    flag: u32,
+    new_pts: &[(f64, f64)],
+    new_cols: &[[f64; 4]],
+    prev_pts: &[(f64, f64)],
+    prev_cols: &[[f64; 4]],
+    shading_type: i64,
+) -> Option<PatchData> {
+    // Keep only the 12 boundary points; tensor patches carry 4 extra interior
+    // points after them (stream indices 12..15) that the Coons surface ignores.
+    let take_coons = |pts: &[(f64, f64)]| -> Vec<(f64, f64)> {
+        if shading_type == 7 {
+            pts.iter().take(12).copied().collect()
+        } else {
+            pts.to_vec()
+        }
+    };
+
+    if flag == 0 {
+        let pts = take_coons(new_pts);
+        if pts.len() < 12 || new_cols.len() < 4 {
+            return None;
+        }
+        return Some((pts, new_cols.to_vec()));
+    }
+
+    // Shared-edge patches reuse one edge (4 points + 2 colors) of the previous
+    // patch; the previous patch must therefore be fully formed.
+    if prev_pts.len() < 12 || prev_cols.len() < 4 {
+        return None;
+    }
+    let shared_edge: [usize; 4] = shared_edge_indices(flag);
+    let shared_cols: [usize; 2] = shared_color_indices(flag);
+
+    // new boundary = [shared edge p1..p4] ++ [8 new points p5..p12].
+    let mut pts = Vec::with_capacity(12);
+    for &i in &shared_edge {
+        pts.push(prev_pts[i]);
+    }
+    let new_coons = take_coons(new_pts);
+    for &p in new_coons.iter().take(8) {
+        pts.push(p);
+    }
+    if pts.len() < 12 {
+        return None;
+    }
+    pts.truncate(12);
+
+    // new corner colors = [shared c1, c2] ++ [2 new colors c3, c4].
+    let mut cols = Vec::with_capacity(4);
+    cols.push(prev_cols[shared_cols[0]]);
+    cols.push(prev_cols[shared_cols[1]]);
+    for &c in new_cols.iter().take(2) {
+        cols.push(c);
+    }
+    if cols.len() < 4 {
+        return None;
+    }
+    Some((pts, cols))
+}
+
+/// Previous-patch boundary-point indices reused as the new patch's shared edge
+/// (p1..p4) for edge flags 1/2/3. See [`assemble_patch`] for the spec table.
+fn shared_edge_indices(flag: u32) -> [usize; 4] {
+    match flag {
+        1 => [3, 4, 5, 6],
+        2 => [6, 7, 8, 9],
+        _ => [9, 10, 11, 0],
+    }
+}
+
+/// Previous-patch corner-color indices reused as the new patch's shared colors
+/// (c1, c2) for edge flags 1/2/3. See [`assemble_patch`] for the spec table.
+fn shared_color_indices(flag: u32) -> [usize; 2] {
+    match flag {
+        1 => [1, 2],
+        2 => [2, 3],
+        _ => [3, 0],
+    }
+}
+
+/// Render a Coons patch by subdividing its boundary into an N×N grid of quads,
+/// each split into two Gouraud triangles. Positions come from the bicubic Coons
+/// surface; colors come from bilinear interpolation of the 4 corner colors.
+fn render_coons_patch(
+    buf: &mut PixelBuffer,
+    pts12: &[(f64, f64)],
+    cols4: &[[f64; 4]],
+    to_device: &Transform2D,
+) {
+    if pts12.len() < 12 || cols4.len() < 4 {
+        return;
+    }
+    const N: usize = 10;
+    // Build the grid of device-space vertices + colors.
+    let mut grid: Vec<Vec<MeshVertex>> = Vec::with_capacity(N + 1);
+    for iu in 0..=N {
+        let u = iu as f64 / N as f64;
+        let mut row = Vec::with_capacity(N + 1);
+        for iv in 0..=N {
+            let v = iv as f64 / N as f64;
+            let (ux, uy) = coons_point(pts12, u, v);
+            let (dx, dy) = to_device.transform_point(ux, uy);
+            let color = bilerp_color(cols4, u, v);
+            row.push(MeshVertex { dx, dy, color });
+        }
+        grid.push(row);
+    }
+    for iu in 0..N {
+        for iv in 0..N {
+            let a = grid[iu][iv];
+            let b = grid[iu + 1][iv];
+            let c = grid[iu][iv + 1];
+            let d = grid[iu + 1][iv + 1];
+            fill_gouraud_triangle(buf, a, b, c);
+            fill_gouraud_triangle(buf, b, d, c);
+        }
+    }
+}
+
+/// Evaluate the Coons surface position at (u, v) from the 12 boundary control
+/// points. Point order follows the PDF spec boundary: p1..p12 trace the four
+/// cubic Bezier edges; corners are p1 (u0,v0), p4 (u0,v1), p7 (u1,v1),
+/// p10 (u1,v0).
+fn coons_point(p: &[(f64, f64)], u: f64, v: f64) -> (f64, f64) {
+    // Boundary curves (each a cubic Bezier):
+    //   C1 (v at u=0): p1 p2  p3  p4
+    //   C2 (v at u=1): p10 p9 p8 p7   (reversed indices for direction)
+    //   D1 (u at v=0): p1 p12 p11 p10
+    //   D2 (u at v=1): p4 p5  p6  p7
+    let c1 = bezier(p[0], p[1], p[2], p[3], v);
+    let c2 = bezier(p[9], p[8], p[7], p[6], v);
+    let d1 = bezier(p[0], p[11], p[10], p[9], u);
+    let d2 = bezier(p[3], p[4], p[5], p[6], u);
+
+    // Corners.
+    let p00 = p[0];
+    let p01 = p[3];
+    let p11 = p[6];
+    let p10 = p[9];
+
+    // Coons surface = ruled(u) + ruled(v) - bilinear(corners).
+    let sx = (1.0 - u) * c1.0 + u * c2.0 + (1.0 - v) * d1.0 + v * d2.0
+        - ((1.0 - u) * (1.0 - v) * p00.0
+            + (1.0 - u) * v * p01.0
+            + u * (1.0 - v) * p10.0
+            + u * v * p11.0);
+    let sy = (1.0 - u) * c1.1 + u * c2.1 + (1.0 - v) * d1.1 + v * d2.1
+        - ((1.0 - u) * (1.0 - v) * p00.1
+            + (1.0 - u) * v * p01.1
+            + u * (1.0 - v) * p10.1
+            + u * v * p11.1);
+    (sx, sy)
+}
+
+/// Cubic Bezier interpolation of four control points at parameter t.
+fn bezier(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
+    let mt = 1.0 - t;
+    let a = mt * mt * mt;
+    let b = 3.0 * mt * mt * t;
+    let c = 3.0 * mt * t * t;
+    let d = t * t * t;
+    (
+        a * p0.0 + b * p1.0 + c * p2.0 + d * p3.0,
+        a * p0.1 + b * p1.1 + c * p2.1 + d * p3.1,
+    )
+}
+
+/// Bilinearly interpolate the 4 patch corner colors. Corner order: c0 at
+/// (u0,v0), c1 at (u0,v1), c2 at (u1,v1), c3 at (u1,v0).
+fn bilerp_color(c: &[[f64; 4]], u: f64, v: f64) -> [f64; 4] {
+    let mut out = [0.0; 4];
+    for k in 0..4 {
+        let top = (1.0 - v) * c[0][k] + v * c[1][k];
+        let bot = (1.0 - v) * c[3][k] + v * c[2][k];
+        out[k] = (1.0 - u) * top + u * bot;
+    }
+    out
+}
+
+/// Rasterize a Gouraud-shaded triangle into `buf` with barycentric color
+/// interpolation. Honors the buffer's clip and blends with full coverage.
+fn fill_gouraud_triangle(buf: &mut PixelBuffer, v0: MeshVertex, v1: MeshVertex, v2: MeshVertex) {
+    let min_x = v0.dx.min(v1.dx).min(v2.dx).floor().max(0.0) as i32;
+    let max_x = (v0.dx.max(v1.dx).max(v2.dx).ceil() as i32).min(buf.width as i32 - 1);
+    let min_y = v0.dy.min(v1.dy).min(v2.dy).floor().max(0.0) as i32;
+    let max_y = (v0.dy.max(v1.dy).max(v2.dy).ceil() as i32).min(buf.height as i32 - 1);
+    if max_x < min_x || max_y < min_y {
+        return;
+    }
+
+    let area = edge(v0.dx, v0.dy, v1.dx, v1.dy, v2.dx, v2.dy);
+    if area.abs() < 1e-9 {
+        return; // degenerate
+    }
+
+    for py in min_y..=max_y {
+        for px in min_x..=max_x {
+            if !buf.clip_allows(px, py) {
+                continue;
+            }
+            let fx = px as f64 + 0.5;
+            let fy = py as f64 + 0.5;
+            let w0 = edge(v1.dx, v1.dy, v2.dx, v2.dy, fx, fy) / area;
+            let w1 = edge(v2.dx, v2.dy, v0.dx, v0.dy, fx, fy) / area;
+            let w2 = edge(v0.dx, v0.dy, v1.dx, v1.dy, fx, fy) / area;
+            // Inside test with a small epsilon to avoid seams between triangles.
+            if w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6 {
+                continue;
+            }
+            let r = w0 * v0.color[0] + w1 * v1.color[0] + w2 * v2.color[0];
+            let g = w0 * v0.color[1] + w1 * v1.color[1] + w2 * v2.color[1];
+            let b = w0 * v0.color[2] + w1 * v1.color[2] + w2 * v2.color[2];
+            let color = [
+                (r.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (g.clamp(0.0, 1.0) * 255.0).round() as u8,
+                (b.clamp(0.0, 1.0) * 255.0).round() as u8,
+                255,
+            ];
+            buf.blend_pixel(px, py, color, 1.0);
+        }
+    }
+}
+
+/// Signed area of the triangle (a, b, c) doubled (the edge function).
+fn edge(ax: f64, ay: f64, bx: f64, by: f64, cx: f64, cy: f64) -> f64 {
+    (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
+}
+
 /// Accept a candidate radial `s` if its circle radius is non-negative and it is
 /// within the (possibly extended) parametric range.
 fn accept_radial_s(s: f64, ar: f64, r0: f64, extend: [bool; 2]) -> Option<f64> {
@@ -538,33 +1226,9 @@ mod tests {
         // eval_type3 only consults `reader` for indirect sub-functions; with an
         // inline dict it is never used, so a throwaway reader suffices. We build
         // one from a trivial PDF.
-        let reader = crate::reader::PdfReader::from_bytes(super::tests::minimal_pdf()).unwrap();
+        let reader = crate::reader::PdfReader::from_bytes(super::tests_minimal_pdf()).unwrap();
         let r = eval_type3(&d, 0.5, &reader);
         assert!((r[0] - 0.5).abs() < 0.01, "Type3->Type2 at 0.5: {:?}", r);
-    }
-
-    /// A minimal valid PDF used only to obtain a `PdfReader` for tests that need
-    /// one but never actually resolve indirect objects.
-    pub(super) fn minimal_pdf() -> Vec<u8> {
-        let mut pdf = b"%PDF-1.4\n".to_vec();
-        let mut off = vec![0usize; 4];
-        off[1] = pdf.len();
-        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-        off[2] = pdf.len();
-        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-        off[3] = pdf.len();
-        pdf.extend_from_slice(
-            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>\nendobj\n",
-        );
-        let xref = pdf.len();
-        pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
-        for i in 1..=3 {
-            pdf.extend_from_slice(format!("{:010} 00000 n \n", off[i]).as_bytes());
-        }
-        pdf.extend_from_slice(
-            format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
-        );
-        pdf
     }
 
     #[test]
@@ -604,5 +1268,114 @@ mod tests {
         assert_eq!(black, [0, 0, 0, 255]);
         let white = components_to_pixel(&[0.0, 0.0, 0.0, 0.0], "DeviceCMYK");
         assert_eq!(white, [255, 255, 255, 255]);
+    }
+
+    // ---- Coons/tensor shared-edge patch reconstruction ---------------------
+
+    /// Helper: a deterministic 12-point "previous" patch where point i is
+    /// (i*10, i*10) and corner colors are distinguishable. Lets us assert exact
+    /// index reuse for each flag.
+    fn prev_patch() -> (Vec<(f64, f64)>, Vec<[f64; 4]>) {
+        let pts: Vec<(f64, f64)> = (0..12).map(|i| (i as f64 * 10.0, i as f64 * 10.0)).collect();
+        // 4 corner colors, each tagged in its red channel by its index.
+        let cols: Vec<[f64; 4]> = (0..4)
+            .map(|i| [i as f64 / 10.0, 0.0, 0.0, 1.0])
+            .collect();
+        (pts, cols)
+    }
+
+    #[test]
+    fn assemble_patch_flag0_is_independent() {
+        // Flag 0: all 12 points and 4 colors come straight from the stream.
+        let new_pts: Vec<(f64, f64)> = (0..12).map(|i| (i as f64, 0.0)).collect();
+        let new_cols: Vec<[f64; 4]> = (0..4).map(|_| [0.0, 0.0, 0.0, 1.0]).collect();
+        let (pts, cols) =
+            assemble_patch(0, &new_pts, &new_cols, &[], &[], 6).expect("flag 0 must assemble");
+        assert_eq!(pts.len(), 12);
+        assert_eq!(cols.len(), 4);
+        assert_eq!(pts[0], (0.0, 0.0));
+        assert_eq!(pts[11], (11.0, 0.0));
+    }
+
+    #[test]
+    fn assemble_patch_flag1_reuses_edge_p4_p7_and_colors_c2_c3() {
+        let (pp, pc) = prev_patch();
+        // 8 new boundary points (p5..p12) + 2 new colors (c3, c4).
+        let new_pts: Vec<(f64, f64)> = (0..8).map(|i| (100.0 + i as f64, -1.0)).collect();
+        let new_cols = vec![[0.7, 0.0, 0.0, 1.0], [0.8, 0.0, 0.0, 1.0]];
+        let (pts, cols) =
+            assemble_patch(1, &new_pts, &new_cols, &pp, &pc, 6).expect("flag 1 must assemble");
+        // Shared edge p1..p4 = prev indices [3,4,5,6].
+        assert_eq!(pts[0], pp[3]);
+        assert_eq!(pts[1], pp[4]);
+        assert_eq!(pts[2], pp[5]);
+        assert_eq!(pts[3], pp[6]);
+        // Remaining 8 are the new points.
+        assert_eq!(pts[4], new_pts[0]);
+        assert_eq!(pts[11], new_pts[7]);
+        // Shared colors c1,c2 = prev colors [1,2]; new colors fill c3,c4.
+        assert_eq!(cols[0], pc[1]);
+        assert_eq!(cols[1], pc[2]);
+        assert_eq!(cols[2], new_cols[0]);
+        assert_eq!(cols[3], new_cols[1]);
+    }
+
+    #[test]
+    fn assemble_patch_flag2_reuses_edge_p7_p10_and_colors_c3_c4() {
+        let (pp, pc) = prev_patch();
+        let new_pts: Vec<(f64, f64)> = (0..8).map(|i| (200.0 + i as f64, -2.0)).collect();
+        let new_cols = vec![[0.6, 0.0, 0.0, 1.0], [0.9, 0.0, 0.0, 1.0]];
+        let (pts, cols) =
+            assemble_patch(2, &new_pts, &new_cols, &pp, &pc, 6).expect("flag 2 must assemble");
+        assert_eq!(pts[0], pp[6]);
+        assert_eq!(pts[1], pp[7]);
+        assert_eq!(pts[2], pp[8]);
+        assert_eq!(pts[3], pp[9]);
+        assert_eq!(cols[0], pc[2]);
+        assert_eq!(cols[1], pc[3]);
+    }
+
+    #[test]
+    fn assemble_patch_flag3_reuses_edge_p10_p1_and_colors_c4_c1() {
+        let (pp, pc) = prev_patch();
+        let new_pts: Vec<(f64, f64)> = (0..8).map(|i| (300.0 + i as f64, -3.0)).collect();
+        let new_cols = vec![[0.5, 0.0, 0.0, 1.0], [0.4, 0.0, 0.0, 1.0]];
+        let (pts, cols) =
+            assemble_patch(3, &new_pts, &new_cols, &pp, &pc, 6).expect("flag 3 must assemble");
+        // Shared edge p1..p4 = prev indices [9,10,11,0] (wraps to p1).
+        assert_eq!(pts[0], pp[9]);
+        assert_eq!(pts[1], pp[10]);
+        assert_eq!(pts[2], pp[11]);
+        assert_eq!(pts[3], pp[0]);
+        assert_eq!(cols[0], pc[3]);
+        assert_eq!(cols[1], pc[0]);
+    }
+
+    #[test]
+    fn assemble_tensor_patch_drops_interior_points() {
+        // Tensor flag 0: 16 stream points; only the first 12 boundary points are
+        // kept (interior points 12..15 are dropped by the Coons surface).
+        let new_pts: Vec<(f64, f64)> = (0..16).map(|i| (i as f64, 0.0)).collect();
+        let new_cols: Vec<[f64; 4]> = (0..4).map(|_| [0.0, 0.0, 0.0, 1.0]).collect();
+        let (pts, _cols) =
+            assemble_patch(0, &new_pts, &new_cols, &[], &[], 7).expect("tensor flag 0");
+        assert_eq!(pts.len(), 12);
+        assert_eq!(pts[11], (11.0, 0.0)); // p12, not p16
+    }
+
+    #[test]
+    fn assemble_tensor_flag1_shares_edge_uses_12_new_points() {
+        // Tensor flagged patch reads 12 new points (8 boundary p5..p12 + 4
+        // interior); only the 8 boundary ones are appended after the shared edge.
+        let (pp, pc) = prev_patch();
+        let new_pts: Vec<(f64, f64)> = (0..12).map(|i| (100.0 + i as f64, -1.0)).collect();
+        let new_cols = vec![[0.7, 0.0, 0.0, 1.0], [0.8, 0.0, 0.0, 1.0]];
+        let (pts, cols) =
+            assemble_patch(1, &new_pts, &new_cols, &pp, &pc, 7).expect("tensor flag 1");
+        assert_eq!(pts.len(), 12);
+        assert_eq!(pts[0], pp[3]); // shared edge
+        assert_eq!(pts[4], new_pts[0]); // first new boundary point
+        assert_eq!(pts[11], new_pts[7]); // 8th new boundary point (interior dropped)
+        assert_eq!(cols[0], pc[1]);
     }
 }

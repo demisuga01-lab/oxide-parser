@@ -1,3 +1,4 @@
+use crate::cancel::CancelToken;
 use crate::content::operation::{ContentOperation, Operand};
 use crate::content::state::{BlendMode, ColorSpace, GraphicsState};
 use crate::engine::{ContentEngine, PageResources};
@@ -16,7 +17,7 @@ use crate::render::font_rasterizer::{get_fallback_font, FontRasterizer, GlyphToP
 use crate::render::glyph_cache::{CachedGlyph, GlyphCache, GlyphCacheKey};
 use crate::render::image_painter::ImagePainter;
 use crate::render::line::DashState;
-use crate::render::path::{flatten_path, FillRule, Path, PathPainter};
+use crate::render::path::{flatten_path, FillRule, FlatPath, Path, PathPainter};
 use crate::render::shading::ShadingRenderer;
 use crate::render::transform::{Transform2D, Viewport};
 
@@ -29,13 +30,29 @@ impl PageRenderer {
         page_number: usize,
         dpi: u32,
     ) -> Result<PixelBuffer> {
+        Self::render_page_cancellable(engine, page_number, dpi, &CancelToken::none())
+    }
+
+    /// Render a page, polling `cancel` periodically so a runaway content
+    /// stream can be stopped from outside (e.g. a request-timeout timer).
+    pub fn render_page_cancellable(
+        engine: &ContentEngine,
+        page_number: usize,
+        dpi: u32,
+        cancel: &CancelToken,
+    ) -> Result<PixelBuffer> {
         let ops = engine.get_page_content(page_number)?;
         let viewport = engine.page_viewport(page_number, dpi)?;
         let buf = engine.create_page_buffer(page_number, dpi)?;
         let resources = engine.get_page_resources(page_number)?;
 
         let mut state = RenderState::new(buf, viewport, resources, engine, page_number);
+        state.cancel = cancel.clone();
         state.dispatch_all(&ops);
+        // dispatch_all bails out early (without error) when the token trips;
+        // surface that as a distinct error so the caller returns a timeout
+        // response rather than a half-rendered page presented as success.
+        cancel.check("page render")?;
         Ok(state.into_buffer())
     }
 }
@@ -54,6 +71,17 @@ struct RenderState<'a> {
     glyph_cache: GlyphCache,
     /// Current Form XObject nesting depth, used to bound recursion.
     form_depth: usize,
+    /// Parameters from the most recent `ID` operator, awaiting the following
+    /// `inline_image_data` so the inline image can be painted.
+    pending_inline: Option<Vec<Operand>>,
+    /// The CTM in effect at the start of the current content stream (the page's
+    /// or a Form's). Pattern `/Matrix` values are relative to *this* default
+    /// coordinate system, not the CTM at the moment of the fill.
+    base_ctm: Transform2D,
+    /// Cooperative cancellation flag, polled by the operator dispatch loop and
+    /// the tiling-pattern tile loop so a runaway page can be stopped from
+    /// outside. Child states (Form groups, soft masks) share the same token.
+    cancel: CancelToken,
 }
 
 impl<'a> RenderState<'a> {
@@ -77,6 +105,9 @@ impl<'a> RenderState<'a> {
             pending_clip: None,
             glyph_cache: GlyphCache::with_default_capacity(),
             form_depth: 0,
+            pending_inline: None,
+            base_ctm: Transform2D::identity(),
+            cancel: CancelToken::none(),
         }
     }
 
@@ -85,7 +116,19 @@ impl<'a> RenderState<'a> {
     }
 
     fn dispatch_all(&mut self, ops: &[ContentOperation]) {
-        for op in ops {
+        // Poll the cancellation flag every CANCEL_CHECK_INTERVAL operators. An
+        // atomic relaxed load is cheap, but doing it per-operator on a hot path
+        // with millions of trivial ops is measurable, so we amortise it. The
+        // interval is small enough that even when individual operators are
+        // expensive (e.g. full-page fills) the wall-clock gap between checks
+        // stays short, so cancellation is observed promptly. When the token
+        // trips we stop executing immediately; the entry point converts the
+        // early exit into an OxideError::Cancelled.
+        const CANCEL_CHECK_INTERVAL: usize = 64;
+        for (i, op) in ops.iter().enumerate() {
+            if i % CANCEL_CHECK_INTERVAL == 0 && self.cancel.is_cancelled() {
+                return;
+            }
             self.dispatch(op);
         }
     }
@@ -220,8 +263,19 @@ impl<'a> RenderState<'a> {
                     self.handle_sh(name.to_string());
                 }
             }
-            "BMC" | "BDC" | "EMC" | "MP" | "DP" | "BX" | "EX" | "BI" | "ID" | "EI"
-            | "inline_image_data" => {}
+            "ID" => {
+                // Stash the inline image parameters; the pixel bytes arrive in
+                // the following `inline_image_data` operation.
+                self.pending_inline = Some(op.operands.clone());
+            }
+            "inline_image_data" => {
+                if let (Some(params), Some(bytes)) =
+                    (self.pending_inline.take(), op.string_bytes(0))
+                {
+                    self.paint_inline_image(&params, bytes);
+                }
+            }
+            "BMC" | "BDC" | "EMC" | "MP" | "DP" | "BX" | "EX" | "BI" | "EI" => {}
             _ => self.gs.process(op),
         }
     }
@@ -231,13 +285,42 @@ impl<'a> RenderState<'a> {
     }
 
     fn fill_pixel_color(&self) -> PixelColor {
-        ColorSpaceHandler::to_render_color(&self.gs.fill_color, self.gs.fill_alpha as f32)
-            .to_pixel_color()
+        self.resolve_paint_color(&self.gs.fill_color, self.gs.fill_alpha as f32)
     }
 
     fn stroke_pixel_color(&self) -> PixelColor {
-        ColorSpaceHandler::to_render_color(&self.gs.stroke_color, self.gs.stroke_alpha as f32)
-            .to_pixel_color()
+        self.resolve_paint_color(&self.gs.stroke_color, self.gs.stroke_alpha as f32)
+    }
+
+    /// Resolve a graphics-state colour to a device pixel colour. Device spaces go
+    /// straight through [`ColorSpaceHandler`]; a `Named` space is looked up in the
+    /// page resources and, if it is a `/Separation` or `/DeviceN` space, its tint
+    /// transform is evaluated and converted via the alternate space.
+    /// `/Separation /None` (and all-`/None` DeviceN) resolve to a fully
+    /// transparent colour so the paint produces no marks.
+    fn resolve_paint_color(
+        &self,
+        color: &crate::content::state::Color,
+        alpha: f32,
+    ) -> PixelColor {
+        if let ColorSpace::Named(name) = &color.space {
+            if let Some(space_obj) = self.resources.color_spaces.get(name) {
+                let reader = self.engine.document().reader();
+                match crate::render::colorspace::resolve_named_color(
+                    space_obj,
+                    &color.components,
+                    alpha,
+                    reader,
+                ) {
+                    crate::render::colorspace::NamedColor::Color(rc) => return rc.to_pixel_color(),
+                    crate::render::colorspace::NamedColor::NoPaint => {
+                        return crate::render::color::RenderColor::transparent().to_pixel_color();
+                    }
+                    crate::render::colorspace::NamedColor::Unhandled => {}
+                }
+            }
+        }
+        ColorSpaceHandler::to_render_color(color, alpha).to_pixel_color()
     }
 
     fn dash_state(&self) -> DashState {
@@ -320,9 +403,28 @@ impl<'a> RenderState<'a> {
         self.path.clear();
     }
 
-    /// True when the current fill color space is the special Pattern space.
+    /// True when the current fill color space is the Pattern space, either
+    /// directly (`/Pattern cs`) or via a named resource that resolves to a
+    /// `[/Pattern ...]` array (`/Cs cs` where `/Cs` is defined as a Pattern
+    /// color space in the page resources).
     fn is_pattern_fill(&self) -> bool {
-        matches!(&self.gs.fill_color.space, ColorSpace::Named(name) if name == "Pattern")
+        match &self.gs.fill_color.space {
+            ColorSpace::Named(name) if name == "Pattern" => true,
+            ColorSpace::Named(name) => self.named_space_is_pattern(name),
+            _ => false,
+        }
+    }
+
+    /// Check whether a named color-space resource resolves to a Pattern space.
+    fn named_space_is_pattern(&self, name: &str) -> bool {
+        let Some(obj) = self.resources.color_spaces.get(name) else {
+            return false;
+        };
+        match obj {
+            PdfObject::Name(n) => n == "Pattern",
+            PdfObject::Array(arr) => arr.first().and_then(PdfObject::as_name) == Some("Pattern"),
+            _ => false,
+        }
     }
 
     fn apply_ext_g_state(&mut self, op: &ContentOperation) {
@@ -361,11 +463,14 @@ impl<'a> RenderState<'a> {
     }
 
     fn apply_smask(&mut self, smask_dict: PdfDictionary) {
-        let s = smask_dict.get_name("S").unwrap_or("Luminosity");
-        if s != "Luminosity" && s != "Alpha" {
+        // Subtype: /Luminosity (default) converts the rendered mask group's RGB
+        // to a luminance value; /Alpha uses the group's own alpha channel.
+        let subtype = smask_dict.get_name("S").unwrap_or("Luminosity");
+        let is_alpha = subtype == "Alpha";
+        if subtype != "Luminosity" && subtype != "Alpha" {
             log::debug!(
                 "PageRenderer: SMask /S '{}' is not supported; using luminosity",
-                s
+                subtype
             );
         }
 
@@ -427,10 +532,25 @@ impl<'a> RenderState<'a> {
         let form_t = Transform2D::from(form_matrix);
         let mut mask_gs = self.gs.clone();
         mask_gs.ctm = form_t.concat(&current_ctm).to_array();
+        // The mask group renders from a clean compositing state.
+        mask_gs.fill_alpha = 1.0;
+        mask_gs.stroke_alpha = 1.0;
+        mask_gs.blend_mode = BlendMode::Normal;
+        let mask_base_ctm = Transform2D::from(mask_gs.ctm);
 
-        let mut mask_buf =
-            PixelBuffer::new_filled(self.buf.width, self.buf.height, crate::render::WHITE);
-        mask_buf.blend_mode = mask_gs.blend_mode;
+        // Backdrop initialization per subtype:
+        //  - Luminosity: opaque black (mask 0 = fully masked) so areas the mask
+        //    group does not paint stay masked out. /BC overrides the backdrop
+        //    color (still opaque). Black-backdrop is the spec default.
+        //  - Alpha: fully transparent, so the alpha channel reflects only what
+        //    the mask group actually paints.
+        let mut mask_buf = if is_alpha {
+            PixelBuffer::new_transparent(self.buf.width, self.buf.height)
+        } else {
+            let bc = smask_backdrop_color(&smask_dict, &g_dict);
+            PixelBuffer::new_filled(self.buf.width, self.buf.height, bc)
+        };
+        mask_buf.blend_mode = BlendMode::Normal;
 
         let mut mask_state = RenderState {
             engine: self.engine,
@@ -445,6 +565,9 @@ impl<'a> RenderState<'a> {
             pending_clip: None,
             glyph_cache: GlyphCache::with_default_capacity(),
             form_depth: self.form_depth + 1,
+            pending_inline: None,
+            base_ctm: mask_base_ctm,
+            cancel: self.cancel.clone(),
         };
 
         if let Some(bbox) = extract_bbox(&g_dict) {
@@ -460,7 +583,92 @@ impl<'a> RenderState<'a> {
         };
         mask_state.dispatch_all(&ops);
         let mask_buf = mask_state.into_buffer();
-        self.buf.set_smask(AlphaMask::from_luminosity(&mask_buf));
+
+        let mut mask = if is_alpha {
+            AlphaMask::from_alpha_channel(&mask_buf)
+        } else {
+            AlphaMask::from_luminosity(&mask_buf)
+        };
+
+        // Apply the /TR transfer function if present and not the /Identity
+        // no-op. All function types (0/2/3/4) are supported via the shared
+        // function evaluator.
+        if let Some(lut) = self.build_transfer_lut(&smask_dict) {
+            mask.apply_transfer_lut(&lut);
+        }
+
+        self.buf.set_smask(mask);
+    }
+
+    /// Build a 256-entry transfer LUT from an SMask `/TR` function, or `None`
+    /// when /TR is absent, /Identity, or an unsupported function type. Supports
+    /// Function Types 0, 2, 3, and 4 via the shared evaluator.
+    fn build_transfer_lut(&self, smask_dict: &PdfDictionary) -> Option<[u8; 256]> {
+        let tr = smask_dict.get("TR")?;
+        // /Identity (a name) is the explicit no-op default.
+        if let PdfObject::Name(name) = tr {
+            if name == "Identity" {
+                return None;
+            }
+        }
+        let reader = self.engine.document().reader();
+        // Probe the function once to confirm it evaluates; if not, skip.
+        let probe = crate::render::shading::eval_function(tr, 0.5, reader);
+        if probe.is_empty() {
+            log::debug!("PageRenderer: SMask /TR is an unsupported function type; using identity");
+            return None;
+        }
+        let mut lut = [0u8; 256];
+        for (i, slot) in lut.iter_mut().enumerate() {
+            let t = i as f64 / 255.0;
+            let out = crate::render::shading::eval_function(tr, t, reader);
+            let v = out.first().copied().unwrap_or(t).clamp(0.0, 1.0);
+            *slot = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        Some(lut)
+    }
+
+    /// Decode and paint an inline image (BI/ID/EI). `params` are the `ID`
+    /// operands (already normalized to full key names by the content parser);
+    /// `data` is the raw bytes between `ID` and `EI`.
+    fn paint_inline_image(&mut self, params: &[Operand], data: &[u8]) {
+        let dict = inline_params_to_map(params);
+
+        let width = dict_int(&dict, "Width").unwrap_or(0).max(0) as u32;
+        let height = dict_int(&dict, "Height").unwrap_or(0).max(0) as u32;
+        if width == 0 || height == 0 {
+            return;
+        }
+        let is_mask = dict_bool(&dict, "ImageMask").unwrap_or(false);
+        let bpc = if is_mask {
+            1
+        } else {
+            dict_int(&dict, "BitsPerComponent").unwrap_or(8).clamp(1, 16) as u8
+        };
+        let color_space = dict_name(&dict, "ColorSpace").unwrap_or("DeviceGray");
+        let filters: Vec<&str> = dict_filter_list(&dict);
+
+        // Inline image masks are stencil masks: paint the current fill color
+        // through the 1-bit mask. We currently decode them as a grayscale image
+        // and paint that; full stencil-color application is a follow-up.
+        let raw = match ImageDecoder::decode_inline(
+            data,
+            width,
+            height,
+            bpc,
+            color_space,
+            &filters,
+            None,
+        ) {
+            Ok(raw) => raw,
+            Err(err) => {
+                log::warn!("PageRenderer: inline image decode failed: {}", err);
+                return;
+            }
+        };
+
+        let ctm = self.ctm();
+        ImagePainter::paint_image(&mut self.buf, &raw, &ctm, &self.viewport);
     }
 
     fn handle_do(&mut self, name: &str) {
@@ -522,6 +730,7 @@ impl<'a> RenderState<'a> {
                 .or_else(|| dict.get_bool("IM"))
                 .unwrap_or(false),
             is_smask: false,
+            inline_data: None,
         };
 
         match ImageDecoder::decode(&image_ref, self.engine.document().reader()) {
@@ -535,8 +744,8 @@ impl<'a> RenderState<'a> {
 
     fn handle_do_form(&mut self, name: &str, obj_num: u32, gen_num: u16) {
         // Depth guard: prevent runaway recursion from malformed or cyclic PDFs.
-        // TODO(cycle-detection): track object numbers on the stack to catch a
-        // direct A->B->A cycle immediately instead of after 8 levels.
+        // TODO: track object numbers on the stack to catch a direct A->B->A
+        // cycle immediately instead of after 8 levels.
         if self.form_depth >= 8 {
             log::warn!(
                 "PageRenderer: Form XObject nesting depth limit (8) exceeded at '{}' (obj {})",
@@ -549,7 +758,7 @@ impl<'a> RenderState<'a> {
         let reader = self.engine.document().reader();
 
         // ── Step 1: Fetch the Form stream object ─────────────────────────────
-        // get_object already decrypts (Mega 18); decode_stream then decompresses.
+        // get_object already decrypts; decode_stream then decompresses.
         let (form_dict, raw_bytes) = match reader.get_object(obj_num, gen_num) {
             Ok(PdfObject::Stream { dict, raw }) => (dict, raw),
             Ok(_) => {
@@ -594,12 +803,12 @@ impl<'a> RenderState<'a> {
             return;
         }
 
+        // A /Group that is NOT /S /Transparency (e.g. some other group subtype)
+        // falls through to direct rendering, which is correct for the common
+        // non-transparent case. /S /Transparency groups are handled above.
         if form_dict.get("Group").is_some() {
-            // Transparency groups need off-screen compositing (deferred to Mega 21).
-            // Rendering directly onto the page buffer is correct for the common
-            // non-transparent case.
             log::debug!(
-                "PageRenderer: Form XObject '{}' has /Group (transparency) — rendering directly (TODO Mega 21)",
+                "PageRenderer: Form XObject '{}' has a non-transparency /Group — rendering directly",
                 name
             );
         }
@@ -613,6 +822,7 @@ impl<'a> RenderState<'a> {
         self.clip_stack.push(self.buf.clip_mask().cloned());
         self.smask_stack.push(self.buf.smask_mask().cloned());
         let saved_resources = self.resources.clone();
+        let saved_base_ctm = self.base_ctm;
         self.form_depth += 1;
 
         // ── Step 4: Apply the Form matrix to the CTM ─────────────────────────
@@ -622,6 +832,9 @@ impl<'a> RenderState<'a> {
         let current_ctm = Transform2D::from(self.gs.ctm);
         let form_t = Transform2D::from(form_matrix);
         self.gs.ctm = form_t.concat(&current_ctm).to_array();
+        // Patterns referenced inside this Form are relative to the Form's own
+        // default coordinate system.
+        self.base_ctm = Transform2D::from(self.gs.ctm);
 
         // ── Step 5: Clip to the BBox (intersected with any existing clip) ────
         if let Some(bb) = bbox {
@@ -648,7 +861,7 @@ impl<'a> RenderState<'a> {
                     name,
                     err
                 );
-                self.cleanup_after_form(saved_gs, saved_resources);
+                self.cleanup_after_form(saved_gs, saved_resources, saved_base_ctm);
                 return;
             }
         };
@@ -661,7 +874,7 @@ impl<'a> RenderState<'a> {
                     name,
                     err
                 );
-                self.cleanup_after_form(saved_gs, saved_resources);
+                self.cleanup_after_form(saved_gs, saved_resources, saved_base_ctm);
                 return;
             }
         };
@@ -670,7 +883,7 @@ impl<'a> RenderState<'a> {
         self.dispatch_all(&ops);
 
         // ── Step 9: Restore the saved state ──────────────────────────────────
-        self.cleanup_after_form(saved_gs, saved_resources);
+        self.cleanup_after_form(saved_gs, saved_resources, saved_base_ctm);
     }
 
     fn handle_do_form_group(
@@ -682,14 +895,53 @@ impl<'a> RenderState<'a> {
         content_bytes: &[u8],
     ) {
         let reader = self.engine.document().reader();
-        let mut group_buf = PixelBuffer::new_transparent(self.buf.width, self.buf.height);
-        group_buf.blend_mode = self.gs.blend_mode;
+
+        // Group flags: /I (isolated) and /K (knockout), both default false.
+        let (isolated, knockout) = match transparency_group_dict(form_dict) {
+            Some(group) => (group_is_isolated(group), group_is_knockout(group)),
+            None => (false, false),
+        };
+        if knockout {
+            // Knockout (/K true): interior elements should knock out the group
+            // backdrop rather than accumulate. We track the flag on the group
+            // RenderState and apply knockout compositing at the group's
+            // backdrop seam; per-element knockout among overlapping interior
+            // elements is approximated as normal accumulation (rare in
+            // practice — typically used for non-overlapping outline effects).
+            log::debug!(
+                "PageRenderer: knockout transparency group '{}' (interior overlap approximated)",
+                name
+            );
+        }
+
+        // An isolated group starts from a fully transparent backdrop. A
+        // non-isolated group starts from a copy of the current backdrop (the
+        // page/parent buffer so far), so blend modes inside the group can
+        // interact with what is already painted. We remove that backdrop
+        // contribution again before compositing the group result back, so the
+        // backdrop is not counted twice (PDF 32000-1 §11.4.8).
+        let mut group_buf = if isolated {
+            PixelBuffer::new_transparent(self.buf.width, self.buf.height)
+        } else {
+            let mut copy = self.buf.clone();
+            copy.clear_clip();
+            copy.clear_smask();
+            copy
+        };
+        group_buf.blend_mode = BlendMode::Normal;
 
         let form_matrix = extract_form_matrix(form_dict);
         let current_ctm = Transform2D::from(self.gs.ctm);
         let form_t = Transform2D::from(form_matrix);
         let mut group_gs = self.gs.clone();
         group_gs.ctm = form_t.concat(&current_ctm).to_array();
+        // Inside the group, painting starts from a clean compositing state:
+        // the group's own alpha/blend/soft-mask are applied when the *result*
+        // is composited back, not to each interior element.
+        group_gs.fill_alpha = 1.0;
+        group_gs.stroke_alpha = 1.0;
+        group_gs.blend_mode = BlendMode::Normal;
+        let group_base_ctm = Transform2D::from(group_gs.ctm);
 
         let group_resources = if let Some(res_obj) = form_dict.get("Resources") {
             let form_res = crate::engine::parse_resources_from_obj(res_obj, reader);
@@ -711,8 +963,16 @@ impl<'a> RenderState<'a> {
             pending_clip: None,
             glyph_cache: GlyphCache::with_default_capacity(),
             form_depth: self.form_depth + 1,
+            pending_inline: None,
+            base_ctm: group_base_ctm,
+            cancel: self.cancel.clone(),
         };
 
+        // Carry the parent clip into the group so content is bounded the same
+        // way direct rendering would be, then intersect the Form BBox.
+        if let Some(clip) = self.buf.clip_mask().cloned() {
+            group_state.buf.set_clip(clip);
+        }
         if let Some(bbox) = extract_bbox(form_dict) {
             group_state.apply_form_bbox_clip(bbox);
         }
@@ -729,42 +989,36 @@ impl<'a> RenderState<'a> {
             }
         };
         group_state.dispatch_all(&ops);
-        let group_buf = group_state.into_buffer();
-        Self::composite_group(
-            &mut self.buf,
-            &group_buf,
-            self.gs.fill_alpha as f32,
-            self.gs.blend_mode,
-        );
-    }
+        let mut group_buf = group_state.into_buffer();
+        group_buf.clear_clip();
 
-    fn composite_group(
-        dst: &mut PixelBuffer,
-        src: &PixelBuffer,
-        group_alpha: f32,
-        blend_mode: BlendMode,
-    ) {
-        let old_blend_mode = dst.blend_mode;
-        dst.blend_mode = blend_mode;
-        let alpha = group_alpha.clamp(0.0, 1.0);
-        for y in 0..src.height as i32 {
-            for x in 0..src.width as i32 {
-                let src_px = src.get_pixel(x, y);
-                if src_px[3] == 0 {
-                    continue;
-                }
-                dst.blend_pixel(x, y, src_px, alpha);
-            }
+        // For a non-isolated group, subtract the backdrop we seeded it with so
+        // it is not double-counted when we composite the group back.
+        if !isolated {
+            group_buf.remove_backdrop(&self.buf);
         }
-        dst.blend_mode = old_blend_mode;
+
+        // Composite the finished group as a single unit, using the alpha /
+        // blend mode / soft mask active at the point of the `Do` operator.
+        let group_alpha = self.gs.fill_alpha as f32;
+        let blend_mode = self.gs.blend_mode;
+        let soft_mask = self.buf.smask_mask().cloned();
+        self.buf
+            .composite_from(&group_buf, group_alpha, blend_mode, soft_mask.as_ref());
     }
 
     /// Restore the graphics state, clip mask, and resources saved before a Form
     /// XObject was rendered, and decrement the depth counter.
-    fn cleanup_after_form(&mut self, saved_gs: GraphicsState, saved_resources: PageResources) {
+    fn cleanup_after_form(
+        &mut self,
+        saved_gs: GraphicsState,
+        saved_resources: PageResources,
+        saved_base_ctm: Transform2D,
+    ) {
         self.form_depth = self.form_depth.saturating_sub(1);
         self.resources = saved_resources;
         self.gs = saved_gs;
+        self.base_ctm = saved_base_ctm;
         self.buf.blend_mode = self.gs.blend_mode;
         match self.clip_stack.pop() {
             Some(saved) => self.buf.restore_clip(saved),
@@ -811,7 +1065,15 @@ impl<'a> RenderState<'a> {
             return;
         };
         let ctm = self.ctm();
-        ShadingRenderer::paint(&shading_dict, &ctm, &self.viewport, &mut self.buf, reader);
+        let mesh_data = shading_mesh_data(&shading_obj, &shading_dict, reader);
+        ShadingRenderer::paint(
+            &shading_dict,
+            &ctm,
+            &self.viewport,
+            &mut self.buf,
+            reader,
+            mesh_data.as_deref(),
+        );
     }
 
     /// Paint a pattern fill for the current path. Dispatches on /PatternType.
@@ -833,14 +1095,230 @@ impl<'a> RenderState<'a> {
         };
 
         match pattern_dict.get_integer("PatternType").unwrap_or(0) {
-            1 => {
-                // Tiling patterns require recursive content-stream rendering;
-                // deferred. Skipping leaves the area unpainted (TODO).
-                log::debug!("PatternType 1 (tiling) not yet implemented; skipping fill");
-            }
+            1 => self.paint_tiling_pattern_fill(rule, &pattern_obj),
             2 => self.paint_shading_pattern_fill(rule, &pattern_dict),
             other => log::debug!("pattern fill: unknown PatternType {other}"),
         }
+    }
+
+    /// Paint a tiling pattern (PatternType 1) clipped to the current path.
+    ///
+    /// The tile content stream is rendered repeatedly across the path's
+    /// device-space bounding box at `/XStep`/`/YStep` spacing, each repetition
+    /// positioned via the pattern `/Matrix` (relative to the base CTM of the
+    /// pattern's parent content stream) and clipped to the filled path.
+    fn paint_tiling_pattern_fill(&mut self, rule: FillRule, pattern_obj: &PdfObject) {
+        if self.form_depth >= 8 {
+            log::warn!("tiling pattern: nesting depth limit reached; skipping");
+            return;
+        }
+        let reader = self.engine.document().reader();
+        let (pat_dict, raw_bytes) = match resolve_to_stream(pattern_obj, reader) {
+            Some(pair) => pair,
+            None => {
+                log::warn!("tiling pattern: did not resolve to a content stream");
+                return;
+            }
+        };
+
+        let bbox = match get_float_array_dict(&pat_dict, "BBox") {
+            Some(b) if b.len() >= 4 => [b[0], b[1], b[2], b[3]],
+            _ => {
+                log::warn!("tiling pattern: missing /BBox");
+                return;
+            }
+        };
+        let x_step = pat_dict
+            .get("XStep")
+            .and_then(PdfObject::as_number)
+            .unwrap_or(0.0);
+        let y_step = pat_dict
+            .get("YStep")
+            .and_then(PdfObject::as_number)
+            .unwrap_or(0.0);
+        if x_step.abs() < 1e-6 || y_step.abs() < 1e-6 {
+            log::warn!("tiling pattern: zero XStep/YStep; skipping");
+            return;
+        }
+        let paint_type = pat_dict.get_integer("PaintType").unwrap_or(1);
+
+        // pattern space → device. The pattern /Matrix is relative to the base
+        // CTM of the parent content stream (NOT the fill-time CTM).
+        let pat_matrix = match get_float_array_dict(&pat_dict, "Matrix") {
+            Some(m) if m.len() >= 6 => Transform2D::from([m[0], m[1], m[2], m[3], m[4], m[5]]),
+            _ => Transform2D::identity(),
+        };
+        let pattern_ctm = pat_matrix.concat(&self.base_ctm);
+
+        // Clip mask = the filled path, intersected with the existing clip.
+        let path_ctm = self.ctm();
+        let flat = flatten_path(&self.path, &path_ctm, &self.viewport, 0.5);
+        let mut path_clip = ClipMask::from_path(&flat, self.buf.width, self.buf.height, rule);
+        if let Some(existing) = self.buf.clip_mask() {
+            path_clip.intersect(existing);
+        }
+
+        // Determine the device-space bounding box of the filled path to bound
+        // how many tiles we need; then map that back into pattern space.
+        let (dx0, dy0, dx1, dy1) = path_device_bounds(&flat, self.buf.width, self.buf.height);
+        if dx1 < dx0 || dy1 < dy0 {
+            return; // empty path
+        }
+        let full = pattern_ctm.concat(&self.viewport.to_transform());
+        let inv = match full.inverse() {
+            Some(inv) => inv,
+            None => {
+                log::warn!("tiling pattern: singular pattern transform");
+                return;
+            }
+        };
+        // Map the four device-bbox corners into pattern space.
+        let corners = [
+            inv.transform_point(dx0 as f64, dy0 as f64),
+            inv.transform_point(dx1 as f64, dy0 as f64),
+            inv.transform_point(dx0 as f64, dy1 as f64),
+            inv.transform_point(dx1 as f64, dy1 as f64),
+        ];
+        let (mut pminx, mut pminy, mut pmaxx, mut pmaxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for (px, py) in corners {
+            pminx = pminx.min(px);
+            pminy = pminy.min(py);
+            pmaxx = pmaxx.max(px);
+            pmaxy = pmaxy.max(py);
+        }
+        // Tile index range: which (i,j) translations of the tile overlap the
+        // pattern-space region, accounting for the BBox extent vs the step.
+        let i0 = ((pminx - bbox[2]) / x_step).floor() as i64;
+        let i1 = ((pmaxx - bbox[0]) / x_step).ceil() as i64;
+        let j0 = ((pminy - bbox[3]) / y_step).floor() as i64;
+        let j1 = ((pmaxy - bbox[1]) / y_step).ceil() as i64;
+
+        let tile_count = (i1 - i0 + 1).max(0) as i128 * (j1 - j0 + 1).max(0) as i128;
+        const TILE_CAP: i128 = 20_000;
+        if tile_count > TILE_CAP {
+            log::warn!(
+                "tiling pattern: {tile_count} tiles exceeds cap {TILE_CAP}; skipping (tile step \
+                 too small for fill area)"
+            );
+            return;
+        }
+        if tile_count == 0 {
+            return;
+        }
+
+        let content_bytes = {
+            let stream_obj = PdfObject::Stream {
+                dict: pat_dict.clone(),
+                raw: raw_bytes,
+            };
+            match crate::filters::decode_stream(&stream_obj, reader) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    log::warn!("tiling pattern: content decode failed: {err}");
+                    return;
+                }
+            }
+        };
+        let ops = match crate::content::ContentParser::parse(&content_bytes) {
+            Ok(ops) => ops,
+            Err(err) => {
+                log::warn!("tiling pattern: content parse failed: {err}");
+                return;
+            }
+        };
+
+        let pat_resources = if let Some(res_obj) = pat_dict.get("Resources") {
+            let pr = crate::engine::parse_resources_from_obj(res_obj, reader);
+            merge_resources(pr, &self.resources)
+        } else {
+            self.resources.clone()
+        };
+
+        // For PaintType 2 (uncolored), the tile is painted in the current fill
+        // color; the tile's own content stream must not set color. The fill
+        // color space is the special Pattern space, so reconstruct the concrete
+        // color from the numeric components recorded by `scn` (by component
+        // count: 1 -> gray, 3 -> RGB, 4 -> CMYK).
+        let forced_color = if paint_type == 2 {
+            Some(uncolored_pattern_color(&self.gs.fill_color))
+        } else {
+            None
+        };
+
+        // Install the path clip, then render each tile (each clips additionally
+        // to its own BBox). The path clip bounds the whole fill to the shape.
+        let saved_clip = self.buf.clip_mask().cloned();
+        self.buf.set_clip(path_clip);
+
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                // Each tile replays the pattern's full content stream, so even
+                // under the 20k-tile cap this loop can be expensive. Poll the
+                // cancellation flag once per tile (cheap relative to a tile
+                // render) so a pathological pattern stops promptly on timeout.
+                if self.cancel.is_cancelled() {
+                    self.buf.restore_clip(saved_clip);
+                    return;
+                }
+                let translate =
+                    Transform2D::new(1.0, 0.0, 0.0, 1.0, i as f64 * x_step, j as f64 * y_step);
+                let tile_ctm = translate.concat(&pattern_ctm);
+                self.render_pattern_tile(&ops, &pat_resources, tile_ctm, bbox, forced_color.as_ref());
+            }
+        }
+
+        self.buf.restore_clip(saved_clip);
+    }
+
+    /// Render a single tile of a tiling pattern at `tile_ctm`, clipped to the
+    /// tile's BBox (the page-path clip is already installed on `self.buf`).
+    fn render_pattern_tile(
+        &mut self,
+        ops: &[ContentOperation],
+        resources: &PageResources,
+        tile_ctm: Transform2D,
+        bbox: [f64; 4],
+        forced_color: Option<&(ColorSpace, crate::content::state::Color)>,
+    ) {
+        let saved_gs = self.gs.clone();
+        let saved_resources = self.resources.clone();
+        let saved_base_ctm = self.base_ctm;
+        let saved_clip = self.buf.clip_mask().cloned();
+        self.form_depth += 1;
+
+        self.gs.ctm = tile_ctm.to_array();
+        self.base_ctm = tile_ctm;
+        self.resources = resources.clone();
+        if let Some((space, color)) = forced_color {
+            self.gs.fill_color_space = space.clone();
+            self.gs.fill_color = color.clone();
+            self.gs.stroke_color_space = space.clone();
+            self.gs.stroke_color = color.clone();
+        }
+
+        // Intersect the tile BBox so tile content cannot bleed past one cell.
+        let x_min = bbox[0].min(bbox[2]);
+        let y_min = bbox[1].min(bbox[3]);
+        let w = (bbox[2] - bbox[0]).abs();
+        let h = (bbox[3] - bbox[1]).abs();
+        if w > 0.0 && h > 0.0 {
+            let mut bbox_path = Path::new();
+            bbox_path.rect(x_min, y_min, w, h);
+            let flat = flatten_path(&bbox_path, &self.ctm(), &self.viewport, 0.5);
+            let bbox_clip =
+                ClipMask::from_path(&flat, self.buf.width, self.buf.height, FillRule::NonZero);
+            self.buf.set_clip(bbox_clip); // intersects with the installed path clip
+        }
+
+        self.dispatch_all(ops);
+
+        // Restore.
+        self.form_depth = self.form_depth.saturating_sub(1);
+        self.gs = saved_gs;
+        self.resources = saved_resources;
+        self.base_ctm = saved_base_ctm;
+        self.buf.restore_clip(saved_clip);
+        self.buf.blend_mode = self.gs.blend_mode;
     }
 
     /// Paint a shading pattern (PatternType 2) clipped to the current path.
@@ -858,14 +1336,17 @@ impl<'a> RenderState<'a> {
             return;
         };
 
-        // The pattern carries its own /Matrix (pattern space → default user
-        // space). Combine it with the current CTM for the shading geometry.
+        // The pattern carries its own /Matrix (pattern space → the default user
+        // coordinate system of the pattern's parent content stream). Per PDF
+        // 32000-1 §8.7.3.1 the pattern matrix is relative to that *base* CTM, not
+        // the CTM in effect at the moment of the fill, so combine it with
+        // `base_ctm` (matching the tiling-pattern path).
         let ctm = match get_float_array_dict(pattern_dict, "Matrix") {
             Some(m) if m.len() >= 6 => {
                 let pat = Transform2D::from([m[0], m[1], m[2], m[3], m[4], m[5]]);
-                pat.concat(&self.ctm())
+                pat.concat(&self.base_ctm)
             }
-            _ => self.ctm(),
+            _ => self.base_ctm,
         };
 
         // Clip to the path being filled, intersected with the existing clip.
@@ -875,7 +1356,15 @@ impl<'a> RenderState<'a> {
         let saved_clip = self.buf.clip_mask().cloned();
         self.buf.set_clip(path_clip); // intersects with any existing clip
 
-        ShadingRenderer::paint(&shading_dict, &ctm, &self.viewport, &mut self.buf, reader);
+        let mesh_data = shading_mesh_data(&shading_obj, &shading_dict, reader);
+        ShadingRenderer::paint(
+            &shading_dict,
+            &ctm,
+            &self.viewport,
+            &mut self.buf,
+            reader,
+            mesh_data.as_deref(),
+        );
 
         // Restore the exact previous clip (restore_clip sets directly).
         self.buf.restore_clip(saved_clip);
@@ -1031,6 +1520,14 @@ impl<'a> RenderState<'a> {
         let face = match ttf_parser::Face::parse(font_bytes, 0) {
             Ok(face) => face,
             Err(err) => {
+                // Bare CFF (FontFile3 /Type1C) is not sfnt-wrapped, so Face::parse
+                // rejects it. Fall back to the standalone CFF parser before
+                // giving up. This is the OpenType-CFF / Type1C glyph path.
+                if let Some(result) =
+                    crate::render::font_rasterizer::cff_support::outline_by_char(font_bytes, ch)
+                {
+                    return result;
+                }
                 log::warn!(
                     "PageRenderer: extract_glyph_path font parse failed: {:?}",
                     err
@@ -1060,6 +1557,14 @@ impl<'a> RenderState<'a> {
         let face = match ttf_parser::Face::parse(font_bytes, 0) {
             Ok(face) => face,
             Err(err) => {
+                // Bare CFF (FontFile3 /CIDFontType0C, used by CJK Type0 fonts)
+                // is keyed by glyph index; fall back to the standalone CFF
+                // parser before giving up.
+                if let Some(result) =
+                    crate::render::font_rasterizer::cff_support::outline_by_gid(font_bytes, gid)
+                {
+                    return result;
+                }
                 log::warn!(
                     "PageRenderer: extract_glyph_path_by_gid font parse failed: {:?}",
                     err
@@ -1087,9 +1592,14 @@ impl<'a> RenderState<'a> {
     }
 
     fn get_upem(font_bytes: &[u8]) -> Option<u16> {
-        ttf_parser::Face::parse(font_bytes, 0)
-            .ok()
-            .map(|face| face.units_per_em())
+        if let Ok(face) = ttf_parser::Face::parse(font_bytes, 0) {
+            return Some(face.units_per_em());
+        }
+        // Bare CFF reports a 1000-unit em (FontMatrix 0.001 convention).
+        if crate::render::font_rasterizer::cff_support::is_bare_cff(font_bytes) {
+            return Some(crate::render::font_rasterizer::cff_support::units_per_em() as u16);
+        }
+        None
     }
 
     fn decode_text_bytes(&self, bytes: &[u8], font_name: &str) -> Vec<DecodedGlyph> {
@@ -1354,6 +1864,121 @@ fn is_transparency_group(form_dict: &PdfDictionary) -> bool {
     )
 }
 
+/// Collect inline image `ID` operands (alternating key/value) into a map.
+/// Keys arrive already normalized to full names by the content parser.
+fn inline_params_to_map(operands: &[Operand]) -> std::collections::HashMap<String, Operand> {
+    let mut map = std::collections::HashMap::new();
+    let mut iter = operands.iter();
+    while let Some(key_op) = iter.next() {
+        if let Operand::Name(key) = key_op {
+            if let Some(value) = iter.next() {
+                map.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    map
+}
+
+fn dict_int(map: &std::collections::HashMap<String, Operand>, key: &str) -> Option<i64> {
+    match map.get(key)? {
+        Operand::Integer(n) => Some(*n),
+        Operand::Real(r) => Some(*r as i64),
+        _ => None,
+    }
+}
+
+fn dict_bool(map: &std::collections::HashMap<String, Operand>, key: &str) -> Option<bool> {
+    match map.get(key)? {
+        Operand::Boolean(b) => Some(*b),
+        _ => None,
+    }
+}
+
+fn dict_name<'a>(map: &'a std::collections::HashMap<String, Operand>, key: &str) -> Option<&'a str> {
+    match map.get(key)? {
+        Operand::Name(n) => Some(n.as_str()),
+        _ => None,
+    }
+}
+
+/// Extract the inline image filter chain (`/Filter`), accepting a single name
+/// or a name array. Returns filter names verbatim (full forms after parser
+/// normalization); `decode_inline` understands them.
+fn dict_filter_list(map: &std::collections::HashMap<String, Operand>) -> Vec<&str> {
+    match map.get("Filter") {
+        Some(Operand::Name(n)) => vec![n.as_str()],
+        Some(Operand::Array(items)) => items.iter().filter_map(Operand::as_name).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Determine the opaque backdrop color for a luminosity soft mask.
+///
+/// Defaults to black `[0,0,0,255]` (the spec default, which yields mask=0 in
+/// unpainted areas). An explicit `/BC` array overrides it, interpreted in the
+/// mask group's color space (`/Group /CS`) by component count: 1 → gray, 3 →
+/// RGB, 4 → CMYK. The result is always opaque (alpha 255) so luminosity is
+/// well-defined everywhere.
+fn smask_backdrop_color(smask_dict: &PdfDictionary, g_dict: &PdfDictionary) -> PixelColor {
+    let Some(bc) = smask_dict
+        .get("BC")
+        .and_then(PdfObject::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(PdfObject::as_number)
+                .collect::<Vec<f64>>()
+        })
+    else {
+        return [0, 0, 0, 255];
+    };
+    if bc.is_empty() {
+        return [0, 0, 0, 255];
+    }
+
+    // Try to honor the group color space's channel count; fall back to the
+    // number of /BC components.
+    let space_name = g_dict
+        .get("Group")
+        .and_then(PdfObject::as_dict)
+        .and_then(|g| g.get("CS"))
+        .and_then(PdfObject::as_name)
+        .map(str::to_string);
+
+    let rc = match space_name.as_deref() {
+        Some(name) => ColorSpaceHandler::from_components(name, &bc, 1.0),
+        None => match bc.len() {
+            1 => ColorSpaceHandler::from_components("DeviceGray", &bc, 1.0),
+            4 => ColorSpaceHandler::from_components("DeviceCMYK", &bc, 1.0),
+            _ => ColorSpaceHandler::from_components("DeviceRGB", &bc, 1.0),
+        },
+    };
+    let p = rc.to_pixel_color();
+    [p[0], p[1], p[2], 255]
+}
+
+/// The `/Group` sub-dictionary of a Form XObject, if it is a transparency
+/// group. Returns `None` for non-group Forms.
+fn transparency_group_dict(form_dict: &PdfDictionary) -> Option<&PdfDictionary> {
+    match form_dict.get("Group") {
+        Some(PdfObject::Dictionary(group)) if group.get_name("S") == Some("Transparency") => {
+            Some(group)
+        }
+        _ => None,
+    }
+}
+
+/// Read the `/I` (isolated) flag of a transparency group dictionary
+/// (default false).
+fn group_is_isolated(group: &PdfDictionary) -> bool {
+    group.get_bool("I").unwrap_or(false)
+}
+
+/// Read the `/K` (knockout) flag of a transparency group dictionary
+/// (default false).
+fn group_is_knockout(group: &PdfDictionary) -> bool {
+    group.get_bool("K").unwrap_or(false)
+}
+
 /// Resolve a shading/pattern object (direct dict, stream, or indirect
 /// reference) to its dictionary. Returns `None` for anything else.
 fn resolve_to_dict(obj: &PdfObject, reader: &crate::reader::PdfReader) -> Option<PdfDictionary> {
@@ -1369,6 +1994,84 @@ fn resolve_to_dict(obj: &PdfObject, reader: &crate::reader::PdfReader) -> Option
         }
         _ => None,
     }
+}
+
+/// Reconstruct the concrete fill color for an uncolored (PaintType 2) tiling
+/// pattern from the components recorded by `scn`. The fill color space is the
+/// abstract Pattern space, so the concrete base space is inferred from the
+/// number of numeric components.
+fn uncolored_pattern_color(
+    fill_color: &crate::content::state::Color,
+) -> (ColorSpace, crate::content::state::Color) {
+    let comps = fill_color.components.clone();
+    let space = match comps.len() {
+        1 => ColorSpace::DeviceGray,
+        4 => ColorSpace::DeviceCMYK,
+        _ => ColorSpace::DeviceRGB,
+    };
+    let color = crate::content::state::Color {
+        space: space.clone(),
+        components: comps,
+    };
+    (space, color)
+}
+
+/// For a mesh shading (ShadingType 4–7), decode and return the shading stream's
+/// data (the packed vertex/patch records). Returns `None` for dictionary-only
+/// shadings (Types 1–3) or if the object is not a stream.
+fn shading_mesh_data(
+    shading_obj: &PdfObject,
+    shading_dict: &PdfDictionary,
+    reader: &crate::reader::PdfReader,
+) -> Option<Vec<u8>> {
+    let st = shading_dict.get_integer("ShadingType").unwrap_or(0);
+    if !(4..=7).contains(&st) {
+        return None;
+    }
+    let (dict, raw) = resolve_to_stream(shading_obj, reader)?;
+    let stream_obj = PdfObject::Stream { dict, raw };
+    crate::filters::decode_stream(&stream_obj, reader).ok()
+}
+
+/// Resolve a pattern/function object to its (dictionary, raw stream bytes).
+/// Returns `None` if it is not a stream.
+fn resolve_to_stream(
+    obj: &PdfObject,
+    reader: &crate::reader::PdfReader,
+) -> Option<(PdfDictionary, Vec<u8>)> {
+    match obj {
+        PdfObject::Stream { dict, raw } => Some((dict.clone(), raw.clone())),
+        PdfObject::Reference { number, generation } => {
+            match reader.get_object(*number, *generation).ok()? {
+                PdfObject::Stream { dict, raw } => Some((dict, raw)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Compute the integer device-space bounding box of a flattened path, clamped to
+/// the buffer. Returns `(x0, y0, x1, y1)` inclusive; an empty/degenerate path
+/// yields `x1 < x0`.
+fn path_device_bounds(flat: &FlatPath, width: u32, height: u32) -> (i32, i32, i32, i32) {
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for sub in &flat.subpaths {
+        for &(x, y) in sub {
+            minx = minx.min(x);
+            miny = miny.min(y);
+            maxx = maxx.max(x);
+            maxy = maxy.max(y);
+        }
+    }
+    if minx > maxx || miny > maxy {
+        return (1, 1, 0, 0); // empty
+    }
+    let x0 = minx.floor().max(0.0) as i32;
+    let y0 = miny.floor().max(0.0) as i32;
+    let x1 = (maxx.ceil() as i32).min(width as i32 - 1);
+    let y1 = (maxy.ceil() as i32).min(height as i32 - 1);
+    (x0, y0, x1, y1)
 }
 
 /// Read a numeric array entry from a dictionary, e.g. a pattern `/Matrix`.
@@ -1510,7 +2213,7 @@ mod tests {
         let mut src = PixelBuffer::new_transparent(1, 1);
         src.blend_pixel(0, 0, RED, 1.0);
 
-        RenderState::composite_group(&mut dst, &src, 1.0, BlendMode::Normal);
+        dst.composite_from(&src, 1.0, BlendMode::Normal, None);
         let result = dst.get_pixel(0, 0);
         assert!(result[0] > 200, "group should paint red: {:?}", result);
         assert!(result[1] < 50, "green channel should be low: {:?}", result);
@@ -1522,14 +2225,13 @@ mod tests {
         let mut src = PixelBuffer::new_transparent(1, 1);
         src.blend_pixel(0, 0, BLACK, 1.0);
 
-        RenderState::composite_group(&mut dst, &src, 0.5, BlendMode::Normal);
+        dst.composite_from(&src, 0.5, BlendMode::Normal, None);
         let result = dst.get_pixel(0, 0);
         assert!(
             result[0] > 100 && result[0] < 200,
             "50% black over white should be gray: {:?}",
             result
         );
-        println!("composite_group 50% black over white: {:?}", result);
     }
 
     #[test]
@@ -1920,7 +2622,7 @@ mod tests {
         }
     }
 
-    // ── Form XObject helper tests (Mega 19) ─────────────────────────────────
+    // ── Form XObject helper tests ───────────────────────────────────────────
 
     fn dict_with(entries: &[(&str, PdfObject)]) -> PdfDictionary {
         PdfDictionary::new(

@@ -236,6 +236,11 @@ impl AlphaMask {
         }
     }
 
+    /// Build a luminosity soft mask from a rendered buffer (ExtGState
+    /// `/SMask /S /Luminosity`). The mask value for each pixel is the
+    /// perceptual luminance of its RGB. We use Rec. 601 weights
+    /// (0.299/0.587/0.114), which is what Poppler's `SplashBitmap` uses for
+    /// luminosity soft masks; matching it keeps our masks PSNR-comparable.
     pub fn from_luminosity(buf: &PixelBuffer) -> Self {
         let len = (buf.width as usize)
             .checked_mul(buf.height as usize)
@@ -253,6 +258,35 @@ impl AlphaMask {
             }
         }
         mask
+    }
+
+    /// Build an alpha soft mask from a rendered buffer (ExtGState
+    /// `/SMask /S /Alpha`). The mask value for each pixel is the buffer's own
+    /// alpha channel — no luminosity conversion.
+    pub fn from_alpha_channel(buf: &PixelBuffer) -> Self {
+        let len = (buf.width as usize)
+            .checked_mul(buf.height as usize)
+            .unwrap_or(0);
+        let mut mask = Self {
+            width: buf.width,
+            height: buf.height,
+            data: vec![0u8; len],
+        };
+        for y in 0..buf.height as i32 {
+            for x in 0..buf.width as i32 {
+                mask.set(x, y, buf.get_pixel(x, y)[3]);
+            }
+        }
+        mask
+    }
+
+    /// Remap every mask value through a transfer-function lookup table
+    /// (256 entries, input index -> output byte). Used for ExtGState SMask
+    /// `/TR` transfer functions.
+    pub fn apply_transfer_lut(&mut self, lut: &[u8; 256]) {
+        for v in self.data.iter_mut() {
+            *v = lut[*v as usize];
+        }
     }
 }
 
@@ -435,11 +469,18 @@ impl PixelBuffer {
             (src_r, src_g, src_b)
         } else {
             let bm = self.blend_mode;
-            (
-                bm.blend_channel(src_r, dst_r),
-                bm.blend_channel(src_g, dst_g),
-                bm.blend_channel(src_b, dst_b),
-            )
+            if bm.is_separable() {
+                (
+                    bm.blend_channel(src_r, dst_r),
+                    bm.blend_channel(src_g, dst_g),
+                    bm.blend_channel(src_b, dst_b),
+                )
+            } else {
+                // Non-separable modes (Hue/Saturation/Color/Luminosity) operate
+                // on the whole RGB triple, not per channel.
+                let [r, g, b] = bm.blend_rgb([src_r, src_g, src_b], [dst_r, dst_g, dst_b]);
+                (r, g, b)
+            }
         };
         let out_a = eff_a + dst_a * (1.0 - eff_a);
 
@@ -617,6 +658,133 @@ impl PixelBuffer {
             channels: 4,
             bits_per_sample: 8,
             pixels: self.to_rgba_bytes(),
+        }
+    }
+
+    /// Composite a source RGBA buffer onto this buffer.
+    ///
+    /// This is the primitive used to flatten a transparency-group offscreen
+    /// buffer onto its parent (the page buffer, or an enclosing group). The
+    /// source's own per-pixel alpha is honored, then scaled by `group_alpha`
+    /// (the `/ca` or `/CA` constant active at the `Do` operator) and, if
+    /// present, by the per-pixel `soft_mask` value. Blending of color channels
+    /// uses `blend_mode`. `self`'s own clip mask still applies.
+    ///
+    /// `self` and `src` must have the same dimensions (both are page-sized in
+    /// the renderer), which keeps device coordinates aligned 1:1.
+    pub fn composite_from(
+        &mut self,
+        src: &PixelBuffer,
+        group_alpha: f32,
+        blend_mode: BlendMode,
+        soft_mask: Option<&AlphaMask>,
+    ) {
+        let alpha = group_alpha.clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            return;
+        }
+        let saved_blend = self.blend_mode;
+        self.blend_mode = blend_mode;
+        let w = self.width.min(src.width) as i32;
+        let h = self.height.min(src.height) as i32;
+        for y in 0..h {
+            for x in 0..w {
+                let sp = src.get_pixel(x, y);
+                if sp[3] == 0 {
+                    continue;
+                }
+                let mask = soft_mask.map_or(1.0, |m| m.get(x, y));
+                let coverage = alpha * mask;
+                if coverage <= 0.0 {
+                    continue;
+                }
+                // `blend_pixel` interprets the source's alpha (sp[3]) and the
+                // coverage multiplier together, applying the buffer blend mode
+                // and any installed clip; reusing it keeps a single compositing
+                // code path for direct paints and group flattening.
+                self.blend_pixel(x, y, sp, coverage);
+            }
+        }
+        self.blend_mode = saved_blend;
+    }
+
+    /// Remove a backdrop's contribution from this buffer (a non-isolated
+    /// transparency-group result that was seeded with `backdrop`).
+    ///
+    /// A non-isolated group is rendered starting from a copy of its backdrop so
+    /// that blend modes inside the group can interact with what is already
+    /// painted. Before the group is composited back onto that same backdrop, the
+    /// backdrop's own contribution must be removed so it is not counted twice.
+    /// Per PDF 32000-1 §11.4.8, with group result `(Cn, αn)` and initial
+    /// backdrop `(C0, α0)`:
+    ///
+    /// ```text
+    /// C = Cn + (Cn - C0) * (α0 / αn - α0)   (per color channel, when αn > 0)
+    /// ```
+    ///
+    /// The result alpha is left as `αn`; compositing back with source-over then
+    /// reproduces the correct final image.
+    pub fn remove_backdrop(&mut self, backdrop: &PixelBuffer) {
+        let w = self.width.min(backdrop.width) as i32;
+        let h = self.height.min(backdrop.height) as i32;
+        for y in 0..h {
+            for x in 0..w {
+                let Some(idx) = self.pixel_index(x, y) else {
+                    continue;
+                };
+                let an = self.data[idx + 3] as f32 / 255.0;
+                if an <= 1e-6 {
+                    continue;
+                }
+                let bd = backdrop.get_pixel(x, y);
+                let a0 = bd[3] as f32 / 255.0;
+                if a0 <= 1e-6 {
+                    // No backdrop here: nothing to remove.
+                    continue;
+                }
+                let factor = a0 / an - a0;
+                for (c, &c0_byte) in bd.iter().take(3).enumerate() {
+                    let cn = self.data[idx + c] as f32 / 255.0;
+                    let c0 = c0_byte as f32 / 255.0;
+                    let out = cn + (cn - c0) * factor;
+                    self.data[idx + c] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+    }
+
+    /// Composite a source buffer onto this one using "knockout" semantics:
+    /// each source pixel with non-zero alpha *replaces* the destination pixel
+    /// (scaled by `group_alpha`/`soft_mask`) rather than blending with it. Used
+    /// for knockout transparency groups (/K true), where group elements knock
+    /// out the group backdrop instead of accumulating.
+    pub fn knockout_from(
+        &mut self,
+        src: &PixelBuffer,
+        group_alpha: f32,
+        soft_mask: Option<&AlphaMask>,
+    ) {
+        let alpha = group_alpha.clamp(0.0, 1.0);
+        for y in 0..self.height.min(src.height) as i32 {
+            for x in 0..self.width.min(src.width) as i32 {
+                if let Some(clip) = &self.clip {
+                    if !clip.is_visible(x, y) {
+                        continue;
+                    }
+                }
+                let sp = src.get_pixel(x, y);
+                if sp[3] == 0 {
+                    continue;
+                }
+                let mask = soft_mask.map_or(1.0, |m| m.get(x, y));
+                let eff = (sp[3] as f32 / 255.0 * alpha * mask).clamp(0.0, 1.0);
+                if let Some(idx) = self.pixel_index(x, y) {
+                    self.data[idx] = sp[0];
+                    self.data[idx + 1] = sp[1];
+                    self.data[idx + 2] = sp[2];
+                    self.data[idx + 3] = (eff * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+            }
         }
     }
 }
@@ -977,6 +1145,90 @@ mod tests {
             "50% soft mask over white should be gray-ish: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn composite_from_half_alpha_red_over_white_is_pink() {
+        // A fully-opaque red source composited at 50% group alpha onto white
+        // must produce the same pink as a 50%-alpha red paint: 255 / 127 / 127.
+        let mut dst = PixelBuffer::new_filled(2, 2, WHITE);
+        let src = PixelBuffer::new_filled(2, 2, RED);
+        dst.composite_from(&src, 0.5, BlendMode::Normal, None);
+        let p = dst.get_pixel(0, 0);
+        assert_eq!(p[0], 255, "red channel stays max");
+        assert!((p[1] as i32 - 127).abs() <= 2, "green ~127, got {}", p[1]);
+        assert!((p[2] as i32 - 127).abs() <= 2, "blue ~127, got {}", p[2]);
+    }
+
+    #[test]
+    fn composite_from_respects_per_pixel_soft_mask() {
+        // Opaque red source, full group alpha, but a soft mask that is 0 at
+        // pixel (0,0) and 255 at (1,0). The masked pixel must stay white; the
+        // unmasked pixel must become red.
+        let mut dst = PixelBuffer::new_filled(2, 1, WHITE);
+        let src = PixelBuffer::new_filled(2, 1, RED);
+        let mut mask = AlphaMask::all_opaque(2, 1);
+        mask.set(0, 0, 0);
+        mask.set(1, 0, 255);
+        dst.composite_from(&src, 1.0, BlendMode::Normal, Some(&mask));
+        assert_eq!(dst.get_pixel(0, 0), WHITE, "masked-out pixel unchanged");
+        assert_eq!(dst.get_pixel(1, 0), RED, "unmasked pixel fully painted");
+    }
+
+    #[test]
+    fn composite_from_skips_transparent_source_pixels() {
+        let mut dst = PixelBuffer::new_filled(2, 1, WHITE);
+        let mut src = PixelBuffer::new_transparent(2, 1);
+        src.set_pixel(1, 0, RED);
+        dst.composite_from(&src, 1.0, BlendMode::Normal, None);
+        assert_eq!(dst.get_pixel(0, 0), WHITE, "transparent src leaves dst");
+        assert_eq!(dst.get_pixel(1, 0), RED);
+    }
+
+    #[test]
+    fn composite_from_uses_blend_mode() {
+        let mut dst = PixelBuffer::new_filled(1, 1, [200, 200, 200, 255]);
+        let src = PixelBuffer::new_filled(1, 1, [128, 128, 128, 255]);
+        dst.composite_from(&src, 1.0, BlendMode::Multiply, None);
+        // Multiply darkens: 200/255 * 128/255 ~= 100.
+        assert!(dst.get_pixel(0, 0)[0] < 170, "multiply should darken");
+        // The buffer's own blend mode is restored to Normal afterwards.
+        assert_eq!(dst.blend_mode, BlendMode::Normal);
+    }
+
+    #[test]
+    fn knockout_from_replaces_rather_than_blends() {
+        // Knockout: a semi-transparent source replaces the destination's color
+        // outright (alpha scaled), it does not composite over it.
+        let mut dst = PixelBuffer::new_filled(1, 1, WHITE);
+        let src = PixelBuffer::new_filled(1, 1, [10, 20, 30, 128]);
+        dst.knockout_from(&src, 1.0, None);
+        let p = dst.get_pixel(0, 0);
+        assert_eq!([p[0], p[1], p[2]], [10, 20, 30], "color replaced outright");
+        assert!((p[3] as i32 - 128).abs() <= 1, "alpha scaled, got {}", p[3]);
+    }
+
+    #[test]
+    fn from_alpha_channel_reads_alpha_not_luminosity() {
+        let mut buf = PixelBuffer::new_transparent(2, 1);
+        buf.set_pixel(0, 0, [255, 255, 255, 64]); // white but low alpha
+        buf.set_pixel(1, 0, [0, 0, 0, 200]); // black but high alpha
+        let mask = AlphaMask::from_alpha_channel(&buf);
+        assert!((mask.get(0, 0) - 64.0 / 255.0).abs() < 0.01);
+        assert!((mask.get(1, 0) - 200.0 / 255.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn apply_transfer_lut_remaps_mask_values() {
+        let mut mask = AlphaMask::all_opaque(1, 1);
+        mask.set(0, 0, 100);
+        // Inversion LUT: out = 255 - in.
+        let mut lut = [0u8; 256];
+        for (i, v) in lut.iter_mut().enumerate() {
+            *v = 255 - i as u8;
+        }
+        mask.apply_transfer_lut(&lut);
+        assert!((mask.get(0, 0) - (155.0 / 255.0)).abs() < 0.01);
     }
 
     #[test]

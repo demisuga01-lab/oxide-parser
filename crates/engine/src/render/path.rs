@@ -291,7 +291,7 @@ impl PathPainter {
 
                 let ux = dx / seg_len;
                 let uy = dy / seg_len;
-                // TODO(dash): maintain continuous dash state across the entire path.
+                // TODO: maintain continuous dash state across the entire path.
                 let mut dash_copy = dash.clone();
                 for (t0, t1, drawing) in dash_copy.advance(seg_len) {
                     if !drawing {

@@ -1,13 +1,18 @@
 pub mod buffer;
 pub mod color;
+pub mod colorspace;
 pub mod font_rasterizer;
+pub mod function;
 pub mod glyph_cache;
+pub mod glyph_outline;
 pub mod image_painter;
 pub mod line;
 pub mod page_renderer;
 pub mod path;
 pub mod quality;
 pub mod shading;
+pub mod svg;
+pub mod text_decode;
 pub mod transform;
 
 pub use buffer::{
@@ -23,4 +28,5 @@ pub use page_renderer::PageRenderer;
 pub use path::{flatten_cubic, flatten_path, FillRule, FlatPath, Path, PathPainter, PathSegment};
 pub use quality::RenderQuality;
 pub use shading::ShadingRenderer;
+pub use svg::{render_page_svg, SvgPage};
 pub use transform::{Transform2D, Viewport};
