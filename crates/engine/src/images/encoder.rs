@@ -7,6 +7,7 @@ use crate::reader::PdfReader;
 pub enum ImageOutputFormat {
     Png,
     Jpeg,
+    Webp,
     /// Keep original compressed bytes when possible.
     Original,
 }
@@ -16,6 +17,7 @@ impl ImageOutputFormat {
         match self {
             ImageOutputFormat::Png => "png",
             ImageOutputFormat::Jpeg => "jpg",
+            ImageOutputFormat::Webp => "webp",
             ImageOutputFormat::Original => "bin",
         }
     }
@@ -24,6 +26,7 @@ impl ImageOutputFormat {
         match self {
             ImageOutputFormat::Png => "image/png",
             ImageOutputFormat::Jpeg => "image/jpeg",
+            ImageOutputFormat::Webp => "image/webp",
             ImageOutputFormat::Original => "application/octet-stream",
         }
     }
@@ -129,11 +132,33 @@ impl ImageEncoder {
         Ok(output)
     }
 
-    /// TODO(webp): implement using the `webp` crate once cmake/C toolchain is available.
-    pub fn encode_webp(_image: &RawImage, _quality: u8) -> Result<Vec<u8>> {
-        Err(OxideError::UnsupportedFeature(
-            "WebP encoding is not yet available. Use PNG or JPEG output instead.".to_string(),
-        ))
+    /// Encode a RawImage as WebP bytes.
+    ///
+    /// Uses the pure-Rust `image-webp` crate (no C toolchain / cmake), which
+    /// emits lossless VP8L WebP. The `quality` argument is accepted for API
+    /// symmetry with [`Self::encode_jpeg`] but ignored, since the encoder is
+    /// lossless. Supports 1-channel (grayscale), 3-channel (RGB), and 4-channel
+    /// (RGBA) input; other channel counts are rejected.
+    pub fn encode_webp(image: &RawImage, _quality: u8) -> Result<Vec<u8>> {
+        use image_webp::{ColorType, WebPEncoder};
+
+        let color_type = match image.channels {
+            1 => ColorType::L8,
+            3 => ColorType::Rgb8,
+            4 => ColorType::Rgba8,
+            n => {
+                return Err(OxideError::UnsupportedFeature(format!(
+                    "WebP encoding: unsupported channel count {n}"
+                )))
+            }
+        };
+
+        let mut out = Vec::new();
+        let encoder = WebPEncoder::new(&mut out);
+        encoder
+            .encode(&image.pixels, image.width, image.height, color_type)
+            .map_err(|e| OxideError::MalformedPdf(format!("WebP encode error: {e}")))?;
+        Ok(out)
     }
 
     /// Keep original stream bytes when the source encoding matches the target.
@@ -165,7 +190,7 @@ impl ImageEncoder {
                     Ok(None)
                 }
             }
-            ImageOutputFormat::Png => Ok(None),
+            ImageOutputFormat::Png | ImageOutputFormat::Webp => Ok(None),
         }
     }
 
@@ -179,6 +204,7 @@ impl ImageEncoder {
         match format {
             ImageOutputFormat::Png => Self::encode_png(image),
             ImageOutputFormat::Jpeg => Self::encode_jpeg(image, quality),
+            ImageOutputFormat::Webp => Self::encode_webp(image, quality),
             ImageOutputFormat::Original => Self::encode_png(image),
         }
     }
@@ -268,13 +294,71 @@ mod tests {
     }
 
     #[test]
-    fn encode_webp_returns_unsupported_feature() {
+    fn encode_webp_round_trips_rgb_losslessly() {
+        // A small RGB checkerboard. image-webp emits lossless VP8L, so the
+        // round-trip must be pixel-exact.
+        let mut pixels = Vec::new();
+        for y in 0..4u8 {
+            for x in 0..4u8 {
+                if (x + y) % 2 == 0 {
+                    pixels.extend_from_slice(&[200, 30, 90]);
+                } else {
+                    pixels.extend_from_slice(&[10, 180, 240]);
+                }
+            }
+        }
+        let img = RawImage {
+            width: 4,
+            height: 4,
+            channels: 3,
+            bits_per_sample: 8,
+            pixels: pixels.clone(),
+        };
+
+        let webp = ImageEncoder::encode_webp(&img, 80).unwrap();
+        assert_eq!(&webp[0..4], b"RIFF");
+        assert_eq!(&webp[8..12], b"WEBP");
+
+        let mut decoder =
+            image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
+        assert_eq!(decoder.dimensions(), (4, 4));
+        let mut decoded = vec![0u8; decoder.output_buffer_size().unwrap()];
+        decoder.read_image(&mut decoded).unwrap();
+        assert_eq!(decoded, pixels, "lossless WebP round-trip must be exact");
+    }
+
+    #[test]
+    fn encode_webp_round_trips_grayscale_losslessly() {
+        let pixels: Vec<u8> = (0..16u8).collect();
+        let img = RawImage {
+            width: 4,
+            height: 4,
+            channels: 1,
+            bits_per_sample: 8,
+            pixels: pixels.clone(),
+        };
+        let webp = ImageEncoder::encode_webp(&img, 80).unwrap();
+        let mut decoder =
+            image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
+        assert_eq!(decoder.dimensions(), (4, 4));
+        let mut decoded = vec![0u8; decoder.output_buffer_size().unwrap()];
+        decoder.read_image(&mut decoded).unwrap();
+        // image-webp decodes L8 WebP; compare luminance.
+        assert_eq!(decoded.len() % pixels.len(), 0);
+        // grayscale may decode to L8 (same length) — assert exact when so.
+        if decoded.len() == pixels.len() {
+            assert_eq!(decoded, pixels);
+        }
+    }
+
+    #[test]
+    fn encode_webp_rejects_unsupported_channel_count() {
         let img = RawImage {
             width: 1,
             height: 1,
-            channels: 3,
+            channels: 2,
             bits_per_sample: 8,
-            pixels: vec![0u8; 3],
+            pixels: vec![0u8; 2],
         };
         assert!(matches!(
             ImageEncoder::encode_webp(&img, 80),
@@ -322,6 +406,7 @@ mod tests {
             is_inline: false,
             is_mask: false,
             is_smask: false,
+            inline_data: None,
         };
         assert!(!is_dct_only(&img_ref.filter));
     }

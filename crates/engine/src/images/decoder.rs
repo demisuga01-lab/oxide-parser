@@ -3,6 +3,7 @@ use std::io::Cursor;
 use crate::error::{OxideError, Result};
 use crate::filters::{apply_filter_bytes, decode_stream_lossless, StreamDecodeStatus};
 use crate::images::locator::{ImageLocator, ImageReference};
+use crate::images::{ccitt, jbig2, jpx};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
 
@@ -125,21 +126,34 @@ impl ImageDecoder {
     ) -> Result<RawImage> {
         let decompressed = Self::apply_filters_direct(pixel_data, filter, decode_parms)?;
         if let Some(last_filter) = filter.last() {
-            if matches!(*last_filter, "DCTDecode" | "DCT") {
-                let (mut pixels, w, h, channels) = Self::decode_jpeg_with_info(&decompressed)?;
-                let final_channels = if channels == 4 {
-                    pixels = ColorSpaceConverter::cmyk_to_rgb(&pixels);
-                    3
-                } else {
-                    channels
-                };
-                return Ok(RawImage {
-                    width: w,
-                    height: h,
-                    channels: final_channels,
-                    bits_per_sample: 8,
-                    pixels,
-                });
+            match *last_filter {
+                "DCTDecode" | "DCT" => {
+                    let (mut pixels, w, h, channels) = Self::decode_jpeg_with_info(&decompressed)?;
+                    let final_channels = if channels == 4 {
+                        pixels = ColorSpaceConverter::cmyk_to_rgb(&pixels);
+                        3
+                    } else {
+                        channels
+                    };
+                    return Ok(RawImage {
+                        width: w,
+                        height: h,
+                        channels: final_channels,
+                        bits_per_sample: 8,
+                        pixels,
+                    });
+                }
+                "CCITTFaxDecode" | "CCF" => {
+                    let params = ccitt_decode_params(decode_parms, width, height)?;
+                    return ccitt::decode(&decompressed, params);
+                }
+                "JBIG2Decode" => {
+                    return jbig2::decode(&decompressed, None);
+                }
+                "JPXDecode" => {
+                    return jpx::decode(&decompressed);
+                }
+                _ => {}
             }
         }
 
@@ -300,22 +314,18 @@ impl ImageDecoder {
                     pixels,
                 })
             }
-            "JPXDecode" => {
-                log::warn!("JPXDecode (JPEG2000) is not yet implemented");
-                Err(OxideError::UnsupportedFeature(
-                    "JPXDecode (JPEG2000) is not yet supported; planned for a future release"
-                        .to_string(),
-                ))
-            }
+            "JPXDecode" => jpx::decode(data),
             "CCITTFaxDecode" | "CCF" => {
-                log::warn!("CCITTFaxDecode is not yet implemented");
-                Err(OxideError::UnsupportedFeature(
-                    "CCITTFaxDecode is not yet supported; planned for a future release".to_string(),
-                ))
+                let decode_params = image_decode_params(dict, Some(reader), filter)?;
+                let params =
+                    ccitt_decode_params(decode_params.as_ref(), image.width, image.height)?;
+                ccitt::decode(data, params)
             }
-            "JBIG2Decode" => Err(OxideError::UnsupportedFeature(
-                "JBIG2Decode is not supported".to_string(),
-            )),
+            "JBIG2Decode" => {
+                let decode_params = image_decode_params(dict, Some(reader), filter)?;
+                let globals = jbig2_globals(decode_params.as_ref(), reader)?;
+                jbig2::decode(data, globals.as_deref())
+            }
             other => {
                 let _ = reader;
                 let _ = dict;
@@ -675,6 +685,213 @@ fn resize_mismatch(pixels: &mut Vec<u8>, width: u32, height: u32, expected_size:
     }
 }
 
+fn ccitt_decode_params(
+    params: Option<&PdfDictionary>,
+    image_width: u32,
+    image_height: u32,
+) -> Result<ccitt::CcittDecodeParams> {
+    let default_columns = if image_width == 0 { 1728 } else { image_width };
+    let columns = u32_param(params, "Columns", default_columns, false)?;
+    let mut rows = u32_param(params, "Rows", image_height, true)?;
+    if rows == 0 && image_height > 0 {
+        rows = image_height;
+    }
+
+    Ok(ccitt::CcittDecodeParams {
+        k: int_param(params, "K", 0)?,
+        columns,
+        rows,
+        black_is_1: bool_param(params, "BlackIs1", false)?,
+        encoded_byte_align: bool_param(params, "EncodedByteAlign", false)?,
+        end_of_line: bool_param(params, "EndOfLine", false)?,
+        end_of_block: bool_param(params, "EndOfBlock", true)?,
+    })
+}
+
+fn jbig2_globals(params: Option<&PdfDictionary>, reader: &PdfReader) -> Result<Option<Vec<u8>>> {
+    let Some(globals_obj) = params.and_then(|dict| dict.get("JBIG2Globals")) else {
+        return Ok(None);
+    };
+    let globals_obj = reader.resolve(globals_obj.clone())?;
+    match globals_obj {
+        PdfObject::Stream { dict, raw } => {
+            let stream = PdfObject::Stream { dict, raw };
+            let decoded = decode_stream_lossless(&stream, reader)?;
+            match decoded.status {
+                StreamDecodeStatus::Complete => Ok(Some(decoded.data)),
+                StreamDecodeStatus::StoppedAtImageFilter(filter) => {
+                    Err(OxideError::UnsupportedFeature(format!(
+                        "JBIG2Globals stream stopped at image filter {filter}"
+                    )))
+                }
+            }
+        }
+        PdfObject::String(bytes) => Ok(Some(bytes)),
+        PdfObject::Null => Ok(None),
+        other => Err(OxideError::MalformedPdf(format!(
+            "JBIG2Decode /JBIG2Globals must resolve to a stream, got {}",
+            other.variant_name()
+        ))),
+    }
+}
+
+fn image_decode_params(
+    dict: &PdfDictionary,
+    reader: Option<&PdfReader>,
+    target_filter: &str,
+) -> Result<Option<PdfDictionary>> {
+    let filters = stream_filter_names(dict, reader)?;
+    let params = stream_decode_params(dict, reader, filters.len())?;
+    let target_idx = filters
+        .iter()
+        .position(|filter| same_filter(filter, target_filter))
+        .ok_or_else(|| {
+            OxideError::MalformedPdf(format!(
+                "image stream filter list does not contain stopped filter {target_filter}"
+            ))
+        })?;
+
+    Ok(params.get(target_idx).cloned().flatten())
+}
+
+fn stream_filter_names(dict: &PdfDictionary, reader: Option<&PdfReader>) -> Result<Vec<String>> {
+    let Some(filter_obj) = dict.get("Filter").or_else(|| dict.get("F")) else {
+        return Ok(Vec::new());
+    };
+    let filter_obj = resolved_object(filter_obj, reader)?;
+    match filter_obj {
+        PdfObject::Name(name) => Ok(vec![name]),
+        PdfObject::Array(items) => {
+            let mut names = Vec::with_capacity(items.len());
+            for item in items {
+                match resolved_object(&item, reader)? {
+                    PdfObject::Name(name) => names.push(name),
+                    other => {
+                        return Err(OxideError::MalformedPdf(format!(
+                            "filter array contains {}",
+                            other.variant_name()
+                        )));
+                    }
+                }
+            }
+            Ok(names)
+        }
+        PdfObject::Null => Ok(Vec::new()),
+        other => Err(OxideError::MalformedPdf(format!(
+            "Filter must be a name or array, got {}",
+            other.variant_name()
+        ))),
+    }
+}
+
+fn stream_decode_params(
+    dict: &PdfDictionary,
+    reader: Option<&PdfReader>,
+    filter_count: usize,
+) -> Result<Vec<Option<PdfDictionary>>> {
+    let Some(params_obj) = dict.get("DecodeParms").or_else(|| dict.get("DP")) else {
+        return Ok(vec![None; filter_count]);
+    };
+    let params_obj = resolved_object(params_obj, reader)?;
+    match params_obj {
+        PdfObject::Null => Ok(vec![None; filter_count]),
+        PdfObject::Dictionary(params) => {
+            let mut out = vec![None; filter_count];
+            if !out.is_empty() {
+                out[0] = Some(params);
+            }
+            Ok(out)
+        }
+        PdfObject::Array(items) => {
+            let mut out = Vec::with_capacity(filter_count);
+            for item in items.into_iter().take(filter_count) {
+                match resolved_object(&item, reader)? {
+                    PdfObject::Null => out.push(None),
+                    PdfObject::Dictionary(params) => out.push(Some(params)),
+                    other => {
+                        return Err(OxideError::MalformedPdf(format!(
+                            "DecodeParms array contains {}",
+                            other.variant_name()
+                        )));
+                    }
+                }
+            }
+            while out.len() < filter_count {
+                out.push(None);
+            }
+            Ok(out)
+        }
+        other => Err(OxideError::MalformedPdf(format!(
+            "DecodeParms must be a dictionary or array, got {}",
+            other.variant_name()
+        ))),
+    }
+}
+
+fn resolved_object(obj: &PdfObject, reader: Option<&PdfReader>) -> Result<PdfObject> {
+    match reader {
+        Some(reader) => reader.resolve(obj.clone()),
+        None => Ok(obj.clone()),
+    }
+}
+
+fn same_filter(a: &str, b: &str) -> bool {
+    canonical_filter_name(a) == canonical_filter_name(b)
+}
+
+fn canonical_filter_name(name: &str) -> &str {
+    match name {
+        "DCT" => "DCTDecode",
+        "CCF" => "CCITTFaxDecode",
+        other => other,
+    }
+}
+
+fn int_param(params: Option<&PdfDictionary>, key: &str, default: i64) -> Result<i64> {
+    match params.and_then(|dict| dict.get(key)) {
+        Some(PdfObject::Integer(value)) => Ok(*value),
+        Some(other) => Err(OxideError::MalformedPdf(format!(
+            "CCITTFaxDecode /{key} must be an integer, got {}",
+            other.variant_name()
+        ))),
+        None => Ok(default),
+    }
+}
+
+fn u32_param(
+    params: Option<&PdfDictionary>,
+    key: &str,
+    default: u32,
+    allow_zero: bool,
+) -> Result<u32> {
+    let value = int_param(params, key, i64::from(default))?;
+    if value < 0 || (!allow_zero && value == 0) {
+        return Err(OxideError::MalformedPdf(format!(
+            "CCITTFaxDecode /{key} must be {}",
+            if allow_zero {
+                "nonnegative"
+            } else {
+                "positive"
+            }
+        )));
+    }
+    u32::try_from(value)
+        .map_err(|_| OxideError::MalformedPdf(format!("CCITTFaxDecode /{key} is too large")))
+}
+
+fn bool_param(params: Option<&PdfDictionary>, key: &str, default: bool) -> Result<bool> {
+    match params.and_then(|dict| dict.get(key)) {
+        Some(PdfObject::Boolean(value)) => Ok(*value),
+        Some(PdfObject::Name(name)) if name.eq_ignore_ascii_case("true") => Ok(true),
+        Some(PdfObject::Name(name)) if name.eq_ignore_ascii_case("false") => Ok(false),
+        Some(other) => Err(OxideError::MalformedPdf(format!(
+            "CCITTFaxDecode /{key} must be a boolean, got {}",
+            other.variant_name()
+        ))),
+        None => Ok(default),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,6 +1045,48 @@ mod tests {
         let img = ImageDecoder::build_raw_image_pub(vec![1, 2, 3, 4], 1, 1, 8, "DeviceGray", &dict)
             .unwrap();
         assert_eq!(img.pixels, vec![1]);
+    }
+
+    #[test]
+    fn image_decode_params_selects_matching_filter_entry() {
+        let mut ccitt_params = PdfDictionary::empty();
+        ccitt_params.insert("K", PdfObject::Integer(-1));
+        ccitt_params.insert("BlackIs1", PdfObject::Boolean(true));
+
+        let mut dict = PdfDictionary::empty();
+        dict.insert(
+            "Filter",
+            PdfObject::Array(vec![
+                PdfObject::Name("FlateDecode".to_string()),
+                PdfObject::Name("CCF".to_string()),
+            ]),
+        );
+        dict.insert(
+            "DecodeParms",
+            PdfObject::Array(vec![
+                PdfObject::Null,
+                PdfObject::Dictionary(ccitt_params.clone()),
+            ]),
+        );
+
+        let selected = image_decode_params(&dict, None, "CCITTFaxDecode")
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.get_integer("K"), Some(-1));
+        assert_eq!(selected.get_bool("BlackIs1"), Some(true));
+    }
+
+    #[test]
+    fn ccitt_params_use_image_dimensions_for_defaults() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert("Rows", PdfObject::Integer(0));
+
+        let params = ccitt_decode_params(Some(&dict), 17, 23).unwrap();
+        assert_eq!(params.columns, 17);
+        assert_eq!(params.rows, 23);
+        assert_eq!(params.k, 0);
+        assert!(!params.black_is_1);
+        assert!(params.end_of_block);
     }
 
     #[test]

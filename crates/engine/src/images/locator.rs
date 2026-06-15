@@ -40,6 +40,23 @@ impl Default for ImageLocateOptions {
     }
 }
 
+/// Raw data captured for an inline image (BI/ID/EI) so it can be decoded and
+/// exported without re-walking the page content stream.
+#[derive(Debug, Clone)]
+pub struct InlineImageData {
+    /// The raw bytes between `ID` and `EI`, with any preceding (non-image)
+    /// filters still applied — i.e. exactly the inline image stream payload.
+    pub bytes: Vec<u8>,
+
+    /// Bits per component, resolved from `/BPC` or `/BitsPerComponent` (or 8).
+    pub bits_per_component: u8,
+
+    /// The filter chain (`/F` or `/Filter`), in application order. Both
+    /// abbreviated (`Fl`, `AHx`, `CCF`, ...) and full names are preserved
+    /// as-is; the decode path understands both.
+    pub filters: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ImageReference {
     /// Page number (1-indexed) where this image appears.
@@ -77,6 +94,10 @@ pub struct ImageReference {
 
     /// True if this image is referenced as /SMask by another image.
     pub is_smask: bool,
+
+    /// For inline images, the captured raw data needed to decode/export them.
+    /// `None` for XObject images (which are decoded via their object number).
+    pub inline_data: Option<InlineImageData>,
 }
 
 impl ImageReference {
@@ -90,6 +111,15 @@ impl ImageReference {
         let bpp = (self.bits_per_component as usize * channels).div_ceil(8);
         self.width as usize * self.height as usize * bpp
     }
+}
+
+/// Scalar/array parameters parsed from an inline image's BI...ID dictionary.
+#[derive(Debug, Default)]
+struct InlineParams {
+    nums: HashMap<String, i64>,
+    strs: HashMap<String, String>,
+    bools: HashMap<String, bool>,
+    name_arrays: HashMap<String, Vec<String>>,
 }
 
 pub struct ImageLocator;
@@ -228,6 +258,7 @@ impl ImageLocator {
             is_inline: false,
             is_mask,
             is_smask: false,
+            inline_data: None,
         }
     }
 
@@ -286,9 +317,8 @@ impl ImageLocator {
         while i < ops.len() {
             let op = &ops[i];
             if op.operator == "ID" {
-                let (params, params_str, params_bool) =
-                    Self::parse_inline_image_params(&op.operands);
-                let _pixel_bytes =
+                let params = Self::parse_inline_image_params(&op.operands);
+                let pixel_bytes =
                     if i + 1 < ops.len() && ops[i + 1].operator == "inline_image_data" {
                         ops[i + 1].string_bytes(0).map(|bytes| bytes.to_vec())
                     } else {
@@ -297,43 +327,46 @@ impl ImageLocator {
 
                 let xobject_name = format!("inline_{}_{}", page_number, inline_index);
                 let width = params
+                    .nums
                     .get("W")
-                    .or_else(|| params.get("Width"))
+                    .or_else(|| params.nums.get("Width"))
                     .copied()
                     .unwrap_or(0)
                     .max(0) as u32;
                 let height = params
+                    .nums
                     .get("H")
-                    .or_else(|| params.get("Height"))
+                    .or_else(|| params.nums.get("Height"))
                     .copied()
                     .unwrap_or(0)
                     .max(0) as u32;
                 let bpc = params
+                    .nums
                     .get("BPC")
-                    .or_else(|| params.get("BitsPerComponent"))
+                    .or_else(|| params.nums.get("BitsPerComponent"))
                     .copied()
                     .unwrap_or(8)
                     .clamp(0, 16) as u8;
-                let cs_key = params_str
+                let cs_key = params
+                    .strs
                     .get("CS")
-                    .or_else(|| params_str.get("ColorSpace"))
+                    .or_else(|| params.strs.get("ColorSpace"))
                     .map(String::as_str)
                     .unwrap_or("DeviceRGB");
-                let filter_key = params_str
-                    .get("F")
-                    .or_else(|| params_str.get("Filter"))
-                    .map(String::as_str)
-                    .unwrap_or("");
-                let filter = if filter_key.is_empty() {
-                    vec![]
-                } else {
-                    vec![filter_key.to_string()]
-                };
-                let is_mask = params_bool
+                let filter = Self::inline_filters(&params);
+                let is_mask = params
+                    .bools
                     .get("IM")
-                    .or_else(|| params_bool.get("ImageMask"))
+                    .or_else(|| params.bools.get("ImageMask"))
                     .copied()
                     .unwrap_or(false);
+                let effective_bpc = if is_mask { 1 } else { bpc };
+
+                let inline_data = pixel_bytes.map(|bytes| InlineImageData {
+                    bytes,
+                    bits_per_component: effective_bpc,
+                    filters: filter.clone(),
+                });
 
                 inline_refs.push(ImageReference {
                     page_number,
@@ -342,12 +375,13 @@ impl ImageLocator {
                     generation_number: 0,
                     width,
                     height,
-                    bits_per_component: if is_mask { 1 } else { bpc },
+                    bits_per_component: effective_bpc,
                     color_space: Self::expand_color_space_name(cs_key),
                     filter,
                     is_inline: true,
                     is_mask,
                     is_smask: false,
+                    inline_data,
                 });
                 inline_index += 1;
             }
@@ -357,16 +391,8 @@ impl ImageLocator {
         Ok(inline_refs)
     }
 
-    fn parse_inline_image_params(
-        operands: &[Operand],
-    ) -> (
-        HashMap<String, i64>,
-        HashMap<String, String>,
-        HashMap<String, bool>,
-    ) {
-        let mut nums = HashMap::new();
-        let mut strs = HashMap::new();
-        let mut bools = HashMap::new();
+    fn parse_inline_image_params(operands: &[Operand]) -> InlineParams {
+        let mut params = InlineParams::default();
 
         let mut iter = operands.iter().peekable();
         while let Some(op) = iter.next() {
@@ -374,19 +400,30 @@ impl ImageLocator {
                 if let Some(next) = iter.peek() {
                     match *next {
                         Operand::Integer(n) => {
-                            nums.insert(key.to_string(), *n);
+                            params.nums.insert(key.to_string(), *n);
                             iter.next();
                         }
                         Operand::Real(r) => {
-                            nums.insert(key.to_string(), *r as i64);
+                            params.nums.insert(key.to_string(), *r as i64);
                             iter.next();
                         }
                         Operand::Name(s) => {
-                            strs.insert(key.to_string(), s.clone());
+                            params.strs.insert(key.to_string(), s.clone());
                             iter.next();
                         }
                         Operand::Boolean(b) => {
-                            bools.insert(key.to_string(), *b);
+                            params.bools.insert(key.to_string(), *b);
+                            iter.next();
+                        }
+                        Operand::Array(items) => {
+                            // Filter chains may be expressed as a name array,
+                            // e.g. /F [/AHx /Fl]. Capture every name in order.
+                            let names: Vec<String> = items
+                                .iter()
+                                .filter_map(Operand::as_name)
+                                .map(str::to_string)
+                                .collect();
+                            params.name_arrays.insert(key.to_string(), names);
                             iter.next();
                         }
                         _ => {}
@@ -395,7 +432,29 @@ impl ImageLocator {
             }
         }
 
-        (nums, strs, bools)
+        params
+    }
+
+    /// Resolve the inline image filter chain from `/F` or `/Filter`, accepting
+    /// either a single name or a name array. Returns names verbatim (the decode
+    /// path understands both abbreviated and full forms).
+    fn inline_filters(params: &InlineParams) -> Vec<String> {
+        if let Some(arr) = params
+            .name_arrays
+            .get("F")
+            .or_else(|| params.name_arrays.get("Filter"))
+        {
+            return arr.clone();
+        }
+        match params
+            .strs
+            .get("F")
+            .or_else(|| params.strs.get("Filter"))
+            .map(String::as_str)
+        {
+            Some(name) if !name.is_empty() => vec![name.to_string()],
+            _ => vec![],
+        }
     }
 
     fn walk_xobject_dict(
@@ -492,7 +551,7 @@ impl ImageLocator {
     }
 
     fn mark_soft_masks_with_reader(refs: &mut [ImageReference], reader: &PdfReader) {
-        // TODO(perf): collect /SMask refs during the primary walk to avoid this second pass.
+        // TODO: collect /SMask refs during the primary walk to avoid this second pass.
         let mut smask_objs: HashSet<u32> = HashSet::new();
 
         for image_ref in refs.iter() {
@@ -602,6 +661,7 @@ mod tests {
             is_inline: false,
             is_mask: false,
             is_smask: false,
+            inline_data: None,
         };
         assert_eq!(r.uncompressed_bytes(), 30000);
 
@@ -624,6 +684,7 @@ mod tests {
             is_inline: false,
             is_mask: false,
             is_smask: false,
+            inline_data: None,
         };
         assert_eq!(r.uncompressed_bytes(), 10000);
     }
@@ -642,11 +703,61 @@ mod tests {
             Operand::Name("IM".to_string()),
             Operand::Boolean(false),
         ];
-        let (nums, strs, bools) = ImageLocator::parse_inline_image_params(&operands);
-        assert_eq!(nums.get("W"), Some(&200i64));
-        assert_eq!(nums.get("H"), Some(&150i64));
-        assert_eq!(strs.get("CS"), Some(&"RGB".to_string()));
-        assert_eq!(bools.get("IM"), Some(&false));
+        let params = ImageLocator::parse_inline_image_params(&operands);
+        assert_eq!(params.nums.get("W"), Some(&200i64));
+        assert_eq!(params.nums.get("H"), Some(&150i64));
+        assert_eq!(params.strs.get("CS"), Some(&"RGB".to_string()));
+        assert_eq!(params.bools.get("IM"), Some(&false));
+    }
+
+    #[test]
+    fn inline_filters_handles_single_abbreviated_name() {
+        let operands = vec![
+            Operand::Name("F".to_string()),
+            Operand::Name("Fl".to_string()),
+        ];
+        let params = ImageLocator::parse_inline_image_params(&operands);
+        assert_eq!(ImageLocator::inline_filters(&params), vec!["Fl".to_string()]);
+    }
+
+    #[test]
+    fn inline_filters_handles_full_filter_key() {
+        let operands = vec![
+            Operand::Name("Filter".to_string()),
+            Operand::Name("FlateDecode".to_string()),
+        ];
+        let params = ImageLocator::parse_inline_image_params(&operands);
+        assert_eq!(
+            ImageLocator::inline_filters(&params),
+            vec!["FlateDecode".to_string()]
+        );
+    }
+
+    #[test]
+    fn inline_filters_handles_name_array_in_order() {
+        // /F [/AHx /Fl]
+        let operands = vec![
+            Operand::Name("F".to_string()),
+            Operand::Array(vec![
+                Operand::Name("AHx".to_string()),
+                Operand::Name("Fl".to_string()),
+            ]),
+        ];
+        let params = ImageLocator::parse_inline_image_params(&operands);
+        assert_eq!(
+            ImageLocator::inline_filters(&params),
+            vec!["AHx".to_string(), "Fl".to_string()]
+        );
+    }
+
+    #[test]
+    fn inline_filters_empty_when_absent() {
+        let operands = vec![
+            Operand::Name("W".to_string()),
+            Operand::Integer(2),
+        ];
+        let params = ImageLocator::parse_inline_image_params(&operands);
+        assert!(ImageLocator::inline_filters(&params).is_empty());
     }
 
     #[test]
@@ -694,6 +805,7 @@ mod tests {
                 is_inline: false,
                 is_mask: false,
                 is_smask: false,
+                inline_data: None,
             },
             ImageReference {
                 page_number: 2,
@@ -708,6 +820,7 @@ mod tests {
                 is_inline: false,
                 is_mask: false,
                 is_smask: false,
+                inline_data: None,
             },
             ImageReference {
                 page_number: 1,
@@ -722,6 +835,7 @@ mod tests {
                 is_inline: false,
                 is_mask: false,
                 is_smask: false,
+                inline_data: None,
             },
         ];
         let deduped = ImageLocator::deduplicate(refs);

@@ -41,6 +41,7 @@ impl SmaskLoader {
             is_inline: false,
             is_mask: false,
             is_smask: true,
+            inline_data: None,
         };
 
         let smask_raw = match ImageDecoder::decode(&smask_image_ref, reader) {
