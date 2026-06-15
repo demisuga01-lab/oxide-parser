@@ -1,6 +1,8 @@
 use std::cmp::Ordering;
 
-use super::collector::TextChunk;
+use unicode_bidi::{BidiInfo, Level};
+
+use super::collector::{is_rtl_char, is_rtl_dominant, TextChunk};
 
 #[derive(Debug, Clone)]
 pub struct TextLine {
@@ -90,6 +92,28 @@ impl ReadingOrderReconstructor {
             return vec![];
         }
 
+        // Partition by writing mode (driven by each chunk's font WMode, set in the
+        // collector). Vertical and horizontal runs are reconstructed by their own
+        // logic, so a page that mixes vertical body text with horizontal page
+        // numbers/headings handles each run correctly. The horizontal path is
+        // unchanged from the LTR/RTL implementation (zero behaviour change for
+        // documents with no vertical text). When both are present, vertical
+        // columns are emitted first, then horizontal lines.
+        let (vertical, horizontal): (Vec<TextChunk>, Vec<TextChunk>) =
+            chunks.into_iter().partition(|c| c.is_vertical);
+
+        let mut result_lines: Vec<TextLine> = Vec::new();
+        if !vertical.is_empty() {
+            result_lines.extend(self.reconstruct_vertical(vertical));
+        }
+        if !horizontal.is_empty() {
+            result_lines.extend(self.reconstruct_horizontal(horizontal));
+        }
+        result_lines
+    }
+
+    /// Reconstruct horizontal (LTR/RTL) text — the original reading-order pass.
+    fn reconstruct_horizontal(&self, chunks: Vec<TextChunk>) -> Vec<TextLine> {
         let raw_lines = self.group_into_lines(chunks);
 
         let (col0_lines, col1_lines) = if self.detect_columns {
@@ -116,6 +140,112 @@ impl ReadingOrderReconstructor {
         }
 
         result_lines
+    }
+
+    /// Reconstruct vertical (CJK top-to-bottom) writing mode.
+    ///
+    /// Vertical text reads top-to-bottom within a column, and columns are read
+    /// right-to-left (the rightmost column first). This is the vertical analog of
+    /// the horizontal line/column clustering: chunks are grouped into columns by
+    /// x-proximity, glyphs within a column are ordered by descending y (top to
+    /// bottom), and the columns themselves are ordered by descending x (right to
+    /// left). Each column becomes one `TextLine`.
+    ///
+    /// BiDi reordering is intentionally bypassed: vertical CJK is not RTL-script
+    /// in the UAX#9 sense, and its right-to-left ordering is a column-layout
+    /// property handled here, not a character-level bidi property.
+    fn reconstruct_vertical(&self, chunks: Vec<TextChunk>) -> Vec<TextLine> {
+        let columns = self.group_into_columns(chunks);
+
+        columns
+            .into_iter()
+            .enumerate()
+            .map(|(col_idx, group)| {
+                let repr_y = group.iter().map(|c| c.y).fold(f64::NEG_INFINITY, f64::max);
+                let repr_y = if repr_y.is_finite() { repr_y } else { 0.0 };
+
+                let mut sizes: Vec<f64> = group.iter().map(|c| c.font_size).collect();
+                sizes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                let font_size = sizes[sizes.len() / 2].max(1.0);
+
+                let x_min = group.iter().map(|c| c.x).fold(f64::INFINITY, f64::min);
+                let x_min = if x_min.is_finite() { x_min } else { 0.0 };
+                let x_max = group
+                    .iter()
+                    .map(|c| c.x + c.font_size)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let x_max = if x_max.is_finite() { x_max } else { 0.0 };
+
+                // Glyphs top-to-bottom: in PDF user space y increases upward, so a
+                // higher y is higher on the page and comes first.
+                let mut ordered = group;
+                ordered.sort_by(|a, b| b.y.partial_cmp(&a.y).unwrap_or(Ordering::Equal));
+
+                let mut text = String::new();
+                for (i, chunk) in ordered.iter().enumerate() {
+                    if i > 0 {
+                        let prev = &ordered[i - 1];
+                        // prev sits above chunk; the vertical gap is prev.y minus
+                        // chunk.y minus prev's glyph height (≈ its font size).
+                        let gap = prev.y - chunk.y - prev.font_size;
+                        let ref_size = prev.font_size.min(chunk.font_size).max(1.0);
+                        if gap > ref_size * self.wide_gap_factor {
+                            text.push(' ');
+                        }
+                    }
+                    text.push_str(&chunk.text);
+                }
+
+                TextLine {
+                    text,
+                    y: repr_y,
+                    x_min,
+                    x_max,
+                    font_size,
+                    is_paragraph_break: false,
+                    column: col_idx,
+                }
+            })
+            .collect()
+    }
+
+    /// Group vertical-text chunks into columns by x-proximity, ordering the
+    /// columns right-to-left (rightmost first). Mirrors `group_into_lines` but on
+    /// the x axis: two chunks belong to the same column when their x origins are
+    /// within a font-size-scaled tolerance.
+    fn group_into_columns(&self, mut chunks: Vec<TextChunk>) -> Vec<Vec<TextChunk>> {
+        // Process rightmost-first so column ordering is right-to-left.
+        chunks.sort_by(|a, b| b.x.partial_cmp(&a.x).unwrap_or(Ordering::Equal));
+
+        let mut groups: Vec<(f64, Vec<TextChunk>)> = Vec::new();
+
+        for chunk in chunks {
+            let tolerance = (chunk.font_size.max(12.0) * self.line_y_tolerance_factor).max(1.0);
+
+            let best = groups
+                .iter_mut()
+                .filter(|(repr_x, _)| (chunk.x - *repr_x).abs() <= tolerance)
+                .min_by(|(a, _), (b, _)| {
+                    (chunk.x - *a)
+                        .abs()
+                        .partial_cmp(&(chunk.x - *b).abs())
+                        .unwrap_or(Ordering::Equal)
+                });
+
+            match best {
+                Some((repr_x, group)) => {
+                    group.push(chunk);
+                    *repr_x = group.iter().map(|c| c.x).sum::<f64>() / group.len() as f64;
+                }
+                None => {
+                    groups.push((chunk.x, vec![chunk]));
+                }
+            }
+        }
+
+        // Order columns right-to-left by representative x.
+        groups.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        groups.into_iter().map(|(_, chunks)| chunks).collect()
     }
 
     /// Group chunks into raw lines using y-proximity clustering.
@@ -150,30 +280,23 @@ impl ReadingOrderReconstructor {
         }
 
         for (_, group) in groups.iter_mut() {
-            Self::sort_group_for_direction(group);
+            // Horizontal lines (LTR, RTL, or mixed) are assembled in pure VISUAL
+            // order — left-to-right by x — exactly like LTR text. The conversion
+            // from visual to logical reading order for any RTL content is done
+            // once on the fully assembled line string in `build_text_lines`,
+            // using the Unicode Bidirectional Algorithm (UAX#9). Sorting chunks
+            // by x here keeps chunk grouping and the inter-chunk spacing logic
+            // identical to the LTR path; only the final string is reordered.
+            //
+            // Vertical (CJK top-to-bottom) chunks never reach this path: they are
+            // partitioned out in `reconstruct` and handled by
+            // `reconstruct_vertical`, which clusters by column instead of line.
+            group.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(Ordering::Equal));
         }
 
         let mut result: Vec<(f64, Vec<TextChunk>)> = groups;
         result.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
         result.into_iter().map(|(_, chunks)| chunks).collect()
-    }
-
-    fn sort_group_for_direction(group: &mut [TextChunk]) {
-        let vertical_count = group.iter().filter(|c| c.is_vertical).count();
-        let rtl_count = group.iter().filter(|c| c.is_rtl).count();
-        let is_vertical_line = vertical_count * 2 > group.len() && !group.is_empty();
-        let is_rtl_line = rtl_count * 2 > group.len() && !group.is_empty();
-
-        if is_vertical_line {
-            group.sort_by(|a, b| b.y.partial_cmp(&a.y).unwrap_or(Ordering::Equal));
-        } else if is_rtl_line {
-            // TODO(bidi): Full Unicode BiDi (UAX#9) is not implemented. Mixed
-            // LTR/RTL lines are handled by majority-vote and may have incorrect
-            // word order when both directions appear on the same line.
-            group.sort_by(|a, b| b.x.partial_cmp(&a.x).unwrap_or(Ordering::Equal));
-        } else {
-            group.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(Ordering::Equal));
-        }
     }
 
     /// Find the x coordinate of the gap between two columns.
@@ -370,6 +493,13 @@ impl ReadingOrderReconstructor {
                     text.push_str(&chunk.text);
                 }
 
+                // The line was assembled in visual (left-to-right) order. If it
+                // contains any right-to-left characters, convert that visual
+                // sequence into logical reading order with the Unicode
+                // Bidirectional Algorithm. Pure-LTR lines take a fast path and
+                // are returned unchanged (zero behaviour change, no allocation).
+                let text = visual_to_logical(text);
+
                 TextLine {
                     text,
                     y: repr_y,
@@ -455,6 +585,66 @@ impl ReadingOrderReconstructor {
     }
 }
 
+/// Convert a line of text from VISUAL order (the left-to-right order in which
+/// glyphs were placed on the page) into LOGICAL reading order (the order a human
+/// reads, and the order `pdftotext` and other extractors emit), using the
+/// Unicode Bidirectional Algorithm (UAX#9, via the `unicode-bidi` crate).
+///
+/// # Why this is the inverse of the usual BiDi call
+///
+/// `unicode-bidi` is normally fed a *logical* string and asked to produce the
+/// *visual* order for display. Here we have the opposite problem: PDF content
+/// streams position glyphs in visual order, and we must recover logical order
+/// for extraction. For text with at most one level of RTL embedding — i.e. an
+/// RTL line that may contain embedded LTR runs (Latin words, numbers), which
+/// covers essentially all extracted prose — the BiDi reordering (UAX#9 rule L2,
+/// a sequence of run reversals) is an *involution*: applying it to the visual
+/// string recovers the logical string. So we run the same `reorder_line` over
+/// the visually-ordered text. (For pathological lines with ≥2 nested embedding
+/// levels this is an approximation, but such lines do not arise from simple text
+/// extraction; documented as a known limitation.)
+///
+/// # Base direction
+///
+/// Per UAX#9 P2/P3 the base direction is set by the first strong character of
+/// the paragraph. We only have a single extracted line, so we use a line-level
+/// heuristic: if the line is RTL-dominant (more than half its alphabetic
+/// characters are RTL — the same test `TextChunk::is_rtl` uses) we force an RTL
+/// base level; otherwise we force LTR. A mixed line that is mostly Latin with a
+/// short RTL phrase therefore keeps an LTR base, matching how such lines read.
+///
+/// # Fast path
+///
+/// Lines with no RTL characters at all (the overwhelming majority of any corpus)
+/// skip the BiDi machinery entirely and are returned unchanged. This guarantees
+/// zero behavioural change and zero added cost for LTR-only documents.
+fn visual_to_logical(visual: String) -> String {
+    // Fast path: no RTL character anywhere → already in logical order.
+    if !visual.chars().any(is_rtl_char) {
+        return visual;
+    }
+
+    // Choose the base embedding level from the line's dominant direction.
+    let base = if is_rtl_dominant(&visual) {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
+
+    let bidi = BidiInfo::new(&visual, Some(base));
+    // BidiInfo splits on paragraph separators; an extracted line normally has
+    // none, but reorder each paragraph segment defensively and rejoin.
+    if bidi.paragraphs.is_empty() {
+        return visual;
+    }
+    let mut out = String::with_capacity(visual.len());
+    for para in &bidi.paragraphs {
+        let line = para.range.clone();
+        out.push_str(&bidi.reorder_line(para, line));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +659,21 @@ mod tests {
             width: text.len() as f64 * font_size * 0.6,
             is_rtl: false,
             is_vertical: false,
+            is_invisible: false,
+        }
+    }
+
+    /// A vertical-writing-mode chunk (one glyph, square advance ≈ font_size).
+    fn vchunk(text: &str, x: f64, y: f64, font_size: f64) -> TextChunk {
+        TextChunk {
+            text: text.to_string(),
+            x,
+            y,
+            font_size,
+            font_name: "V1".to_string(),
+            width: font_size,
+            is_rtl: false,
+            is_vertical: true,
             is_invisible: false,
         }
     }
@@ -867,12 +1072,17 @@ mod tests {
     }
 
     #[test]
-    fn rtl_chunks_sorted_x_descending() {
+    fn rtl_chunks_reordered_to_logical_order() {
+        // Three Hebrew letters placed left-to-right on the page at x = 100, 200,
+        // 300 (visual order vav, lamed, he). Hebrew reads right-to-left, so the
+        // rightmost glyph (he, x=300) is logically FIRST. After BiDi
+        // visual→logical conversion the extracted string must read he, lamed,
+        // vav — i.e. the reverse of the on-page left-to-right placement.
         let r = ReadingOrderReconstructor::new();
         let chunks = vec![
             TextChunk {
-                text: "\u{05D4}".to_string(),
-                x: 300.0,
+                text: "\u{05D5}".to_string(), // vav, leftmost on page
+                x: 100.0,
                 y: 700.0,
                 font_size: 12.0,
                 font_name: "F1".to_string(),
@@ -882,7 +1092,7 @@ mod tests {
                 is_invisible: false,
             },
             TextChunk {
-                text: "\u{05DC}".to_string(),
+                text: "\u{05DC}".to_string(), // lamed, middle
                 x: 200.0,
                 y: 700.0,
                 font_size: 12.0,
@@ -893,8 +1103,8 @@ mod tests {
                 is_invisible: false,
             },
             TextChunk {
-                text: "\u{05D5}".to_string(),
-                x: 100.0,
+                text: "\u{05D4}".to_string(), // he, rightmost on page
+                x: 300.0,
                 y: 700.0,
                 font_size: 12.0,
                 font_name: "F1".to_string(),
@@ -912,54 +1122,186 @@ mod tests {
         let pos_vav = text.find('\u{05D5}').unwrap_or(usize::MAX);
         assert!(
             pos_he < pos_lamed && pos_lamed < pos_vav,
-            "RTL chunks should be ordered x-descending, got: {:?}",
+            "RTL line should be in logical order he<lamed<vav, got: {:?}",
             text
         );
     }
 
     #[test]
     fn vertical_chunks_sorted_y_descending() {
+        // Three glyphs in ONE column (same x), at y = 300, 200, 100. Vertical
+        // reading is top-to-bottom = highest y first, so the single emitted line
+        // reads 三(y=300) 二(y=200) 一(y=100).
         let r = ReadingOrderReconstructor::new();
         let chunks = vec![
-            TextChunk {
-                text: "\u{4E00}".to_string(),
-                x: 100.0,
-                y: 100.0,
-                font_size: 12.0,
-                font_name: "F1".to_string(),
-                width: 12.0,
-                is_rtl: false,
-                is_vertical: true,
-                is_invisible: false,
-            },
-            TextChunk {
-                text: "\u{4E8C}".to_string(),
-                x: 100.0,
-                y: 200.0,
-                font_size: 12.0,
-                font_name: "F1".to_string(),
-                width: 12.0,
-                is_rtl: false,
-                is_vertical: true,
-                is_invisible: false,
-            },
-            TextChunk {
-                text: "\u{4E09}".to_string(),
-                x: 100.0,
-                y: 300.0,
-                font_size: 12.0,
-                font_name: "F1".to_string(),
-                width: 12.0,
-                is_rtl: false,
-                is_vertical: true,
-                is_invisible: false,
-            },
+            vchunk("\u{4E00}", 100.0, 100.0, 12.0),
+            vchunk("\u{4E8C}", 100.0, 200.0, 12.0),
+            vchunk("\u{4E09}", 100.0, 300.0, 12.0),
         ];
         let lines = r.reconstruct(chunks);
-        assert!(!lines.is_empty(), "vertical chunks should produce lines");
-        if lines.len() == 3 {
-            assert!(lines[0].text.contains('\u{4E09}'));
-            assert!(lines[2].text.contains('\u{4E00}'));
-        }
+        assert_eq!(lines.len(), 1, "one column → one line, got {lines:?}");
+        let text = &lines[0].text;
+        let p3 = text.find('\u{4E09}').unwrap_or(usize::MAX);
+        let p2 = text.find('\u{4E8C}').unwrap_or(usize::MAX);
+        let p1 = text.find('\u{4E00}').unwrap_or(usize::MAX);
+        assert!(
+            p3 < p2 && p2 < p1,
+            "vertical column should read top-to-bottom 三二一, got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_columns_ordered_right_to_left() {
+        // Two columns: right column (x=200) holds 右上/右下, left column (x=100)
+        // holds 左上/左下. Vertical reading orders columns right-to-left, so the
+        // right column's line comes first.
+        let r = ReadingOrderReconstructor::new();
+        let chunks = vec![
+            vchunk("\u{5DE6}", 100.0, 300.0, 12.0), // left-top
+            vchunk("\u{4E0B}", 100.0, 280.0, 12.0), // left-bottom
+            vchunk("\u{53F3}", 200.0, 300.0, 12.0), // right-top
+            vchunk("\u{4E0A}", 200.0, 280.0, 12.0), // right-bottom
+        ];
+        let lines = r.reconstruct(chunks);
+        assert_eq!(lines.len(), 2, "two columns → two lines, got {lines:?}");
+        // First line is the rightmost column.
+        assert!(
+            lines[0].text.contains('\u{53F3}'),
+            "rightmost column should be read first, got: {:?}",
+            lines[0].text
+        );
+        assert!(
+            lines[1].text.contains('\u{5DE6}'),
+            "leftmost column should be read last, got: {:?}",
+            lines[1].text
+        );
+    }
+
+    #[test]
+    fn mixed_vertical_and_horizontal_handled_per_run() {
+        // A vertical body column plus a horizontal heading line. Each is grouped
+        // by its own writing mode; both survive into the output.
+        let r = ReadingOrderReconstructor::new();
+        let chunks = vec![
+            vchunk("\u{7E26}", 100.0, 300.0, 12.0), // vertical glyph
+            vchunk("\u{66F8}", 100.0, 280.0, 12.0), // vertical glyph below it
+            chunk("Heading", 50.0, 500.0, 12.0),    // horizontal line above
+        ];
+        let lines = r.reconstruct(chunks);
+        assert!(
+            lines.iter().any(|l| l.text.contains("Heading")),
+            "horizontal heading should be present: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.text.contains('\u{7E26}')),
+            "vertical text should be present: {lines:?}"
+        );
+    }
+
+    // ── Unicode BiDi (UAX#9) visual→logical reordering ──────────────────────
+    //
+    // These exercise `visual_to_logical` directly with hand-constructed visual
+    // strings and known-correct logical output. The transform-direction bug
+    // (reordering the wrong way) is the #1 risk of a BiDi integration, so these
+    // pin it down before the full pipeline runs.
+
+    const HE_ALEF: char = '\u{05D0}'; // א
+    const HE_BET: char = '\u{05D1}'; // ב
+    const HE_GIMEL: char = '\u{05D2}'; // ג
+    const AR_MEEM: char = '\u{0645}'; // م
+    const AR_RA: char = '\u{0631}'; // ر
+
+    #[test]
+    fn bidi_pure_ltr_is_unchanged_via_fast_path() {
+        // No RTL characters → fast path → byte-identical output.
+        let input = "Hello, World! 123".to_string();
+        assert_eq!(visual_to_logical(input.clone()), input);
+    }
+
+    #[test]
+    fn bidi_pure_rtl_word_is_reversed() {
+        // A Hebrew word laid out visually as alef-bet-gimel (left to right on the
+        // page) reads logically gimel-bet-alef (right to left). The visual→logical
+        // transform must reverse it.
+        let visual: String = [HE_ALEF, HE_BET, HE_GIMEL].iter().collect();
+        let logical = visual_to_logical(visual);
+        let expected: String = [HE_GIMEL, HE_BET, HE_ALEF].iter().collect();
+        assert_eq!(logical, expected, "pure RTL run should be reversed");
+    }
+
+    #[test]
+    fn bidi_rtl_with_embedded_latin_word_keeps_latin_ltr() {
+        // An RTL-dominant Arabic line containing an embedded Latin word "PDF".
+        // (RTL-dominant so the line-level base-direction heuristic picks an RTL
+        // base, matching how the glyphs were laid out.) Logically the line reads,
+        // right-to-left: <arabic> PDF <arabic>. The embedded Latin run must stay
+        // spelled forward ("PDF", not "FDP") while the Arabic runs reverse — the
+        // exact case the old majority-vote heuristic got wrong.
+        let before = [AR_MEEM, AR_RA, AR_MEEM].iter().collect::<String>();
+        let after = [AR_RA, AR_MEEM].iter().collect::<String>();
+        let logical = format!("{} PDF {}", before, after);
+        // Build the on-page visual layout by running logical→visual once.
+        let info = BidiInfo::new(&logical, Some(Level::rtl()));
+        let para = &info.paragraphs[0];
+        let visual = info.reorder_line(para, para.range.clone()).into_owned();
+        assert_ne!(visual, logical, "sanity: visual differs from logical");
+
+        let recovered = visual_to_logical(visual);
+        assert!(
+            recovered.contains("PDF"),
+            "embedded Latin run must stay forward (PDF), got: {:?}",
+            recovered
+        );
+        assert!(
+            !recovered.contains("FDP"),
+            "embedded Latin run must not be reversed, got: {:?}",
+            recovered
+        );
+        assert_eq!(recovered, logical, "should recover the logical order");
+    }
+
+    #[test]
+    fn bidi_rtl_with_number_and_parens_resolves_neutrals() {
+        // Arabic text with a parenthesized number. Numbers (EN) and the bracket
+        // pair are neutrals/weaks with specific UAX#9 resolution; verify the
+        // digits stay in left-to-right order and the round trip is stable.
+        let logical = format!("{}{} (2026)", AR_MEEM, AR_RA);
+        let info = BidiInfo::new(&logical, Some(Level::rtl()));
+        let para = &info.paragraphs[0];
+        let visual = info.reorder_line(para, para.range.clone()).into_owned();
+
+        let recovered = visual_to_logical(visual);
+        assert!(
+            recovered.contains("2026"),
+            "digits must remain in LTR order, got: {:?}",
+            recovered
+        );
+        assert_eq!(recovered, logical);
+    }
+
+    #[test]
+    fn bidi_mostly_latin_line_with_short_rtl_phrase_keeps_ltr_base() {
+        // A predominantly Latin line with a short Hebrew phrase. The base
+        // direction is LTR (not RTL-dominant), so Latin stays first and the
+        // Hebrew run is the only part reordered.
+        let hebrew: String = [HE_ALEF, HE_BET].iter().collect();
+        let logical = format!("Title: {} end", hebrew);
+        let info = BidiInfo::new(&logical, Some(Level::ltr()));
+        let para = &info.paragraphs[0];
+        let visual = info.reorder_line(para, para.range.clone()).into_owned();
+
+        let recovered = visual_to_logical(visual);
+        assert!(
+            recovered.starts_with("Title:"),
+            "LTR-base line should start with the Latin text, got: {:?}",
+            recovered
+        );
+        assert_eq!(recovered, logical);
+    }
+
+    #[test]
+    fn bidi_empty_and_whitespace_are_safe() {
+        assert_eq!(visual_to_logical(String::new()), "");
+        assert_eq!(visual_to_logical("   ".to_string()), "   ");
     }
 }

@@ -4299,7 +4299,10 @@ pub fn glyph_name_to_unicode(name: &str) -> Option<char> {
             }
         }
     }
-    AGL.binary_search_by(|(entry, _)| (*entry).cmp(name))
-        .ok()
-        .and_then(|idx| char::from_u32(AGL[idx].1))
+    if let Ok(idx) = AGL.binary_search_by(|(entry, _)| (*entry).cmp(name)) {
+        return char::from_u32(AGL[idx].1);
+    }
+    // ZapfDingbats glyph names (a1..a206) are not in the AGL; resolve them to the
+    // Unicode Dingbats block so the symbolic-font fallback can render them.
+    crate::fonts::encoding::zapf_dingbats_name_to_unicode(name)
 }

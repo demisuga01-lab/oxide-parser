@@ -74,6 +74,13 @@ pub struct FontResolver {
     descendant_font: Option<PdfDictionary>,
     default_width: f64,
     code_size: u8,
+    /// Writing mode of the font's encoding CMap: 0 = horizontal (glyphs advance
+    /// left-to-right), 1 = vertical (glyphs advance top-to-bottom, columns
+    /// arranged right-to-left). Only Type0 (composite) fonts can be vertical;
+    /// every simple font is horizontal. Derived from the `/Encoding` CMap's
+    /// `/WMode` entry, or from a predefined CMap name's `-V`/`-H` suffix
+    /// (`Identity-V` ⇒ vertical). See PDF 32000-1 §9.7.4.3.
+    wmode: u8,
 }
 
 impl FontResolver {
@@ -170,6 +177,33 @@ impl FontResolver {
         &self.font_type
     }
 
+    /// Writing mode of the font: `false` = horizontal, `true` = vertical.
+    /// Vertical text advances glyphs top-to-bottom and arranges columns
+    /// right-to-left. Driven by the encoding CMap's WMode (PDF 32000-1 §9.7.4.3),
+    /// never by the text matrix. Only Type0 fonts are ever vertical.
+    pub fn is_vertical(&self) -> bool {
+        self.wmode == 1
+    }
+
+    /// Vertical glyph metrics (W2) for the given CID, as `(w1y, v_x, v_y)` in
+    /// glyph space (1000-unit em), per PDF 32000-1 §9.7.4.3:
+    /// - `w1y` is the vertical displacement (the glyph's advance height, normally
+    ///   negative since vertical writing proceeds downward),
+    /// - `(v_x, v_y)` is the position vector from the glyph's horizontal origin
+    ///   to its vertical origin.
+    ///
+    /// Falls back to the descendant font's `/DW2` (default `[880 -1000]`) when the
+    /// CID has no explicit `/W2` entry. Returns the spec defaults for a font with
+    /// no descendant (`v_y = 880`, `w1y = -1000`, `v_x = w0/2`).
+    pub fn vertical_metrics(&self, char_code: u16) -> (f64, f64, f64) {
+        let cid = u32::from(char_code);
+        let w0 = self.glyph_width(char_code);
+        match &self.descendant_font {
+            Some(desc) => lookup_cid_vertical(cid, w0, desc),
+            None => (-1000.0, w0 / 2.0, 880.0),
+        }
+    }
+
     fn build(font_dict: &PdfDictionary, reader: Option<&PdfReader>) -> Self {
         let font_type = font_dict
             .get_name("Subtype")
@@ -217,6 +251,14 @@ impl FontResolver {
             1
         };
 
+        // Writing mode: only composite (Type0) fonts can be vertical, and only
+        // via their /Encoding CMap. Simple fonts are always horizontal.
+        let wmode = if matches!(font_type, FontType::Type0) {
+            detect_wmode(font_dict, reader)
+        } else {
+            0
+        };
+
         Self {
             font_type,
             to_unicode,
@@ -227,6 +269,7 @@ impl FontResolver {
             descendant_font,
             default_width,
             code_size,
+            wmode,
         }
     }
 }
@@ -300,6 +343,156 @@ pub fn lookup_cid_width(cid: u32, desc_dict: &PdfDictionary) -> f64 {
     dw
 }
 
+/// Determine the writing mode (0 = horizontal, 1 = vertical) of a Type0 font
+/// from its `/Encoding`. The encoding is either a predefined CMap name (whose
+/// `-V`/`-H` suffix, or `Identity-V`/`Identity-H`, declares the mode) or an
+/// embedded CMap stream carrying a `/WMode` entry. Defaults to horizontal.
+fn detect_wmode(font_dict: &PdfDictionary, reader: Option<&PdfReader>) -> u8 {
+    let Some(encoding) = font_dict.get("Encoding") else {
+        return 0;
+    };
+    let resolved = resolve_optional(encoding, reader).unwrap_or_else(|_| encoding.clone());
+    match resolved {
+        // Predefined CMap referenced by name: the name's suffix is authoritative.
+        PdfObject::Name(name) => wmode_from_cmap_name(&name),
+        // Embedded CMap stream: read its /WMode key, falling back to the
+        // CMapName / name suffix inside the decoded program.
+        PdfObject::Stream { dict, raw } => {
+            if let Some(w) = dict.get_integer("WMode") {
+                return u8::from(w == 1);
+            }
+            let decoded = match reader {
+                Some(reader) => {
+                    let stream = PdfObject::Stream { dict, raw };
+                    decode_stream_lossless(&stream, reader)
+                        .map(|d| d.data)
+                        .unwrap_or_default()
+                }
+                None => decode_stream_from_dict(&dict, &raw).unwrap_or_default(),
+            };
+            wmode_from_cmap_bytes(&decoded)
+        }
+        _ => 0,
+    }
+}
+
+/// Vertical iff a predefined CMap name ends in `-V` (e.g. `Identity-V`,
+/// `UniGB-UCS2-V`, `UniJIS-UCS2-V`). All `-H` names and anything else are
+/// horizontal.
+fn wmode_from_cmap_name(name: &str) -> u8 {
+    u8::from(name.ends_with("-V"))
+}
+
+/// Scan a decoded CMap program for an explicit `/WMode 1` declaration or a
+/// `/CMapName` ending in `-V`. Conservative: defaults to horizontal.
+fn wmode_from_cmap_bytes(bytes: &[u8]) -> u8 {
+    let text = String::from_utf8_lossy(bytes);
+    if let Some(idx) = text.find("/WMode") {
+        let rest = text[idx + "/WMode".len()..].trim_start();
+        if rest.starts_with('1') {
+            return 1;
+        }
+        if rest.starts_with('0') {
+            return 0;
+        }
+    }
+    if let Some(idx) = text.find("/CMapName") {
+        let rest = &text[idx..];
+        // Match a token like `/CMapName /Something-V def`.
+        if let Some(slash) = rest[1..].find('/') {
+            let after = &rest[1 + slash + 1..];
+            let token: String = after
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '/')
+                .collect();
+            return wmode_from_cmap_name(token.trim());
+        }
+    }
+    0
+}
+
+/// Look up vertical metrics `(w1y, v_x, v_y)` for a CID from a CIDFont's `/W2`
+/// array, with `/DW2` as the per-font default. See PDF 32000-1 §9.7.4.3.
+///
+/// `/DW2` is `[v_y w1y]` (default `[880 -1000]`): `v_y` is the y of the position
+/// vector and `w1y` the default vertical displacement; the default `v_x` is
+/// `w0/2` (half the glyph's horizontal width).
+///
+/// `/W2` entries come in two forms:
+/// - `c [w1y_1 v1x_1 v1y_1  w1y_2 v1x_2 v1y_2  …]` — consecutive CIDs from `c`,
+///   three numbers each.
+/// - `c_first c_last w1y v1x v1y` — a CID range sharing one triple.
+pub fn lookup_cid_vertical(cid: u32, w0: f64, desc_dict: &PdfDictionary) -> (f64, f64, f64) {
+    let (def_vy, def_w1y) = desc_dict
+        .get("DW2")
+        .and_then(PdfObject::as_array)
+        .and_then(|a| {
+            let vy = a.first().and_then(PdfObject::as_number)?;
+            let w1y = a.get(1).and_then(PdfObject::as_number)?;
+            Some((vy, w1y))
+        })
+        .unwrap_or((880.0, -1000.0));
+    let default = (def_w1y, w0 / 2.0, def_vy);
+
+    let Some(w2) = desc_dict.get("W2").and_then(PdfObject::as_array) else {
+        return default;
+    };
+
+    let mut idx = 0usize;
+    while idx < w2.len() {
+        let Some(c1) = w2[idx]
+            .as_number()
+            .filter(|v| *v >= 0.0)
+            .map(|v| v as u32)
+        else {
+            break;
+        };
+        idx += 1;
+        if idx >= w2.len() {
+            break;
+        }
+
+        match &w2[idx] {
+            PdfObject::Array(triples) => {
+                // c [w1y vx vy  w1y vx vy …]
+                let n = triples.len() / 3;
+                for k in 0..n {
+                    if c1.saturating_add(k as u32) == cid {
+                        let w1y = triples[k * 3].as_number().unwrap_or(def_w1y);
+                        let vx = triples[k * 3 + 1].as_number().unwrap_or(w0 / 2.0);
+                        let vy = triples[k * 3 + 2].as_number().unwrap_or(def_vy);
+                        return (w1y, vx, vy);
+                    }
+                }
+                idx += 1;
+            }
+            _ => {
+                // c_first c_last w1y vx vy
+                let Some(c2) = w2[idx]
+                    .as_number()
+                    .filter(|v| *v >= 0.0)
+                    .map(|v| v as u32)
+                else {
+                    break;
+                };
+                idx += 1;
+                if idx + 2 > w2.len() {
+                    break;
+                }
+                let w1y = w2[idx].as_number().unwrap_or(def_w1y);
+                let vx = w2[idx + 1].as_number().unwrap_or(w0 / 2.0);
+                let vy = w2[idx + 2].as_number().unwrap_or(def_vy);
+                idx += 3;
+                if cid >= c1 && cid <= c2 {
+                    return (w1y, vx, vy);
+                }
+            }
+        }
+    }
+
+    default
+}
+
 pub(crate) fn expand_ligature(ch: char) -> String {
     match ch {
         '\u{FB00}' => "ff".to_string(),
@@ -336,10 +529,15 @@ fn build_encoding_table(
     reader: Option<&PdfReader>,
     font_type: &FontType,
 ) -> Vec<String> {
-    let default_base = match font_type {
+    // Symbol and ZapfDingbats are standard-14 fonts with their own built-in
+    // encodings (spec Appendix D). When the BaseFont names one of them, that
+    // encoding — not StandardEncoding/MacRoman — is the implicit default, used
+    // both when /Encoding is absent and as the base for any /Differences.
+    let symbolic_base = symbolic_builtin_encoding(font_dict);
+    let default_base = symbolic_base.unwrap_or(match font_type {
         FontType::TrueType => "MacRomanEncoding",
         _ => "StandardEncoding",
-    };
+    });
 
     let Some(encoding_obj) = font_dict.get("Encoding") else {
         return table_for(default_base);
@@ -361,6 +559,22 @@ fn build_encoding_table(
             }
         }
         _ => table_for(default_base),
+    }
+}
+
+/// If the font's `/BaseFont` is the Symbol or ZapfDingbats standard-14 font,
+/// return the name of its built-in encoding (so [`Encoding::lookup`] uses the
+/// Appendix D tables). A subset prefix like `ABCDEF+Symbol` is handled.
+fn symbolic_builtin_encoding(font_dict: &PdfDictionary) -> Option<&'static str> {
+    let base = font_dict.get_name("BaseFont")?;
+    let base = base.rsplit('+').next().unwrap_or(base);
+    let lower = base.to_ascii_lowercase();
+    if lower.contains("zapfdingbats") || lower.contains("dingbats") {
+        Some("ZapfDingbatsEncoding")
+    } else if lower == "symbol" || lower.starts_with("symbol") || lower.contains("-symbol") {
+        Some("SymbolEncoding")
+    } else {
+        None
     }
 }
 
@@ -438,7 +652,7 @@ fn resolve_optional(object: &PdfObject, reader: Option<&PdfReader>) -> Result<Pd
 }
 
 #[cfg(test)]
-mod mega23_tests {
+mod cid_font_tests {
     use super::*;
 
     #[test]
@@ -522,6 +736,118 @@ mod mega23_tests {
         let mut dict = PdfDictionary::empty();
         dict.insert("Subtype", PdfObject::Name("Type0".to_string()));
         assert_eq!(detect_font_subtype(&dict), FontSubtype::Type0);
+    }
+
+    #[test]
+    fn wmode_name_suffix_detection() {
+        assert_eq!(wmode_from_cmap_name("Identity-V"), 1);
+        assert_eq!(wmode_from_cmap_name("Identity-H"), 0);
+        assert_eq!(wmode_from_cmap_name("UniJIS-UCS2-V"), 1);
+        assert_eq!(wmode_from_cmap_name("UniGB-UCS2-H"), 0);
+        assert_eq!(wmode_from_cmap_name("90ms-RKSJ-V"), 1);
+        assert_eq!(wmode_from_cmap_name("WeirdName"), 0);
+    }
+
+    #[test]
+    fn wmode_from_embedded_cmap_bytes() {
+        assert_eq!(wmode_from_cmap_bytes(b"/WMode 1 def"), 1);
+        assert_eq!(wmode_from_cmap_bytes(b"/WMode 0 def"), 0);
+        assert_eq!(wmode_from_cmap_bytes(b"/CMapName /Adobe-Japan1-V def"), 1);
+        assert_eq!(wmode_from_cmap_bytes(b"no wmode here"), 0);
+    }
+
+    #[test]
+    fn type0_identity_v_font_is_vertical() {
+        let mut desc = PdfDictionary::empty();
+        desc.insert("Subtype", PdfObject::Name("CIDFontType2".to_string()));
+        let mut dict = PdfDictionary::empty();
+        dict.insert("Subtype", PdfObject::Name("Type0".to_string()));
+        dict.insert("Encoding", PdfObject::Name("Identity-V".to_string()));
+        dict.insert(
+            "DescendantFonts",
+            PdfObject::Array(vec![PdfObject::Dictionary(desc)]),
+        );
+        let resolver = FontResolver::new_from_dict_only(&dict);
+        assert!(resolver.is_vertical(), "Identity-V should be vertical");
+    }
+
+    #[test]
+    fn type0_identity_h_font_is_horizontal() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert("Subtype", PdfObject::Name("Type0".to_string()));
+        dict.insert("Encoding", PdfObject::Name("Identity-H".to_string()));
+        let resolver = FontResolver::new_from_dict_only(&dict);
+        assert!(!resolver.is_vertical(), "Identity-H should be horizontal");
+    }
+
+    #[test]
+    fn simple_font_is_never_vertical() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert("Subtype", PdfObject::Name("Type1".to_string()));
+        dict.insert("Encoding", PdfObject::Name("WinAnsiEncoding".to_string()));
+        let resolver = FontResolver::new_from_dict_only(&dict);
+        assert!(!resolver.is_vertical());
+    }
+
+    #[test]
+    fn lookup_cid_vertical_uses_dw2_default() {
+        let dict = PdfDictionary::empty();
+        let (w1y, vx, vy) = lookup_cid_vertical(5, 1000.0, &dict);
+        assert_eq!(w1y, -1000.0);
+        assert_eq!(vx, 500.0);
+        assert_eq!(vy, 880.0);
+    }
+
+    #[test]
+    fn lookup_cid_vertical_honors_explicit_dw2() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert(
+            "DW2",
+            PdfObject::Array(vec![PdfObject::Integer(900), PdfObject::Integer(-1100)]),
+        );
+        let (w1y, vx, vy) = lookup_cid_vertical(5, 1000.0, &dict);
+        assert_eq!(w1y, -1100.0);
+        assert_eq!(vx, 500.0);
+        assert_eq!(vy, 900.0);
+    }
+
+    #[test]
+    fn lookup_cid_vertical_w2_array_form() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert(
+            "W2",
+            PdfObject::Array(vec![
+                PdfObject::Integer(10),
+                PdfObject::Array(vec![
+                    PdfObject::Integer(-900),
+                    PdfObject::Integer(450),
+                    PdfObject::Integer(800),
+                    PdfObject::Integer(-950),
+                    PdfObject::Integer(460),
+                    PdfObject::Integer(810),
+                ]),
+            ]),
+        );
+        assert_eq!(lookup_cid_vertical(10, 1000.0, &dict), (-900.0, 450.0, 800.0));
+        assert_eq!(lookup_cid_vertical(11, 1000.0, &dict), (-950.0, 460.0, 810.0));
+        assert_eq!(lookup_cid_vertical(12, 1000.0, &dict), (-1000.0, 500.0, 880.0));
+    }
+
+    #[test]
+    fn lookup_cid_vertical_w2_range_form() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert(
+            "W2",
+            PdfObject::Array(vec![
+                PdfObject::Integer(100),
+                PdfObject::Integer(200),
+                PdfObject::Integer(-880),
+                PdfObject::Integer(500),
+                PdfObject::Integer(880),
+            ]),
+        );
+        assert_eq!(lookup_cid_vertical(150, 1000.0, &dict), (-880.0, 500.0, 880.0));
+        assert_eq!(lookup_cid_vertical(50, 1000.0, &dict), (-1000.0, 500.0, 880.0));
     }
 
     #[test]

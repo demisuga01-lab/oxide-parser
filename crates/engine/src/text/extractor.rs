@@ -1,8 +1,15 @@
+use rayon::prelude::*;
+
 use super::collector::TextCollector;
 use super::formatter::{TextFormatOptions, TextFormatter};
 use super::reading_order::{ReadingOrderReconstructor, TextLine};
 use crate::engine::ContentEngine;
 use crate::error::Result;
+
+/// Documents with at least this many pages are extracted in parallel. Below
+/// this threshold the rayon fan-out/join overhead outweighs the benefit, so we
+/// stay on the simple serial path to avoid regressing small-document latency.
+const PARALLEL_PAGE_THRESHOLD: usize = 4;
 
 #[derive(Debug, Clone, Default)]
 pub struct TextExtractOptions {
@@ -30,6 +37,14 @@ impl TextExtractor {
     }
 
     /// Extract text from all or selected pages of a document.
+    ///
+    /// Multi-page documents are extracted across rayon worker threads (the
+    /// parsed [`ContentEngine`] is shared by immutable reference, so every
+    /// thread reads the same parsed document — no per-page reparse). Page
+    /// output is reassembled in the original page order regardless of the order
+    /// threads finish, so the result is byte-identical to serial extraction. A
+    /// page that fails to extract logs a warning and contributes no text,
+    /// exactly as in the serial path.
     pub fn extract(&self, engine: &ContentEngine, options: &TextExtractOptions) -> Result<String> {
         let total_pages = engine.page_count()?;
         let page_list: Vec<usize> = match &options.pages {
@@ -38,24 +53,35 @@ impl TextExtractor {
         };
 
         let formatter = TextFormatter::new();
-        let mut all_text = String::new();
 
-        for page_num in page_list {
+        // Format a single page's text, or None for an out-of-range/failed page
+        // (warning already logged). Shared by both the serial and parallel
+        // paths so their output is identical by construction.
+        let format_one = |page_num: usize| -> Option<String> {
             if page_num == 0 || page_num > total_pages {
                 log::warn!("TextExtractor: page {} out of range, skipping", page_num);
-                continue;
+                return None;
             }
-
-            let page_text = self.extract_page(engine, page_num, options);
-            match page_text {
-                Ok((page_n, lines)) => {
-                    let page_str = formatter.format_page(&lines, page_n, &options.format);
-                    all_text.push_str(&page_str);
-                }
+            match self.extract_page(engine, page_num, options) {
+                Ok((page_n, lines)) => Some(formatter.format_page(&lines, page_n, &options.format)),
                 Err(e) => {
                     log::warn!("TextExtractor: page {} failed: {}", page_num, e);
+                    None
                 }
             }
+        };
+
+        let page_strings: Vec<Option<String>> = if page_list.len() >= PARALLEL_PAGE_THRESHOLD {
+            // `par_iter().map(...).collect()` preserves input order, so pages
+            // land in `page_strings` by their position in `page_list`.
+            page_list.par_iter().map(|&p| format_one(p)).collect()
+        } else {
+            page_list.iter().map(|&p| format_one(p)).collect()
+        };
+
+        let mut all_text = String::new();
+        for page_str in page_strings.into_iter().flatten() {
+            all_text.push_str(&page_str);
         }
 
         Ok(all_text)

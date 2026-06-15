@@ -186,6 +186,10 @@ impl<'a> TextCollector<'a> {
 
         let resolver = self.font_resolvers.get(&font_name);
         let code_size = resolver.map(FontResolver::code_size).unwrap_or(1);
+        // Writing mode comes from the font's encoding CMap (WMode), never from the
+        // text matrix: a rotated text matrix is still horizontal writing, and
+        // upright vertical CJK uses an unrotated matrix. See PDF 32000-1 §9.7.4.3.
+        let is_vertical = resolver.map(FontResolver::is_vertical).unwrap_or(false);
         let codes = extract_char_codes(&bytes, code_size);
         let mut decoded_text = String::new();
         let mut total_advance = 0.0_f64;
@@ -198,29 +202,50 @@ impl<'a> TextCollector<'a> {
             };
             decoded_text.push_str(&ch_text);
 
-            let glyph_units = resolver
-                .map(|resolver| resolver.glyph_width(*code))
-                .unwrap_or(500.0);
             let is_space = resolver
                 .map(|resolver| resolver.is_space_code(*code))
                 .unwrap_or(*code == 0x20);
-            let tx = (glyph_units / 1000.0 * font_size
-                + char_spacing
-                + if is_space { word_spacing } else { 0.0 })
-                * h_scale;
 
-            self.gs.text.tm[4] += self.gs.text.tm[0] * tx;
-            self.gs.text.tm[5] += self.gs.text.tm[1] * tx;
-            total_advance += tx;
+            if is_vertical {
+                // Vertical writing mode: glyphs advance downward by the font's
+                // W2 vertical displacement (w1y, normally negative). Horizontal
+                // scaling (Th) does not apply to the vertical advance.
+                let (w1y, _vx, _vy) = resolver
+                    .map(|resolver| resolver.vertical_metrics(*code))
+                    .unwrap_or((-1000.0, 500.0, 880.0));
+                let ty = w1y / 1000.0 * font_size
+                    + char_spacing
+                    + if is_space { word_spacing } else { 0.0 };
+                self.gs.text.tm[4] += self.gs.text.tm[2] * ty;
+                self.gs.text.tm[5] += self.gs.text.tm[3] * ty;
+                total_advance += ty;
+            } else {
+                let glyph_units = resolver
+                    .map(|resolver| resolver.glyph_width(*code))
+                    .unwrap_or(500.0);
+                let tx = (glyph_units / 1000.0 * font_size
+                    + char_spacing
+                    + if is_space { word_spacing } else { 0.0 })
+                    * h_scale;
+                self.gs.text.tm[4] += self.gs.text.tm[0] * tx;
+                self.gs.text.tm[5] += self.gs.text.tm[1] * tx;
+                total_advance += tx;
+            }
         }
 
         if !decoded_text.is_empty() {
-            let width_x = self.gs.text.tm[0] * total_advance;
-            let width_y = self.gs.text.tm[1] * total_advance;
+            // Width is the on-page magnitude of the run's advance. For horizontal
+            // text it spans rightward; for vertical text it spans downward (the
+            // reading-order pass interprets `width` per writing mode).
+            let (axis_a, axis_b) = if is_vertical {
+                (self.gs.text.tm[2], self.gs.text.tm[3])
+            } else {
+                (self.gs.text.tm[0], self.gs.text.tm[1])
+            };
+            let width_x = axis_a * total_advance;
+            let width_y = axis_b * total_advance;
             let width = (width_x.powi(2) + width_y.powi(2)).sqrt();
             let is_rtl = is_rtl_dominant(&decoded_text);
-            let tm = &self.gs.text.tm;
-            let is_vertical = tm[1].abs() > tm[0].abs() + 0.1;
             // NOTE: we extract text regardless of rendering_mode.
             // rendering_mode=3 (invisible) is used for OCR layers in scanned PDFs;
             // extracting it is correct and deliberate. If callers want to filter
@@ -252,22 +277,35 @@ impl<'a> TextCollector<'a> {
         };
         let font_size = self.gs.text.font_size;
         let h_scale = self.gs.text.horizontal_scaling / 100.0;
+        let is_vertical = self
+            .font_resolvers
+            .get(&self.gs.text.font_name)
+            .map(FontResolver::is_vertical)
+            .unwrap_or(false);
 
         for elem in array {
             match elem {
                 Operand::String(bytes) => self.show_bytes(bytes, chunks),
-                Operand::Integer(value) => {
-                    let tx = -(value as f64) / 1000.0 * font_size * h_scale;
-                    self.gs.text.tm[4] += self.gs.text.tm[0] * tx;
-                    self.gs.text.tm[5] += self.gs.text.tm[1] * tx;
-                }
-                Operand::Real(value) => {
-                    let tx = -value / 1000.0 * font_size * h_scale;
-                    self.gs.text.tm[4] += self.gs.text.tm[0] * tx;
-                    self.gs.text.tm[5] += self.gs.text.tm[1] * tx;
-                }
+                Operand::Integer(value) => self.apply_tj_adjust(value as f64, font_size, h_scale, is_vertical),
+                Operand::Real(value) => self.apply_tj_adjust(value, font_size, h_scale, is_vertical),
                 _ => {}
             }
+        }
+    }
+
+    /// Apply a TJ numeric position adjustment. The number is in thousandths of a
+    /// text-space unit; it moves the next glyph backward along the writing axis
+    /// (left for horizontal, up for vertical). Horizontal scaling only affects
+    /// the horizontal axis.
+    fn apply_tj_adjust(&mut self, value: f64, font_size: f64, h_scale: f64, is_vertical: bool) {
+        if is_vertical {
+            let ty = -value / 1000.0 * font_size;
+            self.gs.text.tm[4] += self.gs.text.tm[2] * ty;
+            self.gs.text.tm[5] += self.gs.text.tm[3] * ty;
+        } else {
+            let tx = -value / 1000.0 * font_size * h_scale;
+            self.gs.text.tm[4] += self.gs.text.tm[0] * tx;
+            self.gs.text.tm[5] += self.gs.text.tm[1] * tx;
         }
     }
 }
@@ -538,6 +576,64 @@ mod tests {
             "chunk with rendering_mode=3 should be marked invisible"
         );
         assert!(hidden.unwrap().is_ocr_layer());
+    }
+
+    #[test]
+    fn rotated_horizontal_text_is_not_classified_vertical() {
+        // A 90° rotated text matrix with a normal (horizontal) font. The OLD
+        // heuristic `tm[1].abs() > tm[0].abs() + 0.1` would misclassify this as
+        // vertical because the rotation puts the magnitude on tm[1]. With
+        // WMode-driven detection the (horizontal) font keeps it horizontal.
+        // 90° rotation: [0 1 -1 0 x y] via `Tm`.
+        let chunks =
+            collect_text(b"BT /F1 12 Tf 0 1 -1 0 100 700 Tm (Sideways) Tj ET");
+        assert_eq!(chunks.len(), 1);
+        assert!(
+            !chunks[0].is_vertical,
+            "rotated horizontal text must NOT be classified vertical"
+        );
+    }
+
+    #[test]
+    fn vertical_font_marks_chunk_vertical_and_advances_down() {
+        // A Type0 font with Identity-V encoding → vertical writing mode. The chunk
+        // is flagged vertical and the text matrix advances downward (y decreases)
+        // rather than rightward (x advances by ~0).
+        let mut font_dict = PdfDictionary::empty();
+        font_dict.insert("Type", PdfObject::Name("Font".to_string()));
+        font_dict.insert("Subtype", PdfObject::Name("Type0".to_string()));
+        font_dict.insert("Encoding", PdfObject::Name("Identity-V".to_string()));
+        let mut desc = PdfDictionary::empty();
+        desc.insert("Subtype", PdfObject::Name("CIDFontType2".to_string()));
+        desc.insert("DW", PdfObject::Integer(1000));
+        font_dict.insert(
+            "DescendantFonts",
+            PdfObject::Array(vec![PdfObject::Dictionary(desc)]),
+        );
+
+        let mut resources = PageResources::default();
+        resources.fonts.insert("V1".to_string(), font_dict.clone());
+        let mut resolvers = HashMap::new();
+        resolvers.insert("V1".to_string(), FontResolver::new_from_dict_only(&font_dict));
+        let mut collector = TextCollector::new_with_resolvers(resources, resolvers);
+
+        // Two-byte CID 0x0001 at 12pt, starting at (300,700).
+        let ops = ContentParser::parse(b"BT /V1 12 Tf 300 700 Td <0001> Tj <0002> Tj ET").unwrap();
+        let chunks = collector.collect(&ops);
+        assert!(!chunks.is_empty(), "vertical font should still emit chunks");
+        assert!(
+            chunks.iter().all(|c| c.is_vertical),
+            "Identity-V font chunks must be vertical"
+        );
+        // The second chunk must sit BELOW the first (smaller y) — downward advance.
+        if chunks.len() == 2 {
+            assert!(
+                chunks[1].y < chunks[0].y,
+                "vertical advance should move down the page: y1={} y0={}",
+                chunks[1].y,
+                chunks[0].y
+            );
+        }
     }
 
     #[test]

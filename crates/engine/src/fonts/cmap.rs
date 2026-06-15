@@ -464,7 +464,7 @@ fn hex_string_to_bytes(s: &str) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod mega23_tests {
+mod cid_cmap_tests {
     use std::collections::HashMap;
 
     use super::*;

@@ -35,7 +35,10 @@ pub struct TextFormatOptions {
     /// Line ending style.
     pub line_ending: LineEnding,
 
-    /// Characters per average-width glyph for preserve_layout mode.
+    /// Fallback character-cell width (PDF points) for preserve_layout mode, used
+    /// only when the page has no measurable glyph advances to derive an adaptive
+    /// cell width from. The layout grid normally uses the document's own median
+    /// per-character advance instead of this constant.
     pub pts_per_char: f64,
 }
 
@@ -85,6 +88,25 @@ impl TextFormatter {
             lines.iter().map(|l| l.font_size).sum::<f64>() / lines.len() as f64
         };
 
+        // Variable-width layout preservation: derive the monospaced output grid's
+        // character-cell width from the document's *actual* glyph metrics rather
+        // than a fixed points-per-char constant, so columns and indentation line
+        // up for proportional fonts and multi-column pages. Computed once per
+        // page; the page width in cells bounds the leading-pad so garbage
+        // coordinates can't produce pathological gaps.
+        let (cell_width, max_cols) = if options.preserve_layout {
+            let cw = Self::estimate_cell_width(lines, options.pts_per_char);
+            let page_x_max = lines
+                .iter()
+                .map(|l| l.x_max)
+                .fold(0.0_f64, f64::max)
+                .max(0.0);
+            let cap = ((page_x_max / cw).ceil() as usize).clamp(40, 1000);
+            (cw, cap)
+        } else {
+            (options.pts_per_char, 0)
+        };
+
         for line in lines {
             if line.is_blank() {
                 continue;
@@ -100,8 +122,15 @@ impl TextFormatter {
             }
 
             if options.preserve_layout {
-                let leading_spaces = (line.x_min / options.pts_per_char).round() as usize;
-                for _ in 0..leading_spaces.min(40) {
+                // Place the line's start at the output column derived from its
+                // page-x origin and the adaptive cell width. Never emit negative
+                // padding; bound by the page width in cells.
+                let leading = if line.x_min > 0.0 {
+                    ((line.x_min / cell_width).round() as usize).min(max_cols)
+                } else {
+                    0
+                };
+                for _ in 0..leading {
                     out.push(' ');
                 }
             }
@@ -115,6 +144,38 @@ impl TextFormatter {
         }
 
         out
+    }
+
+    /// Estimate the monospaced output grid's character-cell width (in PDF points)
+    /// from the document's own glyph metrics: the median per-character horizontal
+    /// advance across all non-blank lines, where a line's advance is
+    /// `(x_max - x_min) / char_count`. This adapts to font size and document
+    /// scale, unlike a fixed constant.
+    ///
+    /// Falls back to `fallback` (the configured `pts_per_char`) when no line has a
+    /// measurable advance (e.g. all single-character or zero-width lines).
+    fn estimate_cell_width(lines: &[TextLine], fallback: f64) -> f64 {
+        let mut advances: Vec<f64> = lines
+            .iter()
+            .filter(|l| !l.is_blank())
+            .filter_map(|l| {
+                let span = l.x_max - l.x_min;
+                let chars = l.text.chars().filter(|c| !c.is_whitespace()).count();
+                if span > 0.0 && chars > 0 {
+                    Some(span / chars as f64)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if advances.is_empty() {
+            return fallback.max(0.1);
+        }
+
+        advances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = advances[advances.len() / 2];
+        median.max(0.1)
     }
 
     /// Format lines from multiple pages into one string.
@@ -257,6 +318,117 @@ mod tests {
         let lines = vec![tline("Line", 700.0, 12.0, false)];
         let result = f.format_page(&lines, 0, &opts);
         assert!(result.contains("\r\n"), "should use CRLF line endings");
+    }
+
+    /// A custom TextLine builder that sets an explicit glyph extent (x_min/x_max)
+    /// independent of text length, so layout-grid math can be exercised directly.
+    fn layout_line(text: &str, x_min: f64, x_max: f64, font_size: f64) -> TextLine {
+        TextLine {
+            text: text.to_string(),
+            y: 700.0,
+            x_min,
+            x_max,
+            font_size,
+            is_paragraph_break: false,
+            column: 0,
+        }
+    }
+
+    fn leading_spaces(s: &str, needle: &str) -> usize {
+        let pos = s.find(needle).expect("text present");
+        s[..pos].chars().rev().take_while(|c| *c == ' ').count()
+    }
+
+    #[test]
+    fn layout_cell_width_is_document_adaptive_not_fixed_six() {
+        let f = TextFormatter::new();
+        let opts = TextFormatOptions {
+            include_page_markers: false,
+            preserve_layout: true,
+            paragraph_breaks: false,
+            heading_breaks: false,
+            ..Default::default()
+        };
+        // 10 non-space chars across 120 pts → cell width ≈ 12 pts.
+        let body = layout_line("ABCDEFGHIJ", 50.0, 170.0, 24.0);
+        // Indented line starts at x=120 → 120/12 = 10 cells.
+        let indented = layout_line("X", 120.0, 132.0, 24.0);
+        let result = f.format_page(&[body, indented], 0, &opts);
+        // With the OLD fixed 6.0 constant the indent would have been 120/6 = 20.
+        // With the adaptive ~12pt width it is 10.
+        assert_eq!(
+            leading_spaces(&result, "X"),
+            10,
+            "indent should use the document's ~12pt cell width, got:\n{result}"
+        );
+    }
+
+    #[test]
+    fn layout_same_start_aligns_regardless_of_glyph_width() {
+        let f = TextFormatter::new();
+        let opts = TextFormatOptions {
+            include_page_markers: false,
+            preserve_layout: true,
+            paragraph_breaks: false,
+            heading_breaks: false,
+            ..Default::default()
+        };
+        // Body line sets the cell width (~10pt/char here).
+        let body = layout_line("MMMMMMMMMM", 0.0, 100.0, 20.0);
+        let wide = layout_line("WW", 200.0, 240.0, 20.0); // starts at x=200
+        let narrow = layout_line("ii", 200.0, 210.0, 20.0); // also starts at x=200
+        let result = f.format_page(&[body, wide, narrow], 0, &opts);
+        let wide_indent = leading_spaces(&result, "WW");
+        let narrow_indent = leading_spaces(&result, "ii");
+        assert_eq!(
+            wide_indent, narrow_indent,
+            "lines starting at same x must align identically, got wide={wide_indent} narrow={narrow_indent}\n{result}"
+        );
+        assert!(
+            (18..=22).contains(&wide_indent),
+            "indent ~20 expected (200/10), got {wide_indent}"
+        );
+    }
+
+    #[test]
+    fn layout_indent_cap_is_page_width_based_not_forty() {
+        let f = TextFormatter::new();
+        let opts = TextFormatOptions {
+            include_page_markers: false,
+            preserve_layout: true,
+            paragraph_breaks: false,
+            heading_breaks: false,
+            ..Default::default()
+        };
+        // Several body lines pin the median cell width at ~10pt/char so a single
+        // far-right line can't skew it.
+        let body1 = layout_line("MMMMMMMMMM", 0.0, 100.0, 20.0); // ~10pt/char
+        let body2 = layout_line("NNNNNNNNNN", 0.0, 100.0, 20.0);
+        let body3 = layout_line("OOOOOOOOOO", 0.0, 100.0, 20.0);
+        // Realistic single glyph far to the right (span ~ one cell).
+        let far = layout_line("Z", 600.0, 620.0, 20.0);
+        let result = f.format_page(&[body1, body2, body3, far], 0, &opts);
+        let indent = leading_spaces(&result, "Z");
+        assert!(
+            indent > 40,
+            "wide page should allow indent beyond the old 40-cap, got {indent}\n{result}"
+        );
+    }
+
+    #[test]
+    fn non_layout_path_is_unaffected_by_changes() {
+        let f = TextFormatter::new();
+        let opts = TextFormatOptions {
+            include_page_markers: false,
+            preserve_layout: false,
+            ..Default::default()
+        };
+        let line = layout_line("Hello", 300.0, 360.0, 12.0);
+        let result = f.format_page(&[line], 0, &opts);
+        assert!(
+            result.starts_with("Hello"),
+            "flowing-text path should emit no leading spaces, got: {result:?}"
+        );
     }
 
     #[test]
