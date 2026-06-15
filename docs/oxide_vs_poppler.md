@@ -1,13 +1,14 @@
 # Oxide vs Poppler — Positioning Report
 
 > **Evidence policy.** Every claim is backed by something measured or run on the
-> hardware/software in §D.6. The **tool-surface parity matrix (§D.2a)** and the
-> **license/dependency audit (§D.4)** were re-verified by commands run in *this*
-> session (the final tool-parity audit). The **fidelity & performance numbers
-> (§D.3)** are carried forward from the documented full-corpus harness run
-> (labelled as such); the extraction/render code paths they measure are
-> unchanged since (verified byte-identical), so they remain current. Where
-> something could not be measured (e.g. a Poppler utility absent from the
+> hardware/software in §D.6. The **fidelity numbers (§D.3)** were **re-measured
+> by a full 75-file harness run this session** (overall text 67.7%, render
+> 29.31 dB, 0 panics / 0 timeouts) — they match the prior recorded figures
+> (render PSNR varied +0.11 dB run-to-run). The **tool-surface parity matrix
+> (§D.2a)** and the **license/dependency audit (§D.4)** were likewise verified by
+> commands run this session. The **Oxide-vs-Poppler *performance* numbers
+> (§D.3.2)** are carried forward from the documented perf run (labelled as such).
+> Where something could not be measured (e.g. a Poppler utility absent from the
 > environment), it is labelled. Where Poppler wins, that is reported plainly.
 
 Generated: 2026-06-15. Oxide built from the current working tree
@@ -39,10 +40,11 @@ Headline results:
   the SVG vector path in place. Every Oxide subcommand is exercised end-to-end
   by a committed tool-surface test (`crates/cli/tests/tool_surface.rs`, 14 tests).
 - **Correctness parity.** Across the 75-file corpus at 150 DPI, Oxide reaches
-  **67.7% text similarity** and **29.20 dB render PSNR** vs Poppler, up from the
-  Round-0 baseline of 66.8% / 26.13 dB (**+0.9 pp text, +3.07 dB render**
+  **67.7% text similarity** and **29.31 dB render PSNR** vs Poppler, up from the
+  Round-0 baseline of 66.8% / 26.13 dB (**+0.9 pp text, +3.18 dB render**
   cumulative). Analyze and extract-images succeed on **96.0%** of the corpus (up
-  from 93.3%). **Zero panics, zero timeouts** across the full run.
+  from 93.3%). **Zero panics, zero timeouts** across the full run. (Re-measured
+  this session — see the Evidence policy note above and §D.6.)
 - **Throughput is mixed and honest.** Oxide is **faster on text extraction for
   real-world and small documents** (≈1.8× single-thread on a 14-page paper, up
   to ≈5× with parallelism) and **faster on image extraction** (≈8.5× vs
@@ -90,7 +92,7 @@ implemented with documented approximations or gaps; **None** = not implemented.
 | **Text — RTL / Arabic** | Partial | Full | BiDi reorder Full; Arabic contextual shaping/joining **None** (rtl-text 33.4%) |
 | **Text — vertical / CJK (WMode)** | Partial | Full | WMode detection + W2/DW2 metrics implemented; CJK token similarity 32.2% (glyph→Unicode coverage limited) |
 | **Text — layout (`-layout`)** | Partial | Full | Adaptive cell-width layout mode exists; not exercised by the parity harness |
-| **Rasterization (vector/paths)** | Full | Full | Render PSNR 29.20 dB overall; Poppler faster (§D.3) |
+| **Rasterization (vector/paths)** | Full | Full | Render PSNR 29.31 dB overall; Poppler faster (§D.3) |
 | **Image XObjects** | Full | Full | DCT/JPEG, Flate, LZW, RunLength, ASCII85/Hex |
 | **CCITT G3/G4 fax** | Full | Full | `/K<0`, `/K0`, `/K>0`, BlackIs1, byte-align, EOL/EOB |
 | **JBIG2** | Partial | Full | Generic + symbol dict/text + halftone + refinement regions; exotic segment types error cleanly |
@@ -148,7 +150,7 @@ output (noted honestly).
 | Poppler utility | Oxide command | Status | Cross-check this session |
 |---|---|---|---|
 | `pdftotext` | `extract-text` | **Full** | Same leading text on `tracemonkey` p3; corpus text-similarity 67.7% (§D.3) |
-| `pdftoppm` | `render` (png/jpg/webp) | **Full** | Valid PNG produced; render PSNR 29.20 dB (§D.3). `-r`→`--dpi`, `-f/-l`→`-p`, format flags present |
+| `pdftoppm` | `render` (png/jpg/webp) | **Full** | Valid PNG produced; render PSNR 29.31 dB (§D.3). `-r`→`--dpi`, `-f/-l`→`-p`, format flags present |
 | `pdftocairo -svg` | `render --format svg` | **Full** | Valid SVG produced; rasterize-and-compare 32–39 dB vs raster (Mega-19) |
 | `pdftocairo -ps`/`-eps`, `pdftops` | — | **Missing** | No PS/EPS backend (deferred; SVG path exists). The one genuine gap |
 | `pdfimages` | `extract-images` | **Full** | 1 image extracted; `pdfimages -list` also reports 1. Format/min-size/`-p` flags present |
@@ -180,7 +182,7 @@ normalized word-token similarity vs `pdftotext`; Render = PSNR vs `pdftoppm`.
 | Metric | Round 0 baseline | Final (this session) | Delta |
 |---|---:|---:|---:|
 | Overall text similarity | 66.8% | **67.7%** | **+0.9 pp** |
-| Overall render PSNR | 26.13 dB | **29.20 dB** | **+3.07 dB** |
+| Overall render PSNR | 26.13 dB | **29.31 dB** | **+3.18 dB** |
 | Analyze success rate | 93.3% | **96.0%** | +2.7 pp |
 | Extract-images success rate | 93.3% | **96.0%** | +2.7 pp |
 | Rust panics / timeouts | 0 / 0 | **0 / 0** | 0 |
@@ -538,7 +540,7 @@ GPLv2 — embeddable in proprietary software), memory-safety guarantees for its
 own code (zero `unsafe`, 0 panics/0 timeouts over the corpus), text-extraction
 throughput on real-world and small documents (3–5× parallel scaling),
 image-extraction throughput (~8.5×), and high-DPI rendering of large documents.
-It is **at parity** on render correctness for most categories (29.20 dB) and on
+It is **at parity** on render correctness for most categories (29.31 dB) and on
 render peak memory at 150 DPI.
 
 Oxide **still trails Poppler** on: 150-DPI vector/form rasterization speed

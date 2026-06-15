@@ -13,6 +13,12 @@ Generated: 2026-06-14T01:25:15.314765+00:00
 
 ## Headline Numbers
 
+> The figures in this section are the **Round-0 baseline** (the starting point).
+> The latest **re-measured** numbers (full 75-file harness, Poppler 26.02.0,
+> 150 DPI, re-run this session) are: **text 67.7%**, **render 29.31 dB**,
+> analyze 96.0%, extract-images 96.0%, **0 panics / 0 timeouts** — see the
+> per-category breakdown in `docs/oxide_vs_poppler.md` §D.3.
+
 - Overall text similarity: 66.8%
 - Overall render PSNR: 26.13 dB
 - Analyze success rate: 93.3%

@@ -30,7 +30,7 @@ parser, the stream filters, and the content-stream tokenizer.
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)
 workspace member (excluded from the stable workspace so `cargo build`/`cargo
-test` stay green without nightly). Four targets:
+test` stay green without nightly). Six targets:
 
 | Target              | Entry point                          | Subsystem |
 |---------------------|--------------------------------------|-----------|
@@ -38,10 +38,12 @@ test` stay green without nightly). Four targets:
 | `filters`           | `filters::fuzz_decode_filter`        | Flate / LZW / ASCIIHex / ASCII85 / RunLength decoders |
 | `predictor`         | `filters::fuzz_apply_predictor`      | PNG/TIFF predictor stage |
 | `content_tokenizer` | `ContentParser::parse(bytes)`        | Content tokenizer + inline-image state machine + operand parser |
+| `image_decoders`    | `fuzz::fuzz_decode_image`            | CCITT G3/G4, JBIG2, JPEG2000 (JPX), DCT/JPEG decode paths (selector byte picks the codec) |
+| `fonts`             | `fuzz::fuzz_parse_font`              | Font-program parsing (TrueType / CFF / OpenType / bare-CFF) via the glyph-outline extractor |
 
-Seed corpora (valid objects, content streams, encoded filter data) are under
-`fuzz/corpus/<target>/`. See [`fuzz/README.md`](../fuzz/README.md) for how to
-run, minimise, and replay.
+Seed corpora (valid objects, content streams, encoded filter data, bundled
+font programs) are under `fuzz/corpus/<target>/`. See
+[`fuzz/README.md`](../fuzz/README.md) for how to run, minimise, and replay.
 
 ## Findings and fixes
 
@@ -55,6 +57,7 @@ to the function and asserting `Err`.
 | 1 | Stack overflow (unbounded recursion) | `parser.rs` `parse_object`→`parse_array`/`parse_dictionary` | Recursive-descent object parser had no nesting bound; input like `[[[[…` thousands deep overflows the stack and aborts the process | Added `MAX_PARSE_DEPTH = 64` with enter/leave guards on every nested structure; over-deep input returns `ParseError` | `parser::tests::deeply_nested_arrays_error_instead_of_overflowing_stack`, `…_dictionaries_…`, `nesting_within_limit_still_parses_and_depth_resets` |
 | 2 | Unbounded allocation (OOM) | `reader.rs` `parse_object_stream_data` | `Vec::with_capacity(n)` where `n` is the attacker-controlled `/N` object-stream count; a tiny stream declaring `/N 4000000000` reserves ~tens of GB before any per-entry validation | Capacity hint bounded by `n.min(first)` (a real entry needs ≥1 header byte, so the count cannot exceed the header length); the read loop still errors cleanly on a truncated header | `reader::tests::object_stream_huge_n_does_not_allocate_or_panic` |
 | 3 | Integer-overflow panic / size-field misvalidation | `filters.rs` `apply_predictor` | `columns * colors * bits_per_component` (all attacker-controlled via DecodeParms) multiplied without overflow check — panics under overflow checks, silently wraps to a bogus row length otherwise | Switched to `checked_mul`; overflow returns `MalformedPdf` | `filters::tests::predictor_row_dimensions_overflow_returns_err_not_panic` |
+| 4 | **Infinite loop (hang / CPU-DoS)** — *found by libFuzzer (`content_tokenizer`) this round* | `content/tokenizer.rs` `read_inline_image_data` + `content/parser.rs` `parse_tokens` | An inline image (`BI`/`ID`) with no `EI` terminator made `read_inline_image_data` return a token error **without advancing `pos` or leaving the `Data` state**; `ContentParser::parse` recovers from token errors with `continue`, so it called the tokenizer again at the same position, got the same error, and looped forever (100% CPU, no termination). | On no-`EI`, consume the remaining bytes as the (unterminated) inline-image payload, advance to EOF, and leave the inline-image state so iteration terminates. The previously-hanging libFuzzer input now executes in ~1 ms. | `content::tokenizer::tests::unterminated_inline_image_terminates_and_does_not_hang` (+ the minimized input saved as a corpus seed) |
 
 ### Audited and already robust (no change needed)
 
@@ -67,7 +70,9 @@ to the function and asserting `Err`.
   huge `/Index` count errors quickly instead of allocating.
 - **Content tokenizer & parser**: fully iterative — the operand/array stack
   uses a `saturating_add` depth counter and the inline-image state machine
-  bounds-checks every slice. No recursion, no size-field preallocation.
+  bounds-checks every slice. No recursion, no size-field preallocation. (One
+  termination bug in the inline-image path — finding #4 above — was found by
+  fuzzing this round and fixed.)
 - **xref `/Prev` chain following**: already guarded by a `visited` set (cycle
   detection), so a `/Prev` loop terminates.
 - **Reference resolution** and **PostScript calculator functions**: depth-64
@@ -75,29 +80,50 @@ to the function and asserting `Err`.
 
 ## Current posture
 
-The parser, stream filters, and content tokenizer return clean
-`OxideError`s — never panic, hang, or allocate unboundedly — on the malformed
-inputs found in this round. **Three** distinct DoS bugs (one unbounded
-recursion, one unbounded allocation, one integer-overflow) were found and
-fixed, each guarded by a permanent regression test.
+The parser, stream filters, content tokenizer, image decoders, and font parser
+return cleanly — never panic, hang, or allocate unboundedly — on the malformed
+inputs exercised. **Four** distinct DoS bugs (one unbounded recursion, one
+unbounded allocation, one integer-overflow, and one inline-image infinite loop)
+were found and fixed, each guarded by a permanent regression test.
+
+## Fuzzing runs actually executed (this round)
+
+All six targets were built and run on nightly + cargo-fuzz 0.13.1
+(x86_64-pc-windows-msvc), release with debug-assertions + overflow-checks on,
+seeded from the committed corpora:
+
+| Target | Executions | Wall time | Result |
+|---|---:|---:|---|
+| `parse_pdf` | 3,023,672 | 61 s | clean |
+| `filters` | 924,860 | 181 s | clean |
+| `predictor` | 1,801,592 | 121 s | clean |
+| `content_tokenizer` | (pre-fix) hung on 1 input → fixed → 740,817 | 121 s | **1 bug found+fixed** (finding #4), clean after fix |
+| `image_decoders` | 1,187,273 | 181 s | clean |
+| `fonts` | 503,991 | 181 s | clean |
+
+The single finding (the inline-image infinite loop) was minimized, fixed, and
+turned into a regression test; its minimized input is kept as a corpus seed.
 
 ## Honest limitations
 
-- **Findings were identified by targeted source audit of the four DoS classes
-  and confirmed with regression tests; the libFuzzer harness is committed and
-  runnable but the long coverage-guided runs have not yet been executed in
-  this environment** (nightly + `cargo-fuzz` availability). The next step is to
-  run each target for a meaningful duration (≥15 min with seeds; longer is
-  better) and fold any further crashes back in as regression tests. Until then
-  we claim "hardened against the audited DoS classes and the bugs found," not
-  "fuzzed clean for N hours."
-- **Subsystems not yet covered**: image decoders (`images/` — JPEG, JPX,
-  JBIG2, CCITT; several wrap third-party crates and `images/` may contain the
-  only `unsafe`/bit-reader code — prime candidates for ASan-based fuzzing),
-  **font parsing** (`fonts/`, `ttf-parser`), and **crypto** (`crypto.rs`,
-  password/key handling). These are candidates for a future fuzzing round.
+- **These are short, bounded runs** (≈1–3 min per target), enough to confirm
+  the harness works on this platform, to re-exercise the seeded corpora, and to
+  surface one real hang — but **not** the multi-hour coverage-guided campaigns
+  that find deep bugs. The claim is "fuzzed clean for the durations above, with
+  one found bug fixed," not "fuzzed clean for N hours."
+- **Coverage now includes** the parser, stream filters, predictor, content
+  tokenizer, **image decoders** (CCITT/JBIG2/JPX/DCT), and **font parsing**
+  (TrueType/CFF/bare-CFF) — the image and font subsystems flagged as gaps in the
+  prior round are now fuzzed.
+- **Still not fuzzed**: the **crypto** path (`crypto.rs` — malformed encryption
+  dictionaries / password handling) and the higher-level render pipeline. The
+  image/font decoders largely wrap third-party crates (`hayro-*`, `ttf-parser`,
+  `jpeg-decoder`); a crash inside a dependency would be an upstream bug, but
+  Oxide's wrappers are expected to guard sizes/return errors regardless — no
+  such dep-level crash surfaced in these runs.
 - `cargo-fuzz` requires nightly Rust; the `fuzz/` crate is intentionally
-  outside the stable workspace.
+  outside the stable workspace, so the stable `cargo build`/`cargo test` never
+  sees it.
 
 ## Resource safety: per-request timeout and limits (server)
 

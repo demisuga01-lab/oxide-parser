@@ -14,3 +14,17 @@ __pycache__/
 # Local development scratch notes (not product); see docs/development.md
 ROUND6-SCRATCH.md
 _ox.txt
+
+# pdftohtml/pdftocairo cross-check output that leaks into the fixtures dir
+crates/engine/tests/fixtures/tracemonkey*.html
+crates/engine/tests/fixtures/*.ppm
+
+# Fuzzing build/run outputs. Everything libFuzzer GENERATES at runtime
+# (mutated corpus entries, crash/timeout artifacts, lockfile, target dir) is
+# not tracked. Only the small hand-written SEED inputs under fuzz/corpus/ are
+# committed, via `git add -f` (large font seeds are NOT committed — the real
+# fonts already live in crates/engine/fonts/).
+fuzz/artifacts/
+fuzz/Cargo.lock
+fuzz/target/
+fuzz/corpus/

@@ -71,6 +71,8 @@ pub mod engine;
 pub mod error;
 pub mod filters;
 pub mod fonts;
+#[cfg(feature = "fuzzing")]
+pub mod fuzz;
 pub mod fonts_report;
 pub mod html;
 pub mod info;

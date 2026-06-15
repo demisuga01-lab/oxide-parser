@@ -284,9 +284,16 @@ impl<'a> ContentTokenizer<'a> {
             cursor += 1;
         }
 
-        Err(OxideError::ParseError(
-            "unterminated inline image data".to_string(),
-        ))
+        // No `EI` terminator before end of data. Treat the remaining bytes as
+        // the (unterminated) inline-image payload, consume to EOF, and LEAVE the
+        // inline-image state so iteration terminates at EOF. Returning an error
+        // here while staying in `Data` at the same position would loop forever
+        // in a caller that recovers from token errors (regression: tokenizer
+        // inline-image hang).
+        let data = self.data[start..].to_vec();
+        self.pos = self.data.len();
+        self.inline_image_state = InlineImageState::Normal;
+        Ok(ContentToken::InlineImageData(data))
     }
 
     fn consume_inline_image_data_separator(&mut self) {
@@ -489,5 +496,30 @@ mod tests {
                 ContentToken::Operator("EI".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn unterminated_inline_image_terminates_and_does_not_hang() {
+        // Regression: an inline image (`BI`/`ID`) with NO `EI` terminator used
+        // to return a token error while leaving the tokenizer in the Data state
+        // at the same position — a caller that recovers from token errors
+        // (`ContentParser::parse`) then looped forever. The tokenizer must now
+        // consume the rest as inline-image data and terminate at EOF.
+        //
+        // This is the libFuzzer-minimized class of input from the
+        // `content_tokenizer` target.
+        let data = b"BI /W 2 /H 2 /CS /G /BPC 8 ID \x00\xFF\xFF\x00 no terminator here";
+        let tokens = tokenize_all(data).expect("tokenizes without error");
+        // Must include the BI, ID, and an InlineImageData token, then stop.
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, ContentToken::InlineImageData(_))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t, ContentToken::Operator(op) if op == "ID")));
+
+        // And the higher-level parser must also terminate (this is what hung).
+        let ops = crate::content::ContentParser::parse(data).unwrap();
+        assert!(ops.iter().any(|o| o.operator == "ID"));
     }
 }
