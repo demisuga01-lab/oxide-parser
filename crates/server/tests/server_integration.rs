@@ -558,6 +558,36 @@ async fn extract_images_with_format_png_returns_zip_with_png_files() {
 }
 
 #[tokio::test]
+async fn extract_images_with_format_webp_returns_zip_and_succeeds() {
+    let pdf = fixture_pdf("image_only.pdf");
+    let (ct, body_bytes) = make_multipart("test.pdf", &pdf, &[("format", "webp")]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/extract-images")
+                .header("content-type", ct)
+                .body(Body::from(body_bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // WebP is now supported (no longer a 400).
+    assert_eq!(response.status(), StatusCode::OK);
+    let images_encoded = response
+        .headers()
+        .get("x-images-encoded")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    assert!(
+        images_encoded >= 1,
+        "image_only.pdf should encode at least one WebP image"
+    );
+    let body_bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+    assert!(body_bytes.starts_with(b"PK"), "should return a ZIP file");
+}
+
+#[tokio::test]
 async fn pdf2img_returns_zip_with_png_pages() {
     let pdf = fixture_pdf("flate.pdf");
     let (ct, body_bytes) = make_multipart("test.pdf", &pdf, &[("dpi", "72")]);
@@ -604,7 +634,7 @@ async fn pdf2img_returns_zip_with_png_pages() {
     assert!(body_bytes.starts_with(b"PK"));
     let cursor = std::io::Cursor::new(&body_bytes);
     let mut archive = zip::ZipArchive::new(cursor).unwrap();
-    assert!(archive.len() >= 1);
+    assert!(!archive.is_empty());
 
     let mut page_file = archive.by_index(0).unwrap();
     assert!(page_file.name().ends_with(".png"));
@@ -635,7 +665,7 @@ async fn pdf2img_with_jpeg_format_returns_jpeg_pages() {
 
     let cursor = std::io::Cursor::new(&body_bytes);
     let mut archive = zip::ZipArchive::new(cursor).unwrap();
-    assert!(archive.len() >= 1);
+    assert!(!archive.is_empty());
     let mut page_file = archive.by_index(0).unwrap();
     assert!(page_file.name().ends_with(".jpg"));
     let mut content = Vec::new();
@@ -929,7 +959,7 @@ async fn e2e_pdf2img_produces_valid_zip_with_png() {
 
     let cursor = std::io::Cursor::new(&zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor).unwrap();
-    assert!(archive.len() >= 1, "ZIP should have at least 1 page");
+    assert!(!archive.is_empty(), "ZIP should have at least 1 page");
     let mut page_file = archive.by_index(0).unwrap();
     assert!(page_file.name().ends_with(".png"));
     use std::io::Read;
@@ -1073,7 +1103,7 @@ async fn e2e_render_image_pdf_contains_non_white_pixels() {
 }
 
 // ---------------------------------------------------------------------------
-// Encryption (Mega 18): optional `password` form field
+// Encryption: optional `password` form field
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1174,7 +1204,7 @@ fn build_password_protected_pdf() -> Vec<u8> {
     }
 
     let mut bytes: Vec<u8> = Vec::new();
-    let mut offsets = vec![0usize; 3];
+    let mut offsets = [0usize; 3];
     bytes.extend_from_slice(b"%PDF-1.4\n");
     offsets[1] = bytes.len();
     bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
@@ -1182,8 +1212,8 @@ fn build_password_protected_pdf() -> Vec<u8> {
     bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
     let xref = bytes.len();
     bytes.extend_from_slice(b"xref\n0 3\n0000000000 65535 f \n");
-    for n in 1..=2usize {
-        bytes.extend_from_slice(format!("{:010} 00000 n \n", offsets[n]).as_bytes());
+    for off in offsets.iter().skip(1) {
+        bytes.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
     }
     let owner_o = vec![0xABu8; 32];
     let user_u = vec![0xCDu8; 32]; // will not verify against the empty password
@@ -1202,7 +1232,7 @@ fn build_password_protected_pdf() -> Vec<u8> {
 }
 
 // ---------------------------------------------------------------------------
-// Form XObject rendering (Mega 19)
+// Form XObject rendering
 // ---------------------------------------------------------------------------
 
 /// Same minimal Form-XObject PDF as the engine integration test (a 50×50 gray
@@ -1213,7 +1243,7 @@ fn build_form_xobject_pdf() -> Vec<u8> {
     let page_stream_content: &[u8] = b"q\n1 0 0 1 25 25 cm\n/Fm0 Do\nQ\n";
 
     let mut pdf: Vec<u8> = Vec::new();
-    let mut offsets = vec![0usize; 6];
+    let mut offsets = [0usize; 6];
     pdf.extend_from_slice(b"%PDF-1.4\n");
 
     offsets[1] = pdf.len();
@@ -1253,8 +1283,8 @@ fn build_form_xobject_pdf() -> Vec<u8> {
 
     let xref_offset = pdf.len();
     pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
-    for i in 1..=5 {
-        pdf.extend_from_slice(format!("{:010} 00000 n \n", offsets[i]).as_bytes());
+    for off in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
     }
     pdf.extend_from_slice(
         format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
