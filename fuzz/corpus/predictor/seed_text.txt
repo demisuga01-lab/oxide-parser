@@ -1,0 +1,1 @@
+A valid PNG-predictor seed is binary; this text seed exercises the param-parsing and row-alignment error paths. The fuzzer mutates from here.

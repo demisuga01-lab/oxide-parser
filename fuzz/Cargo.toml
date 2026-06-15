@@ -1,0 +1,57 @@
+[package]
+name = "oxide-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# This crate is intentionally NOT a member of the root workspace (the root
+# `Cargo.toml` lists only engine/server/cli). cargo-fuzz needs nightly +
+# libFuzzer and pulls in `libfuzzer-sys`; keeping it out of the workspace
+# means `cargo build`/`cargo test` on stable never sees it and stays green.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxide-engine]
+path = "../crates/engine"
+# Exposes the internal decoder entry points (fuzz_decode_filter, etc.).
+features = ["fuzzing"]
+
+# Fuzz targets are built in release with debug assertions + overflow checks on
+# so integer-overflow panics and debug_assert! fire during fuzzing.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true
+
+[[bin]]
+name = "parse_pdf"
+path = "fuzz_targets/parse_pdf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filters"
+path = "fuzz_targets/filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "predictor"
+path = "fuzz_targets/predictor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_tokenizer"
+path = "fuzz_targets/content_tokenizer.rs"
+test = false
+doc = false
+bench = false

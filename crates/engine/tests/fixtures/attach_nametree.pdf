@@ -1,0 +1,35 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [ (Hello.txt) 5 0 R ] >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>
+endobj
+4 0 obj
+<< /Type /EmbeddedFile /Length 55 /Params << /Size 55 /CheckSum <8AAF29AB3BEB5EF2EC29722EEC52A835> >> >>
+stream
+Hello, embedded world!
+This is a name-tree attachment.
+
+endstream
+endobj
+5 0 obj
+<< /Type /Filespec /F (Hello.txt) /UF (Hello.txt) /EF << /F 4 0 R >> /Desc (test attachment) >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000127 00000 n 
+0000000184 00000 n 
+0000000255 00000 n 
+0000000448 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+559
+%%EOF

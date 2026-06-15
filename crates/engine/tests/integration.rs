@@ -793,6 +793,115 @@ fn decode_and_encode_image_from_fixture() {
 }
 
 #[test]
+fn decode_real_ccitt_pdfjs_fixture() {
+    let engine = ContentEngine::open_bytes(
+        include_bytes!("../../../tests/corpus/pdfs/pdfjs/ccitt_EndOfBlock_false.pdf").to_vec(),
+    )
+    .unwrap();
+    let opts = ImageLocateOptions::default();
+    let images = ImageLocator::find_all_images(&engine, &opts).unwrap();
+    let img_ref = images
+        .iter()
+        .find(|image| {
+            image
+                .filter
+                .iter()
+                .any(|filter| matches!(filter.as_str(), "CCITTFaxDecode" | "CCF"))
+        })
+        .expect("fixture should contain a CCITT image XObject");
+
+    let raw = engine.decode_image(img_ref).unwrap();
+    assert!(raw.is_valid(), "decoded CCITT image should be valid");
+    assert_eq!(raw.width, img_ref.width);
+    assert_eq!(raw.height, img_ref.height);
+    assert_eq!(raw.channels, 1);
+    assert!(
+        raw.pixels.iter().any(|&pixel| pixel == 0) && raw.pixels.iter().any(|&pixel| pixel == 255),
+        "CCITT fixture should decode to non-blank, non-inverted bi-level pixels"
+    );
+}
+
+#[test]
+fn decode_real_jbig2_pdfjs_fixture() {
+    let engine = ContentEngine::open_bytes(
+        include_bytes!("../../../tests/corpus/pdfs/pdfjs/jbig2_symbol_offset.pdf").to_vec(),
+    )
+    .unwrap();
+    let opts = ImageLocateOptions::default();
+    let images = ImageLocator::find_all_images(&engine, &opts).unwrap();
+    let img_ref = images
+        .iter()
+        .find(|image| image.filter.iter().any(|filter| filter == "JBIG2Decode"))
+        .expect("fixture should contain a JBIG2 image XObject");
+
+    let raw = engine.decode_image(img_ref).unwrap();
+    assert!(raw.is_valid(), "decoded JBIG2 image should be valid");
+    assert_eq!(raw.width, img_ref.width);
+    assert_eq!(raw.height, img_ref.height);
+    assert_eq!(raw.channels, 1);
+    assert!(
+        raw.pixels.iter().any(|&pixel| pixel == 0) && raw.pixels.iter().any(|&pixel| pixel == 255),
+        "JBIG2 fixture should decode to non-blank bi-level pixels"
+    );
+}
+
+#[test]
+fn decode_real_jpx_jp2_pdfjs_fixture() {
+    // jp2k-resetprob.pdf embeds a JP2-wrapped (signature box) RGB image.
+    let engine = ContentEngine::open_bytes(
+        include_bytes!("../../../tests/corpus/pdfs/pdfjs/jp2k-resetprob.pdf").to_vec(),
+    )
+    .unwrap();
+    let opts = ImageLocateOptions::default();
+    let images = ImageLocator::find_all_images(&engine, &opts).unwrap();
+    let img_ref = images
+        .iter()
+        .find(|image| image.filter.iter().any(|filter| filter == "JPXDecode"))
+        .expect("fixture should contain a JPXDecode image XObject");
+
+    let raw = engine.decode_image(img_ref).unwrap();
+    assert!(raw.is_valid(), "decoded JPEG2000 image should be valid");
+    assert_eq!(raw.width, img_ref.width);
+    assert_eq!(raw.height, img_ref.height);
+    assert_eq!(raw.channels, 3, "this JP2 fixture is RGB");
+    // A correctly decoded photographic image must not be flat gray/black — the
+    // classic "decoded but garbage" failure mode produces a constant buffer.
+    let first = raw.pixels[0];
+    assert!(
+        raw.pixels.iter().any(|&pixel| pixel != first),
+        "JPEG2000 fixture should decode to a non-constant image"
+    );
+}
+
+#[test]
+fn decode_jpx_bug_fixture_is_graceful() {
+    // bug_jpx.pdf is a deliberately truncated/malformed JPEG2000 regression
+    // fixture from pdf.js (only ~200 bytes of codestream). Poppler itself fails
+    // to open it. Our requirement here is *graceful* behavior: either a clean
+    // decode of the correct dimensions or a clean OxideError — never a panic.
+    let engine = ContentEngine::open_bytes(
+        include_bytes!("../../../tests/corpus/pdfs/pdfjs/bug_jpx.pdf").to_vec(),
+    )
+    .unwrap();
+    let opts = ImageLocateOptions::default();
+    let images = ImageLocator::find_all_images(&engine, &opts).unwrap();
+    let img_ref = images
+        .iter()
+        .find(|image| image.filter.iter().any(|filter| filter == "JPXDecode"))
+        .expect("fixture should contain a JPXDecode image XObject");
+
+    match engine.decode_image(img_ref) {
+        Ok(raw) => {
+            assert!(raw.is_valid());
+            assert_eq!(raw.width, img_ref.width);
+            assert_eq!(raw.height, img_ref.height);
+        }
+        Err(OxideError::MalformedPdf(_)) | Err(OxideError::UnsupportedFeature(_)) => {}
+        Err(other) => panic!("unexpected error decoding bug_jpx fixture: {other}"),
+    }
+}
+
+#[test]
 fn extract_image_bytes_png() {
     let engine = ContentEngine::open_path("tests/fixtures/image_only.pdf").unwrap();
     let opts = ImageLocateOptions::default();
@@ -819,7 +928,7 @@ fn extract_image_bytes_jpeg() {
 }
 
 #[test]
-fn decode_image_inline_returns_error() {
+fn decode_image_inline_without_data_returns_error() {
     let engine = ContentEngine::open_path("tests/fixtures/image_only.pdf").unwrap();
     let inline_ref = oxide_engine::ImageReference {
         page_number: 1,
@@ -834,12 +943,159 @@ fn decode_image_inline_returns_error() {
         is_inline: true,
         is_mask: false,
         is_smask: false,
+        inline_data: None,
     };
     let result = engine.decode_image(&inline_ref);
     assert!(
         result.is_err(),
-        "inline images should error from decode_image"
+        "inline image with no captured data should error"
     );
+}
+
+/// Build a minimal single-page PDF whose content stream contains one
+/// uncompressed RGB inline image, computing xref offsets so the reader can
+/// parse it. `content` is the raw page content stream bytes.
+fn build_pdf_with_content(content: &[u8], media_box: &str) -> Vec<u8> {
+    let mut pdf = Vec::new();
+    let mut offsets = Vec::new();
+
+    macro_rules! push {
+        ($bytes:expr) => {
+            pdf.extend_from_slice($bytes);
+        };
+    }
+
+    push!(b"%PDF-1.7\n");
+
+    offsets.push(pdf.len());
+    push!(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    offsets.push(pdf.len());
+    push!(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    offsets.push(pdf.len());
+    push!(
+        format!(
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [{media_box}] /Contents 4 0 R \
+             /Resources << >> >>\nendobj\n"
+        )
+        .as_bytes()
+    );
+
+    offsets.push(pdf.len());
+    push!(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
+    push!(content);
+    push!(b"\nendstream\nendobj\n");
+
+    let xref_start = pdf.len();
+    push!(format!("xref\n0 {}\n", offsets.len() + 1).as_bytes());
+    push!(b"0000000000 65535 f \n");
+    for off in &offsets {
+        push!(format!("{:010} 00000 n \n", off).as_bytes());
+    }
+    push!(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+            offsets.len() + 1,
+            xref_start
+        )
+        .as_bytes()
+    );
+
+    pdf
+}
+
+#[test]
+fn locator_captures_inline_image_data() {
+    // 2x2 RGB uncompressed inline image: red, green, blue, white.
+    let mut content: Vec<u8> = Vec::new();
+    content.extend_from_slice(b"q 2 0 0 2 0 0 cm\nBI /W 2 /H 2 /CS /RGB /BPC 8 ID\n");
+    let pixels = [
+        255u8, 0, 0, // red
+        0, 255, 0, // green
+        0, 0, 255, // blue
+        255, 255, 255, // white
+    ];
+    content.extend_from_slice(&pixels);
+    content.extend_from_slice(b"\nEI\nQ\n");
+
+    let pdf = build_pdf_with_content(&content, "0 0 2 2");
+    let engine = ContentEngine::open_bytes(pdf).unwrap();
+    let images = ImageLocator::find_all_images(&engine, &ImageLocateOptions::default()).unwrap();
+
+    let inline = images
+        .iter()
+        .find(|i| i.is_inline)
+        .expect("inline image should be located");
+    assert_eq!(inline.width, 2);
+    assert_eq!(inline.height, 2);
+    assert_eq!(inline.color_space, "DeviceRGB");
+    assert!(inline.inline_data.is_some(), "pixel bytes must be captured");
+
+    let raw = engine.decode_image(inline).unwrap();
+    assert!(raw.is_valid());
+    assert_eq!(raw.channels, 3);
+    assert_eq!(raw.width, 2);
+    assert_eq!(raw.height, 2);
+    assert_eq!(&raw.pixels[..], &pixels[..], "decoded pixels must round-trip");
+}
+
+#[test]
+fn locator_captures_flate_inline_image_with_abbreviated_filter() {
+    // 1x1 gray inline image, FlateDecode-compressed, abbreviated key /F /Fl.
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write as _;
+
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(&[200u8]).unwrap();
+    let compressed = enc.finish().unwrap();
+
+    let mut content: Vec<u8> = Vec::new();
+    content.extend_from_slice(b"q 1 0 0 1 0 0 cm\nBI /W 1 /H 1 /CS /G /BPC 8 /F /Fl ID\n");
+    content.extend_from_slice(&compressed);
+    content.extend_from_slice(b"\nEI\nQ\n");
+
+    let pdf = build_pdf_with_content(&content, "0 0 1 1");
+    let engine = ContentEngine::open_bytes(pdf).unwrap();
+    let images = ImageLocator::find_all_images(&engine, &ImageLocateOptions::default()).unwrap();
+    let inline = images
+        .iter()
+        .find(|i| i.is_inline)
+        .expect("flate inline image should be located");
+    // The content parser normalizes abbreviated inline filter names to their
+    // full form, so /F /Fl is surfaced as FlateDecode. Either way, the decode
+    // path resolves it correctly.
+    assert_eq!(inline.filter, vec!["FlateDecode".to_string()]);
+
+    let raw = engine.decode_image(inline).unwrap();
+    assert_eq!(raw.channels, 1);
+    assert_eq!(raw.pixels, vec![200u8]);
+}
+
+#[test]
+fn extract_image_bytes_works_for_inline_image() {
+    let mut content: Vec<u8> = Vec::new();
+    content.extend_from_slice(b"q 2 0 0 2 0 0 cm\nBI /W 2 /H 1 /CS /RGB /BPC 8 ID\n");
+    let pixels = [10u8, 20, 30, 40, 50, 60];
+    content.extend_from_slice(&pixels);
+    content.extend_from_slice(b"\nEI\nQ\n");
+
+    let pdf = build_pdf_with_content(&content, "0 0 2 2");
+    let engine = ContentEngine::open_bytes(pdf).unwrap();
+    let images = ImageLocator::find_all_images(&engine, &ImageLocateOptions::default()).unwrap();
+    let inline = images.iter().find(|i| i.is_inline).unwrap();
+
+    let png = engine
+        .extract_image_bytes(inline, ImageOutputFormat::Png, None)
+        .unwrap();
+    assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+
+    let webp = engine
+        .extract_image_bytes(inline, ImageOutputFormat::Webp, None)
+        .unwrap();
+    assert_eq!(&webp[0..4], b"RIFF");
+    assert_eq!(&webp[8..12], b"WEBP");
 }
 
 #[test]
@@ -1826,7 +2082,7 @@ fn complete_pipeline_extract_render_compare() {
 }
 
 // ---------------------------------------------------------------------------
-// Encryption (Mega 18): Standard Security Handler, RC4-128 (V2/R3)
+// Encryption: Standard Security Handler, RC4-128 (V2/R3)
 // ---------------------------------------------------------------------------
 //
 // qpdf is not available in this environment, so instead of shipping a binary
@@ -1880,6 +2136,7 @@ fn build_rc4_128_encrypted_pdf() -> Vec<u8> {
         p: -3904,
         encrypt_metadata: true,
         cf_method: CryptMethod::V2,
+        v5: None,
     };
     let file_key = compute_encryption_key(b"", &info, &file_id);
     let user_u = compute_u_r3(&file_key, &file_id);
@@ -1989,7 +2246,7 @@ fn decrypt_string_rc4_round_trip_via_object_key() {
     let original = b"Hello PDF World";
     let key = object_key(&file_key, 7, 0, false);
     let encrypted = Rc4::apply(&key, original);
-    let decrypted = oxide_engine::decrypt_string(&encrypted, &file_key, 7, 0, false);
+    let decrypted = oxide_engine::decrypt_string(&encrypted, &file_key, 7, 0, false, false);
     assert_eq!(decrypted, original.to_vec());
 }
 
@@ -2090,7 +2347,7 @@ fn build_pdf_with_trailer(objects: Vec<(u32, String)>, trailer: &str) -> Vec<u8>
 // stream code paths are covered with synthetic unit tests in reader.rs.
 
 // ---------------------------------------------------------------------------
-// Form XObject rendering (Mega 19)
+// Form XObject rendering
 // ---------------------------------------------------------------------------
 
 /// Build a minimal, valid PDF containing a Form XObject. The Form fills a
@@ -2384,7 +2641,7 @@ fn multiply_blend_mode_via_ext_graphics_state() {
 }
 
 // ---------------------------------------------------------------------------
-// Shading and patterns (Mega 20)
+// Shading and patterns
 // ---------------------------------------------------------------------------
 
 /// Build a 100×100 single-page PDF whose content stream is `content`, with one
@@ -2572,7 +2829,7 @@ fn shading_pattern_fill_paints_gradient_in_rectangle() {
 }
 
 // ---------------------------------------------------------------------------
-// Mega 24: structural PDF edge cases and final corpus sweep
+// Structural PDF edge cases and final corpus sweep
 // ---------------------------------------------------------------------------
 
 fn build_two_stream_content_pdf() -> Vec<u8> {
@@ -2888,4 +3145,231 @@ fn render_golden_for_all_fixtures() {
             assert!(psnr > 35.0);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AES-256 (V5/R5/R6) encryption integration tests
+//
+// These build minimal but fully spec-compliant AES-256-encrypted PDFs
+// programmatically using the same crypto primitives exposed by the engine,
+// then open them through the full PdfReader path to verify end-to-end
+// decryption. No external tools (qpdf, pikepdf) are required.
+// ---------------------------------------------------------------------------
+
+use oxide_engine::r6_hash;
+
+/// Build a self-consistent V5/R6 encrypted PDF whose user password is `password`
+/// and whose single page content stream decrypts to `plaintext`.
+fn build_aes256_encrypted_pdf(password: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    use aes::cipher::{block_padding::NoPadding, block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+    let file_id = b"AES256TestFileId";
+
+    let u_v_salt: [u8; 8] = [0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8];
+    let u_k_salt: [u8; 8] = [0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7, 0xB8];
+    let o_v_salt: [u8; 8] = [0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8];
+    let o_k_salt: [u8; 8] = [0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8];
+
+    let file_key: [u8; 32] = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+        0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+    ];
+
+    let zero_iv = [0u8; 16];
+
+    // /U = R6_hash(pwd, u_v_salt) || u_v_salt || u_k_salt
+    let u_hash = r6_hash(password, &u_v_salt, None);
+    let mut u_entry = Vec::with_capacity(48);
+    u_entry.extend_from_slice(&u_hash);
+    u_entry.extend_from_slice(&u_v_salt);
+    u_entry.extend_from_slice(&u_k_salt);
+
+    // /UE = AES-256-CBC(key=R6_hash(pwd, u_k_salt), iv=zero, data=file_key), no padding
+    let ue_key = r6_hash(password, &u_k_salt, None);
+    let ue_entry = {
+        let mut buf = file_key.to_vec();
+        buf.resize(32, 0);
+        Aes256CbcEnc::new_from_slices(&ue_key, &zero_iv)
+            .unwrap()
+            .encrypt_padded_mut::<NoPadding>(&mut buf, 32)
+            .unwrap()
+            .to_vec()
+    };
+
+    let u48 = &u_entry[..48];
+
+    // /O = R6_hash(pwd, o_v_salt, U48) || o_v_salt || o_k_salt
+    let o_hash = r6_hash(password, &o_v_salt, Some(u48));
+    let mut o_entry = Vec::with_capacity(48);
+    o_entry.extend_from_slice(&o_hash);
+    o_entry.extend_from_slice(&o_v_salt);
+    o_entry.extend_from_slice(&o_k_salt);
+
+    // /OE = AES-256-CBC(key=R6_hash(pwd, o_k_salt, U48), iv=zero, data=file_key), no padding
+    let oe_key = r6_hash(password, &o_k_salt, Some(u48));
+    let oe_entry = {
+        let mut buf = file_key.to_vec();
+        buf.resize(32, 0);
+        Aes256CbcEnc::new_from_slices(&oe_key, &zero_iv)
+            .unwrap()
+            .encrypt_padded_mut::<NoPadding>(&mut buf, 32)
+            .unwrap()
+            .to_vec()
+    };
+
+    // /Perms = AES-256-ECB(key=file_key, plaintext)
+    let p: i32 = -3904;
+    let mut perms_plain = [0u8; 16];
+    perms_plain[..4].copy_from_slice(&(p as u32).to_le_bytes());
+    perms_plain[4..8].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+    perms_plain[8] = b'T';
+    perms_plain[9] = b'a';
+    perms_plain[10] = b'd';
+    perms_plain[11] = b'b';
+    let perms_entry = {
+        let cipher = aes::Aes256::new_from_slice(&file_key).unwrap();
+        let mut block = aes::Block::clone_from_slice(&perms_plain);
+        cipher.encrypt_block(&mut block);
+        block.to_vec()
+    };
+
+    // Encrypt page content stream: IV prepended to PKCS7-padded AES-256-CBC ciphertext.
+    let content_iv: [u8; 16] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+    ];
+    let encrypted_content = {
+        let padded_len = (plaintext.len() / 16 + 1) * 16;
+        let mut buf = plaintext.to_vec();
+        buf.resize(padded_len + 16, 0);
+        let ct_len = Aes256CbcEnc::new_from_slices(&file_key, &content_iv)
+            .unwrap()
+            .encrypt_padded_mut::<Pkcs7>(&mut buf, plaintext.len())
+            .unwrap()
+            .len();
+        let mut out = content_iv.to_vec();
+        out.extend_from_slice(&buf[..ct_len]);
+        out
+    };
+
+    // Assemble PDF bytes.
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut offsets = [0usize; 5];
+
+    bytes.extend_from_slice(b"%PDF-2.0\n");
+
+    offsets[1] = bytes.len();
+    bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+    offsets[2] = bytes.len();
+    bytes.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+    offsets[3] = bytes.len();
+    bytes.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n",
+    );
+
+    offsets[4] = bytes.len();
+    bytes.extend_from_slice(
+        format!("4 0 obj\n<< /Length {} >>\nstream\n", encrypted_content.len()).as_bytes(),
+    );
+    bytes.extend_from_slice(&encrypted_content);
+    bytes.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let xref_offset = bytes.len();
+    bytes.extend_from_slice(b"xref\n0 5\n");
+    bytes.extend_from_slice(b"0000000000 65535 f \n");
+    for i in 1..=4usize {
+        bytes.extend_from_slice(format!("{:010} 00000 n \n", offsets[i]).as_bytes());
+    }
+
+    let encrypt_dict = format!(
+        "<< /Filter /Standard /V 5 /R 6 /Length 256 /P {} \
+         /O <{}> /U <{}> /OE <{}> /UE <{}> /Perms <{}> /EncryptMetadata true >>",
+        p,
+        hex_encode(&o_entry),
+        hex_encode(&u_entry),
+        hex_encode(&oe_entry),
+        hex_encode(&ue_entry),
+        hex_encode(&perms_entry),
+    );
+    let trailer = format!(
+        "<< /Size 5 /Root 1 0 R /Encrypt {} /ID [<{}> <{}>] >>",
+        encrypt_dict,
+        hex_encode(file_id),
+        hex_encode(file_id),
+    );
+    bytes.extend_from_slice(
+        format!("trailer\n{trailer}\nstartxref\n{xref_offset}\n%%EOF\n").as_bytes(),
+    );
+    bytes
+}
+
+#[test]
+fn aes256_r6_encrypted_pdf_opens_with_empty_password() {
+    let plaintext = b"BT\n/F1 12 Tf\n72 720 Td\n(AES256) Tj\nET\n";
+    let pdf = build_aes256_encrypted_pdf(b"", plaintext);
+    let engine = ContentEngine::open_bytes(pdf)
+        .expect("AES-256 PDF should open with empty password");
+    assert!(engine.is_encrypted(), "document should report as encrypted");
+    let content = engine.document().get_page_content_bytes(1).unwrap();
+    assert!(
+        content.windows(6).any(|w| w == b"AES256"),
+        "decrypted content should contain 'AES256', got: {:?}",
+        String::from_utf8_lossy(&content)
+    );
+    assert!(content.windows(2).any(|w| w == b"BT"));
+}
+
+#[test]
+fn aes256_r6_encrypted_pdf_opens_with_explicit_empty_password() {
+    let plaintext = b"BT\n/F1 12 Tf\n72 720 Td\n(AES256) Tj\nET\n";
+    let pdf = build_aes256_encrypted_pdf(b"", plaintext);
+    let engine = ContentEngine::open_bytes_with_password(pdf, b"")
+        .expect("AES-256 PDF should open with explicit empty password");
+    assert!(engine.is_encrypted());
+    let content = engine.document().get_page_content_bytes(1).unwrap();
+    assert!(content.windows(6).any(|w| w == b"AES256"));
+}
+
+#[test]
+fn aes256_r6_encrypted_pdf_opens_with_user_password() {
+    let password = b"s3cr3tPDF";
+    let plaintext = b"BT\n/F1 12 Tf\n72 720 Td\n(Hello) Tj\nET\n";
+    let pdf = build_aes256_encrypted_pdf(password, plaintext);
+    let engine = ContentEngine::open_bytes_with_password(pdf, password)
+        .expect("AES-256 PDF should open with correct user password");
+    assert!(engine.is_encrypted());
+    let content = engine.document().get_page_content_bytes(1).unwrap();
+    assert!(
+        content.windows(5).any(|w| w == b"Hello"),
+        "decrypted content should contain 'Hello', got: {:?}",
+        String::from_utf8_lossy(&content)
+    );
+}
+
+#[test]
+fn aes256_r6_wrong_password_returns_encrypted_pdf_error() {
+    let plaintext = b"BT\n/F1 12 Tf\n72 720 Td\n(Secret) Tj\nET\n";
+    let pdf = build_aes256_encrypted_pdf(b"correctpass", plaintext);
+    let result = ContentEngine::open_bytes_with_password(pdf, b"wrongpass");
+    assert!(
+        matches!(result, Err(OxideError::EncryptedPdf(_))),
+        "wrong password should return EncryptedPdf, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn aes256_r6_key_derivation_round_trip() {
+    // Confirm setup_encryption verified password + /Perms end-to-end.
+    let password = b"roundtrip";
+    let pdf = build_aes256_encrypted_pdf(password, b"BT ET\n");
+    let engine = ContentEngine::open_bytes_with_password(pdf, password)
+        .expect("round-trip key derivation should succeed");
+    assert!(engine.is_encrypted());
 }

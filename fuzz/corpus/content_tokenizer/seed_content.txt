@@ -1,0 +1,6 @@
+BT /F1 12 Tf 100 700 Td (Hello World) Tj ET
+0.5 0.0 1.0 rg
+[3 5] 6 d
+[(Kerned) 50 (text)] TJ
+BI /W 2 /H 2 /CS /G /BPC 8 ID    EI
+q 1 0 0 1 100 200 cm Q
