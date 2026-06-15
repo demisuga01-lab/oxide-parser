@@ -22,11 +22,27 @@ pub struct PageResources {
     pub shadings: HashMap<String, PdfObject>,
 }
 
+/// Fetch a resource sub-dictionary (e.g. `/Font`, `/ColorSpace`, `/Pattern`),
+/// resolving an indirect reference when the entry is one. Real-world PDFs
+/// (notably pdf.js-generated files) often store these sub-dictionaries as
+/// indirect objects, e.g. `/ColorSpace 12 0 R`, so a direct `get_dict` lookup
+/// would miss them and leave the corresponding resources empty.
+fn resolve_subdict(resources: &PdfDictionary, key: &str, reader: &PdfReader) -> Option<PdfDictionary> {
+    match resources.get(key) {
+        Some(PdfObject::Dictionary(d)) => Some(d.clone()),
+        Some(obj @ PdfObject::Reference { .. }) => match reader.resolve(obj.clone()) {
+            Ok(PdfObject::Dictionary(d)) => Some(d),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 impl PageResources {
     pub fn from_dict(resources: &PdfDictionary, reader: &PdfReader) -> Self {
         let mut page_resources = PageResources::default();
 
-        if let Some(font_dict) = resources.get_dict("Font") {
+        if let Some(font_dict) = resolve_subdict(resources, "Font", reader) {
             for (name, value) in font_dict.entries() {
                 match reader.resolve(value.clone()) {
                     Ok(PdfObject::Dictionary(dict)) => {
@@ -46,7 +62,7 @@ impl PageResources {
             }
         }
 
-        if let Some(xobject_dict) = resources.get_dict("XObject") {
+        if let Some(xobject_dict) = resolve_subdict(resources, "XObject", reader) {
             for (name, value) in xobject_dict.entries() {
                 if let Some(reference) = value.as_reference() {
                     page_resources.xobjects.insert(name.clone(), reference);
@@ -59,7 +75,7 @@ impl PageResources {
             }
         }
 
-        if let Some(color_space_dict) = resources.get_dict("ColorSpace") {
+        if let Some(color_space_dict) = resolve_subdict(resources, "ColorSpace", reader) {
             for (name, value) in color_space_dict.entries() {
                 let resolved = match reader.resolve(value.clone()) {
                     Ok(object) => object,
@@ -76,7 +92,7 @@ impl PageResources {
             }
         }
 
-        if let Some(ext_g_state_dict) = resources.get_dict("ExtGState") {
+        if let Some(ext_g_state_dict) = resolve_subdict(resources, "ExtGState", reader) {
             for (name, value) in ext_g_state_dict.entries() {
                 match reader.resolve(value.clone()) {
                     Ok(PdfObject::Dictionary(dict)) => {
@@ -96,13 +112,13 @@ impl PageResources {
             }
         }
 
-        if let Some(pattern_dict) = resources.get_dict("Pattern") {
+        if let Some(pattern_dict) = resolve_subdict(resources, "Pattern", reader) {
             for (name, value) in pattern_dict.entries() {
                 page_resources.patterns.insert(name.clone(), value.clone());
             }
         }
 
-        if let Some(shading_dict) = resources.get_dict("Shading") {
+        if let Some(shading_dict) = resolve_subdict(resources, "Shading", reader) {
             for (name, value) in shading_dict.entries() {
                 page_resources.shadings.insert(name.clone(), value.clone());
             }
@@ -260,9 +276,35 @@ impl ContentEngine {
     }
 
     /// Decode a single image from its ImageReference.
+    ///
+    /// Inline images (BI/ID/EI) are decoded from the pixel bytes captured on the
+    /// reference; XObject images are decoded from their PDF object.
     pub fn decode_image(&self, image: &ImageReference) -> Result<RawImage> {
-        // TODO(perf): parallel decode for multi-image pages (added in HTTP endpoint step).
+        // TODO: parallel-decode multi-image pages (decode is currently serial per call).
+        if image.is_inline {
+            return self.decode_inline_image(image);
+        }
         ImageDecoder::decode(image, self.document().reader())
+    }
+
+    /// Decode an inline image from the raw data captured during location.
+    pub fn decode_inline_image(&self, image: &ImageReference) -> Result<RawImage> {
+        let data = image.inline_data.as_ref().ok_or_else(|| {
+            OxideError::UnsupportedFeature(format!(
+                "inline image '{}' has no captured pixel data",
+                image.xobject_name
+            ))
+        })?;
+        let filters: Vec<&str> = data.filters.iter().map(String::as_str).collect();
+        ImageDecoder::decode_inline(
+            &data.bytes,
+            image.width,
+            image.height,
+            data.bits_per_component,
+            &image.color_space,
+            &filters,
+            None,
+        )
     }
 
     /// Encode a decoded RawImage to the specified format.
@@ -317,11 +359,110 @@ impl ContentEngine {
         PageRenderer::render_page(self, page_number, dpi)
     }
 
+    /// Render a page with a cancellation token threaded into the hot loops.
+    ///
+    /// The token is polled periodically while executing the page content
+    /// stream (and any nested Form XObjects / tiling patterns). When the token
+    /// is cancelled — e.g. by a server request-timeout timer — rendering bails
+    /// out early with [`OxideError::Cancelled`] instead of running to
+    /// completion, freeing the worker thread promptly.
+    pub fn render_page_cancellable(
+        &self,
+        page_number: usize,
+        dpi: u32,
+        cancel: &crate::cancel::CancelToken,
+    ) -> Result<PixelBuffer> {
+        PageRenderer::render_page_cancellable(self, page_number, dpi, cancel)
+    }
+
+    /// Verify every digital signature field in the document (the `verify-sig`
+    /// tool — `pdfsig`-equivalent). See [`crate::signature`] for the precise
+    /// scope (cryptographic validity + coverage + cert details; no trust-chain
+    /// or revocation checking).
+    pub fn verify_signatures(&self) -> Result<Vec<crate::signature::SignatureReport>> {
+        crate::signature::verify_signatures(&self.doc)
+    }
+
+    /// Export the given 1-based pages to a single self-contained HTML or XML
+    /// document (the `to-html` tool — `pdftohtml`-equivalent). See
+    /// [`crate::html`] for the modes (complex / simple / xml).
+    pub fn export_html(
+        &self,
+        pages: &[usize],
+        options: &crate::html::HtmlOptions,
+    ) -> Result<String> {
+        for &p in pages {
+            self.validate_page(p)?;
+        }
+        crate::html::HtmlExporter::export(self, pages, options)
+    }
+
+    /// Render a page to an SVG document (`pdftocairo -svg`-equivalent).
+    ///
+    /// Pages using only path/text/solid-fill/clip operations become true
+    /// scalable vector SVG (text emitted as glyph outlines); pages using
+    /// images, shadings, patterns, Form XObjects, or soft masks fall back to a
+    /// single embedded rasterized page image (see [`crate::render::svg`]). The
+    /// returned [`crate::render::SvgPage`] reports which path was taken.
+    pub fn render_page_svg(
+        &self,
+        page_number: usize,
+        dpi: u32,
+    ) -> Result<crate::render::SvgPage> {
+        crate::render::render_page_svg(self, page_number, dpi)
+    }
+
     /// Render a page and encode it as PNG using fast compression.
     pub fn render_page_png_fast(&self, page_number: usize, dpi: u32) -> Result<Vec<u8>> {
         // NOTE: line width 0 renders as 1px (PDF hairline spec). Verified in tests.
         let buf = self.render_page(page_number, dpi)?;
         ImageEncoder::encode_png_fast(&buf.to_raw_image())
+    }
+
+    /// Build a new PDF containing exactly the given 1-based pages, in the
+    /// order given (duplicates and arbitrary ordering are honoured). Underlies
+    /// the `extract-pages` tool. Output is unencrypted (see [`crate::writer`]).
+    pub fn extract_pages(&self, page_indices: &[usize]) -> Result<Vec<u8>> {
+        for &p in page_indices {
+            self.validate_page(p)?;
+        }
+        crate::writer::build_subset(&self.doc, page_indices)
+    }
+
+    /// Build a single-page PDF for the given 1-based page. Underlies the
+    /// `split` tool, which calls this once per page.
+    pub fn extract_single_page(&self, page_number: usize) -> Result<Vec<u8>> {
+        self.validate_page(page_number)?;
+        crate::writer::build_subset(&self.doc, &[page_number])
+    }
+
+    /// Gather document metadata and structural facts (the `info` tool —
+    /// `pdfinfo`-equivalent). Works on encrypted documents (they are decrypted
+    /// on open).
+    pub fn document_info(&self) -> Result<crate::info::DocumentInfo> {
+        crate::info::DocumentInfo::gather(&self.doc)
+    }
+
+    /// Enumerate every distinct font used in the document (the `fonts` tool —
+    /// `pdffonts`-equivalent), walking all resource scopes and deduping by
+    /// object id.
+    pub fn list_fonts(&self) -> Result<Vec<crate::fonts_report::FontInfo>> {
+        crate::fonts_report::list_fonts(&self.doc)
+    }
+
+    /// Enumerate every embedded file attachment (the `detach` tool —
+    /// `pdfdetach`-equivalent), from both the name tree and file-attachment
+    /// annotations, deduped by embedded-file stream object id.
+    pub fn list_attachments(&self) -> Result<Vec<crate::attachments::Attachment>> {
+        crate::attachments::list_attachments(&self.doc)
+    }
+
+    /// Extract the (filter-decoded) bytes of an embedded file attachment.
+    pub fn extract_attachment(
+        &self,
+        attachment: &crate::attachments::Attachment,
+    ) -> Result<Vec<u8>> {
+        crate::attachments::extract_attachment(&self.doc, attachment)
     }
 
     fn validate_page(&self, page_number: usize) -> Result<()> {

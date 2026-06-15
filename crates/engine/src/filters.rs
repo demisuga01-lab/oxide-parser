@@ -6,6 +6,17 @@ use crate::error::{OxideError, Result};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
 
+/// Absolute backstop on how large a single FlateDecode stream may expand to.
+///
+/// This guards against decompression bombs: a tiny compressed stream that
+/// inflates to gigabytes and OOMs the process. 512 MiB comfortably exceeds any
+/// legitimate single PDF stream (the largest real streams are uncompressed
+/// images, themselves bounded by page/image limits) while stopping absurd
+/// expansion ratios. The server layers tighter, configurable per-request caps
+/// on top of this; this is the engine's own hard floor so any caller — CLI,
+/// tests, embedders — is protected even without the server.
+pub const MAX_FLATE_DECOMPRESSED_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StreamDecodeStatus {
     Complete,
@@ -80,6 +91,49 @@ pub(crate) fn apply_filter_bytes(
             "unsupported inline image filter {other}"
         ))),
     }
+}
+
+/// Fuzz-only entry point: drive a single stream decoder by a leading selector
+/// byte, with the remaining input fed to that decoder as raw filter bytes.
+///
+/// Exposed only under the `fuzzing` feature so libFuzzer (which can reach
+/// `pub` items only) can exercise the otherwise-private decoders directly,
+/// without constructing a `PdfReader`. Not part of the normal public API.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_decode_filter(input: &[u8]) -> Result<Vec<u8>> {
+    let Some((selector, rest)) = input.split_first() else {
+        return Ok(Vec::new());
+    };
+    let filter = match selector % 6 {
+        0 => "FlateDecode",
+        1 => "LZWDecode",
+        2 => "ASCIIHexDecode",
+        3 => "ASCII85Decode",
+        4 => "RunLengthDecode",
+        // Exercise the predictor path on top of Flate with a small fixed
+        // DecodeParms so the predictor code is reachable from the fuzzer.
+        _ => "FlateDecode",
+    };
+    apply_filter_bytes(filter, rest, None)
+}
+
+/// Fuzz-only entry point for the PNG/TIFF predictor stage in isolation: the
+/// first three bytes select Predictor, Colors, and Columns, the rest is the
+/// data buffer.
+#[cfg(feature = "fuzzing")]
+pub fn fuzz_apply_predictor(input: &[u8]) -> Result<Vec<u8>> {
+    let predictor = i64::from(input.first().copied().unwrap_or(0));
+    let colors = i64::from(input.get(1).copied().unwrap_or(1)).max(1);
+    let columns = i64::from(input.get(2).copied().unwrap_or(1)).max(1);
+    let body = input.get(3..).unwrap_or(&[]).to_vec();
+
+    let mut params = PdfDictionary::empty();
+    params.insert("Predictor", PdfObject::Integer(predictor));
+    params.insert("Colors", PdfObject::Integer(colors));
+    params.insert("Columns", PdfObject::Integer(columns));
+    params.insert("BitsPerComponent", PdfObject::Integer(8));
+
+    apply_predictor(body, Some(&params))
 }
 
 fn decode_stream_parts(
@@ -213,21 +267,42 @@ fn decode_params(
 }
 
 fn flate_decode(data: &[u8]) -> Result<Vec<u8>> {
+    flate_decode_capped(data, MAX_FLATE_DECOMPRESSED_BYTES)
+}
+
+/// FlateDecode with an explicit decompressed-size cap (parameterized so tests
+/// can exercise the bomb guard without allocating the full production cap).
+fn flate_decode_capped(data: &[u8], cap: u64) -> Result<Vec<u8>> {
+    // Cap reads at one byte over the limit so we can distinguish "exactly at the
+    // limit" (fine) from "exceeded it" (bomb). `take` makes the decoder stop
+    // reading past the cap instead of inflating unbounded into memory.
+    let read_cap = cap + 1;
     let mut out = Vec::new();
-    let mut zlib = ZlibDecoder::new(data);
+    let mut zlib = ZlibDecoder::new(data).take(read_cap);
     match zlib.read_to_end(&mut out) {
-        Ok(_) => Ok(out),
+        Ok(_) => check_decompressed_size(out, cap),
         Err(zlib_error) => {
             let mut raw_out = Vec::new();
-            let mut deflate = DeflateDecoder::new(data);
+            let mut deflate = DeflateDecoder::new(data).take(read_cap);
             match deflate.read_to_end(&mut raw_out) {
-                Ok(_) => Ok(raw_out),
+                Ok(_) => check_decompressed_size(raw_out, cap),
                 Err(_) => Err(OxideError::ParseError(format!(
                     "FlateDecode failed: {zlib_error}"
                 ))),
             }
         }
     }
+}
+
+/// Reject output that hit the decompression-bomb backstop.
+fn check_decompressed_size(out: Vec<u8>, cap: u64) -> Result<Vec<u8>> {
+    if out.len() as u64 > cap {
+        return Err(OxideError::MalformedPdf(format!(
+            "FlateDecode output exceeds {} byte limit (possible decompression bomb)",
+            cap
+        )));
+    }
+    Ok(out)
 }
 
 pub(crate) fn apply_predictor(data: Vec<u8>, params: Option<&PdfDictionary>) -> Result<Vec<u8>> {
@@ -239,7 +314,21 @@ pub(crate) fn apply_predictor(data: Vec<u8>, params: Option<&PdfDictionary>) -> 
     let columns = positive_usize_param(params, "Columns", 1)?;
     let colors = positive_usize_param(params, "Colors", 1)?;
     let bits_per_component = positive_usize_param(params, "BitsPerComponent", 8)?;
-    let row_len = ceil_div(columns * colors * bits_per_component, 8);
+    // Columns/Colors/BitsPerComponent are attacker-controlled. Computing the
+    // row length by plain multiplication can overflow `usize` on crafted input
+    // (e.g. a huge /Columns), which panics under overflow checks and silently
+    // wraps to a bogus length otherwise. Use checked arithmetic and reject
+    // overflow as malformed rather than crashing or misparsing.
+    let row_bits = columns
+        .checked_mul(colors)
+        .and_then(|v| v.checked_mul(bits_per_component))
+        .ok_or_else(|| {
+            OxideError::MalformedPdf(
+                "predictor row dimensions overflow (Columns × Colors × BitsPerComponent)"
+                    .to_string(),
+            )
+        })?;
+    let row_len = ceil_div(row_bits, 8);
     if row_len == 0 {
         return Ok(data);
     }
@@ -747,6 +836,46 @@ mod tests {
     }
 
     #[test]
+    fn flate_decode_accepts_normal_stream() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(b"hello flate").unwrap();
+        let compressed = enc.finish().unwrap();
+        assert_eq!(flate_decode(&compressed).unwrap(), b"hello flate");
+    }
+
+    #[test]
+    fn flate_decode_rejects_decompression_bomb() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+        // A 4 MiB run of zeros compresses to a tiny input but inflates well past
+        // a small test cap, simulating the bomb without allocating the 512 MiB
+        // production limit.
+        let raw = vec![0u8; 4 * 1024 * 1024];
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(&raw).unwrap();
+        let compressed = enc.finish().unwrap();
+        assert!(
+            compressed.len() < 64 * 1024,
+            "bomb input should be tiny, was {}",
+            compressed.len()
+        );
+        // Cap of 1 MiB < 4 MiB decompressed => rejected.
+        let err = flate_decode_capped(&compressed, 1024 * 1024).unwrap_err();
+        assert!(
+            matches!(err, OxideError::MalformedPdf(ref m) if m.contains("decompression bomb")),
+            "expected decompression-bomb rejection, got {:?}",
+            err
+        );
+        // The same data under a generous cap decodes fine.
+        let ok = flate_decode_capped(&compressed, 8 * 1024 * 1024).unwrap();
+        assert_eq!(ok.len(), raw.len());
+    }
+
+    #[test]
     fn png_predictor_up_decodes_rows() {
         let params = dict(&[
             ("Predictor", PdfObject::Integer(12)),
@@ -756,6 +885,27 @@ mod tests {
         assert_eq!(
             apply_predictor(encoded, Some(&params)).unwrap(),
             vec![1, 2, 3, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn predictor_row_dimensions_overflow_returns_err_not_panic() {
+        // Attacker-controlled Columns/Colors/BitsPerComponent whose product
+        // overflows usize must yield a clean MalformedPdf error rather than
+        // panicking under overflow checks (or wrapping to a bogus row length).
+        // Regression for the unchecked `columns * colors * bits_per_component`
+        // multiplication (fuzz finding: predictor size-field overflow).
+        let huge = i64::MAX;
+        let params = dict(&[
+            ("Predictor", PdfObject::Integer(12)),
+            ("Columns", PdfObject::Integer(huge)),
+            ("Colors", PdfObject::Integer(huge)),
+            ("BitsPerComponent", PdfObject::Integer(16)),
+        ]);
+        let err = apply_predictor(vec![0u8; 32], Some(&params)).unwrap_err();
+        assert!(
+            matches!(err, OxideError::MalformedPdf(_)),
+            "expected MalformedPdf on dimension overflow, got {err:?}"
         );
     }
 

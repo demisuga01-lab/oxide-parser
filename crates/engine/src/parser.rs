@@ -7,6 +7,16 @@ pub trait ParserResolver {
     fn resolve_for_parser(&self, object: &PdfObject) -> Result<PdfObject>;
 }
 
+/// Maximum nesting depth for syntactic structures (arrays/dictionaries within
+/// arrays/dictionaries). A malformed or malicious PDF can otherwise drive the
+/// recursive descent parser arbitrarily deep — e.g. thousands of unmatched
+/// `[` or `<<` bytes — and overflow the call stack, aborting the whole
+/// process. Real PDFs nest only a handful of levels; 64 is generous while
+/// keeping recursion well within a single thread's stack. Matches the
+/// depth-64 limits already used for reference resolution and PostScript
+/// functions elsewhere in the engine.
+const MAX_PARSE_DEPTH: usize = 64;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndirectObject {
     pub number: u32,
@@ -18,6 +28,8 @@ pub struct PdfParser<'a> {
     data: &'a [u8],
     pos: usize,
     resolver: Option<&'a dyn ParserResolver>,
+    /// Current syntactic nesting depth, bounded by [`MAX_PARSE_DEPTH`].
+    depth: usize,
 }
 
 impl<'a> PdfParser<'a> {
@@ -40,6 +52,7 @@ impl<'a> PdfParser<'a> {
             data,
             pos: offset,
             resolver,
+            depth: 0,
         })
     }
 
@@ -67,6 +80,24 @@ impl<'a> PdfParser<'a> {
                 "unexpected byte 0x{other:02X} while parsing object"
             ))),
         }
+    }
+
+    /// Enter a nested structure, enforcing the recursion bound. Returns the
+    /// new depth on success so the caller can restore it on exit; returns an
+    /// error (instead of recursing and overflowing the stack) once the limit
+    /// is exceeded.
+    fn enter_nesting(&mut self) -> Result<()> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(OxideError::ParseError(format!(
+                "object nesting exceeded depth limit {MAX_PARSE_DEPTH}"
+            )));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn leave_nesting(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     pub fn parse_indirect_object(&mut self) -> Result<IndirectObject> {
@@ -115,6 +146,7 @@ impl<'a> PdfParser<'a> {
 
     fn parse_dictionary(&mut self) -> Result<PdfDictionary> {
         self.expect_bytes(b"<<")?;
+        self.enter_nesting()?;
         let mut entries = BTreeMap::new();
         loop {
             self.skip_ws_and_comments();
@@ -123,24 +155,40 @@ impl<'a> PdfParser<'a> {
                 break;
             }
             if self.peek_byte().is_none() {
+                self.leave_nesting();
                 return Err(OxideError::ParseError(
                     "unterminated dictionary".to_string(),
                 ));
             }
             if self.peek_byte() != Some(b'/') {
+                self.leave_nesting();
                 return Err(OxideError::ParseError(
                     "dictionary key must be a name".to_string(),
                 ));
             }
-            let key = self.parse_name()?;
-            let value = self.parse_object()?;
+            let key = match self.parse_name() {
+                Ok(key) => key,
+                Err(err) => {
+                    self.leave_nesting();
+                    return Err(err);
+                }
+            };
+            let value = match self.parse_object() {
+                Ok(value) => value,
+                Err(err) => {
+                    self.leave_nesting();
+                    return Err(err);
+                }
+            };
             entries.insert(key, value);
         }
+        self.leave_nesting();
         Ok(PdfDictionary::new(entries))
     }
 
     fn parse_array(&mut self) -> Result<PdfObject> {
         self.expect_byte(b'[')?;
+        self.enter_nesting()?;
         let mut items = Vec::new();
         loop {
             self.skip_ws_and_comments();
@@ -149,10 +197,20 @@ impl<'a> PdfParser<'a> {
                     self.pos += 1;
                     break;
                 }
-                Some(_) => items.push(self.parse_object()?),
-                None => return Err(OxideError::ParseError("unterminated array".to_string())),
+                Some(_) => match self.parse_object() {
+                    Ok(item) => items.push(item),
+                    Err(err) => {
+                        self.leave_nesting();
+                        return Err(err);
+                    }
+                },
+                None => {
+                    self.leave_nesting();
+                    return Err(OxideError::ParseError("unterminated array".to_string()));
+                }
             }
         }
+        self.leave_nesting();
         Ok(PdfObject::Array(items))
     }
 
@@ -629,5 +687,51 @@ mod tests {
                 generation: 0
             }
         );
+    }
+
+    #[test]
+    fn deeply_nested_arrays_error_instead_of_overflowing_stack() {
+        // 100_000 unmatched '[' would recurse 100_000 frames deep without the
+        // depth guard and abort the process with a stack overflow. With the
+        // guard it must return a clean ParseError.
+        let input = vec![b'['; 100_000];
+        let mut parser = PdfParser::new(&input, 0).unwrap();
+        let err = parser.parse_object().unwrap_err();
+        assert!(
+            matches!(err, OxideError::ParseError(ref msg) if msg.contains("depth limit")),
+            "expected depth-limit ParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_dictionaries_error_instead_of_overflowing_stack() {
+        let mut input = Vec::new();
+        for _ in 0..100_000 {
+            input.extend_from_slice(b"<</K ");
+        }
+        let mut parser = PdfParser::new(&input, 0).unwrap();
+        let err = parser.parse_object().unwrap_err();
+        assert!(
+            matches!(err, OxideError::ParseError(ref msg) if msg.contains("depth limit")),
+            "expected depth-limit ParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nesting_within_limit_still_parses_and_depth_resets() {
+        // A modest, well-formed nesting (10 levels) must parse fine, and the
+        // parser's depth counter must return to 0 so sibling structures are
+        // not penalised by earlier nesting.
+        let mut input = vec![b'['; 10];
+        input.push(b'1');
+        input.extend(std::iter::repeat_n(b']', 10));
+        // A second, equally-nested sibling right after the first.
+        let first_len = input.len();
+        input.extend_from_within(0..first_len);
+
+        let mut parser = PdfParser::new(&input, 0).unwrap();
+        let first = parser.parse_object().expect("first nested array parses");
+        let second = parser.parse_object().expect("second nested array parses");
+        assert_eq!(first, second, "depth must reset between sibling structures");
     }
 }

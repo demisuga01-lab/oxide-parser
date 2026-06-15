@@ -14,6 +14,8 @@ pub enum OxideError {
     EncryptedDocument,
     #[error("encrypted PDF: {0}")]
     EncryptedPdf(String),
+    #[error("operation cancelled: {0}")]
+    Cancelled(String),
 }
 
 pub type OxideResult<T> = std::result::Result<T, OxideError>;
