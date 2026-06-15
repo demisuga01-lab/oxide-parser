@@ -1,3 +1,16 @@
 target/
 .env
 crates/engine/tests/references/*.png
+
+# Local-only Claude Code proxy launcher — routes auth through a third-party
+# server and prompts for an API key at runtime. Keep local; never commit
+# (so an edited copy can never leak a key).
+CLAUDE-CODE-CLI.bat
+
+# Python bytecode cache from the benchmark/harness scripts
+__pycache__/
+*.pyc
+
+# Local development scratch notes (not product); see docs/development.md
+ROUND6-SCRATCH.md
+_ox.txt

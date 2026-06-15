@@ -2,24 +2,44 @@
 name = "oxide-engine"
 version = "0.1.0"
 edition = "2021"
-include = ["src/**/*", "fonts/*.ttf"]
+license = "MIT OR Apache-2.0"
+include = ["src/**/*", "fonts/*.ttf", "fonts/LICENSE-*.txt", "fonts/README.md"]
 
 [dependencies]
 aes = "0.8"
 cbc = "0.1"
+sha2 = { version = "0.10", features = ["oid"] }
 flate2 = "1"
+hayro-ccitt = "0.3"
+hayro-jbig2 = { version = "0.3", default-features = false, features = ["std"] }
+hayro-jpeg2000 = { version = "0.3", default-features = false, features = ["std"] }
+image-webp = "0.2"
 jpeg-decoder = "0.3"
 jpeg-encoder = "0.6"
 log = "0.4"
 md-5 = "0.10"
 png = "0.17"
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
 ttf-parser = "0.21"
+unicode-bidi = "0.3"
+cms = "0.2"
+x509-cert = "0.2"
+rsa = "0.9"
+sha1 = { version = "0.10", features = ["oid"] }
+const-oid = "0.9"
+der = { version = "0.7", features = ["oid"] }
+spki = "0.7"
 
-# webp = "0.3"   # MIT, wraps libwebp (BSD-3, requires C toolchain)
-#                # TODO(webp): enable once libwebp/cmake setup is verified.
+[features]
+# Exposes internal parse/decode entry points (stream filters, etc.) as a
+# stable `pub` surface for the out-of-tree `fuzz/` workspace member. Off by
+# default so the normal build keeps these implementation details private;
+# enabled only when building fuzz targets.
+fuzzing = []
 
 [dev-dependencies]
 env_logger = "0.11"
+resvg = { version = "0.47.0", default-features = false, features = ["text", "raster-images"] }
 zip = "2"
