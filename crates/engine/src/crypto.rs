@@ -1,23 +1,24 @@
 //! Cryptographic primitives for the PDF Standard Security Handler.
 //!
-//! This module implements the subset of PDF encryption needed to read the
-//! overwhelming majority of encrypted PDFs found in the wild:
+//! This module implements the PDF Standard Security Handler for all revisions
+//! currently used in practice:
 //!
 //! - Standard Security Handler (`/Filter /Standard`)
 //! - V1 (RC4 40-bit, R2), V2 (RC4 up to 128-bit, R3), V4 (RC4 or AES-128, R4)
+//! - V5 (AES-256, R5/R6, PDF 2.0) — ISO 32000-2 §7.6.4 / §7.6.5
 //! - Empty user password (permission-only encryption) and user-supplied passwords
 //!
 //! Deliberately **not** implemented here (return errors / are rejected upstream):
 //!
-//! - V5 / R5 / R6 (AES-256, PDF 2.0) — entirely different SHA-256 key derivation.
-//!   TODO(aes256): the `aes` crate already supports AES-256; only the key
-//!   derivation (PDF 32000-2 §7.6.4.3.3/4) and the `/Perms` check are missing.
 //! - Public-key security handlers (`/Filter /Adobe.PubSec`) — certificate based.
+//!   Requires PKCS#7/CMS parsing and an RSA private key supplied by the caller;
+//!   documented as the explicit next crypto follow-up.
 //!
 //! RC4 is implemented from scratch (it is trivially small and no maintained
-//! crate is worth the dependency). AES-128-CBC uses the `aes` + `cbc` crates,
-//! and MD5 (used only for legacy key derivation, never for security decisions of
-//! our own) uses the `md-5` crate.
+//! crate is worth the dependency). AES-128-CBC uses the `aes` + `cbc` crates.
+//! AES-256-CBC and AES-256-ECB also use `aes` + `cbc`. MD5 (legacy key
+//! derivation only) uses `md-5`. SHA-256/384/512 (R5/R6 key derivation) use
+//! `sha2`.
 
 use crate::error::{OxideError, Result};
 use crate::object::{PdfDictionary, PdfObject};
@@ -104,13 +105,10 @@ pub fn aes128_cbc_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
     }
     let (iv, data) = ciphertext.split_at(16);
     if data.is_empty() {
-        // IV only, no payload: decrypts to the empty string.
         return Ok(Vec::new());
     }
     if data.len() % 16 != 0 {
         // Robustness: some malformed producers do not pad to a block boundary.
-        // Zero-extend to the next block and decrypt without unpadding so we at
-        // least surface the leading plaintext instead of failing outright.
         let padded_len = data.len().div_ceil(16) * 16;
         let mut padded = data.to_vec();
         padded.resize(padded_len, 0);
@@ -152,7 +150,143 @@ fn decrypt_aes128_cbc_no_pad(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u
 }
 
 // ---------------------------------------------------------------------------
-// 2.3  MD5 helper
+// 2.3  AES-256-CBC decryption (V5 / R5 / R6)
+// ---------------------------------------------------------------------------
+
+/// Decrypt data using AES-256-CBC as used by the PDF V5 Standard Security Handler.
+///
+/// The first 16 bytes of `ciphertext` are the IV; the remainder is the
+/// PKCS#7-padded ciphertext. `key` must be exactly 32 bytes.
+pub fn aes256_cbc_decrypt(key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    if key.len() != 32 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-256: key must be 32 bytes, got {}",
+            key.len()
+        )));
+    }
+    if ciphertext.len() < 16 {
+        return Err(OxideError::MalformedPdf(
+            "AES-256: ciphertext shorter than IV (16 bytes)".to_string(),
+        ));
+    }
+    let (iv, data) = ciphertext.split_at(16);
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if data.len() % 16 != 0 {
+        let padded_len = data.len().div_ceil(16) * 16;
+        let mut padded = data.to_vec();
+        padded.resize(padded_len, 0);
+        return aes256_cbc_no_pad(key, iv, &padded);
+    }
+    aes256_cbc_pkcs7(key, iv, data)
+}
+
+fn aes256_cbc_pkcs7(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    let mut buf = data.to_vec();
+    let decryptor = Aes256CbcDec::new_from_slices(key, iv).map_err(|_| {
+        OxideError::MalformedPdf("AES-256-CBC: invalid key or IV length".to_string())
+    })?;
+    let result = decryptor
+        .decrypt_padded_mut::<Pkcs7>(&mut buf)
+        .map_err(|_| {
+            OxideError::MalformedPdf("AES-256-CBC: padding error during decryption".to_string())
+        })?;
+    Ok(result.to_vec())
+}
+
+fn aes256_cbc_no_pad(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    use aes::cipher::{block_padding::NoPadding, BlockDecryptMut, KeyIvInit};
+    type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+
+    let mut buf = data.to_vec();
+    let decryptor = Aes256CbcDec::new_from_slices(key, iv).map_err(|_| {
+        OxideError::MalformedPdf("AES-256-CBC: invalid key or IV length".to_string())
+    })?;
+    let result = decryptor
+        .decrypt_padded_mut::<NoPadding>(&mut buf)
+        .map_err(|_| {
+            OxideError::MalformedPdf("AES-256-CBC: block decryption failed".to_string())
+        })?;
+    Ok(result.to_vec())
+}
+
+/// Decrypt a single 16-byte block with AES-256-ECB (no IV, no padding).
+/// Used exclusively for the /Perms verification block.
+fn aes256_ecb_decrypt_block(key: &[u8], block: &[u8]) -> Result<[u8; 16]> {
+    use aes::cipher::BlockDecrypt;
+    use aes::cipher::KeyInit;
+
+    if key.len() != 32 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-256-ECB: key must be 32 bytes, got {}",
+            key.len()
+        )));
+    }
+    if block.len() != 16 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-256-ECB: block must be 16 bytes, got {}",
+            block.len()
+        )));
+    }
+    let cipher = aes::Aes256::new_from_slice(key)
+        .map_err(|_| OxideError::MalformedPdf("AES-256-ECB: invalid key".to_string()))?;
+    let mut out = aes::Block::clone_from_slice(block);
+    cipher.decrypt_block(&mut out);
+    Ok(out.into())
+}
+
+/// Encrypt a single 16-byte block with AES-128-ECB (no IV, no padding).
+/// Used internally by the R6 hash (Algorithm 2.B step b).
+fn aes128_ecb_encrypt_block(key: &[u8], block: &[u8]) -> Result<[u8; 16]> {
+    use aes::cipher::BlockEncrypt;
+    use aes::cipher::KeyInit;
+
+    if key.len() != 16 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-128-ECB: key must be 16 bytes, got {}",
+            key.len()
+        )));
+    }
+    if block.len() != 16 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-128-ECB: block must be 16 bytes, got {}",
+            block.len()
+        )));
+    }
+    let cipher = aes::Aes128::new_from_slice(key)
+        .map_err(|_| OxideError::MalformedPdf("AES-128-ECB: invalid key".to_string()))?;
+    let mut out = aes::Block::clone_from_slice(block);
+    cipher.encrypt_block(&mut out);
+    Ok(out.into())
+}
+
+/// AES-128-CBC encrypt without padding, used inside Algorithm 2.B.
+/// `key` is 16 bytes, `iv` is 16 bytes, `data` must be a multiple of 16 bytes.
+fn aes128_cbc_encrypt_no_pad(key: &[u8], iv: &[u8], data: &[u8]) -> Vec<u8> {
+    // Manual CBC: each plaintext block XOR'd with previous ciphertext block, then ECB-encrypted.
+    let mut out = Vec::with_capacity(data.len());
+    let mut prev = [0u8; 16];
+    prev.copy_from_slice(iv);
+    for chunk in data.chunks(16) {
+        let mut block = [0u8; 16];
+        let len = chunk.len().min(16);
+        block[..len].copy_from_slice(&chunk[..len]);
+        for i in 0..16 {
+            block[i] ^= prev[i];
+        }
+        let enc = aes128_ecb_encrypt_block(key, &block).unwrap_or(block);
+        out.extend_from_slice(&enc);
+        prev = enc;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// 2.4  MD5 helper
 // ---------------------------------------------------------------------------
 
 /// Compute the MD5 digest of `data`.
@@ -167,7 +301,112 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
 }
 
 // ---------------------------------------------------------------------------
-// 3.1  Encryption metadata
+// 2.5  SHA-2 helpers (V5/R5/R6)
+// ---------------------------------------------------------------------------
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+fn sha384(data: &[u8]) -> [u8; 48] {
+    use sha2::{Digest, Sha384};
+    let mut h = Sha384::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+fn sha512(data: &[u8]) -> [u8; 64] {
+    use sha2::{Digest, Sha512};
+    let mut h = Sha512::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+// ---------------------------------------------------------------------------
+// 3  R6 hash: ISO 32000-2 Algorithm 2.B
+// ---------------------------------------------------------------------------
+//
+// This is the iterated hash used by R6 (PDF 2.0) for key derivation. R5 uses
+// plain SHA-256 instead (no iteration). The algorithm is:
+//
+//   K = SHA-256(input)
+//   loop (at least 64 rounds, until termination condition):
+//     a. K1 = (password || K [|| U_48_bytes if owner path]) repeated 64×
+//     b. E  = AES-128-CBC-nopad(key=K[0..16], iv=K[16..32], data=K1)
+//     c. selector = (sum of first 16 bytes of E) mod 3
+//        K = SHA-256/384/512 of E  (chosen by selector)
+//     d. stop when round >= 64 AND last_byte(E) <= (round - 32)
+//   return first 32 bytes of K
+//
+// `password`  — UTF-8 password bytes (already truncated to 127 bytes by caller)
+// `salt`      — 8-byte validation or key salt from /U or /O
+// `u_entry`   — Some(48-byte /U) when computing an OWNER-path hash; None for user path
+//
+// This function is the foundation of both verify_v5_user_password and
+// verify_v5_owner_password as well as the key-derivation steps.
+
+pub fn r6_hash(password: &[u8], salt: &[u8], u_entry: Option<&[u8]>) -> [u8; 32] {
+    // Step 1: K = SHA-256(password || salt [|| u_entry])
+    let mut seed = Vec::with_capacity(password.len() + salt.len() + 48);
+    seed.extend_from_slice(password);
+    seed.extend_from_slice(salt);
+    if let Some(u) = u_entry {
+        seed.extend_from_slice(u);
+    }
+    let mut k: Vec<u8> = sha256(&seed).to_vec();
+
+    let mut round = 0usize;
+    loop {
+        // Step a: K1 = (password || K [|| U]) × 64
+        let unit_len = password.len() + k.len() + u_entry.map_or(0, |u| u.len());
+        let mut k1 = Vec::with_capacity(unit_len * 64);
+        for _ in 0..64 {
+            k1.extend_from_slice(password);
+            k1.extend_from_slice(&k);
+            if let Some(u) = u_entry {
+                k1.extend_from_slice(u);
+            }
+        }
+
+        // Step b: E = AES-128-CBC-nopad(key=K[0..16], iv=K[16..32], data=K1)
+        // K is at least 32 bytes after the initial SHA-256.
+        let aes_key = &k[..16];
+        let aes_iv = &k[16..32];
+        let e = aes128_cbc_encrypt_no_pad(aes_key, aes_iv, &k1);
+
+        // Step c: selector = (sum of first 16 bytes of E) mod 3
+        let selector: u64 = e[..16].iter().map(|&b| b as u64).sum::<u64>() % 3;
+        k = match selector {
+            0 => sha256(&e).to_vec(),
+            1 => sha384(&e).to_vec(),
+            _ => sha512(&e).to_vec(),
+        };
+
+        round += 1;
+
+        // Step d: stop when round >= 64 AND last_byte(E) <= (round - 32)
+        let last_byte = *e.last().unwrap_or(&0) as usize;
+        if round >= 64 && last_byte <= round - 32 {
+            break;
+        }
+
+        // Safety cap: the spec is bounded, but guard against infinite loops
+        // from malformed inputs (not reachable with valid PDFs).
+        if round >= 256 {
+            break;
+        }
+    }
+
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&k[..32]);
+    result
+}
+
+// ---------------------------------------------------------------------------
+// 4.1  Encryption metadata
 // ---------------------------------------------------------------------------
 
 /// The encryption method used for a given object (PDF V4 crypt filters).
@@ -179,22 +418,33 @@ pub enum CryptMethod {
     V2,
     /// AES-128 in CBC mode (`/CFM /AESV2` under V4).
     AesV2,
-    /// AES-256 (`/CFM /AESV3`, V5) — not implemented; rejected during parsing.
+    /// AES-256 (`/CFM /AESV3`, V5).
     AesV3,
+}
+
+/// V5-specific fields from the `/Encrypt` dictionary (R5 / R6, PDF 2.0).
+#[derive(Debug, Clone)]
+pub struct V5Fields {
+    /// `/OE` (32 bytes): owner-key-encrypted file key.
+    pub oe: Vec<u8>,
+    /// `/UE` (32 bytes): user-key-encrypted file key.
+    pub ue: Vec<u8>,
+    /// `/Perms` (16 bytes): encrypted permissions block.
+    pub perms: Vec<u8>,
 }
 
 /// Parsed contents of a Standard Security Handler `/Encrypt` dictionary.
 #[derive(Debug, Clone)]
 pub struct EncryptionInfo {
-    /// Algorithm version: 1, 2, or 4.
+    /// Algorithm version: 1, 2, 4, or 5.
     pub v: u8,
-    /// Revision of the Standard Security Handler: 2, 3, or 4.
+    /// Revision of the Standard Security Handler: 2, 3, 4, 5, or 6.
     pub r: u8,
-    /// Key length in bits (40 or 128).
+    /// Key length in bits (40 or 128 for V1-V4; always 256 for V5).
     pub key_length: usize,
-    /// `/O` entry: owner-password verifier (32 bytes for R2–R4).
+    /// `/O` entry: owner-password verifier (32 bytes for R2–R4; 48 bytes for R5/R6).
     pub o: Vec<u8>,
-    /// `/U` entry: user-password verifier (32 bytes for R2–R4).
+    /// `/U` entry: user-password verifier (32 bytes for R2–R4; 48 bytes for R5/R6).
     pub u: Vec<u8>,
     /// `/P`: permission flags (signed 32-bit bitmask).
     pub p: i32,
@@ -202,6 +452,8 @@ pub struct EncryptionInfo {
     pub encrypt_metadata: bool,
     /// For V4: the crypt-filter method applied to streams and strings.
     pub cf_method: CryptMethod,
+    /// V5-specific fields (present only when v == 5).
+    pub v5: Option<V5Fields>,
 }
 
 impl EncryptionInfo {
@@ -218,10 +470,9 @@ impl EncryptionInfo {
         let r = dict.get_integer("R").unwrap_or(0) as u8;
 
         if v == 5 {
-            return Err(OxideError::UnsupportedFeature(
-                "PDF 2.0 AES-256 encryption (V=5/R=6) is not yet supported".to_string(),
-            ));
+            return Self::parse_v5(dict, r);
         }
+
         if v == 0 || v > 4 {
             return Err(OxideError::MalformedPdf(format!(
                 "Unsupported encryption version V={v}"
@@ -242,14 +493,9 @@ impl EncryptionInfo {
             .and_then(PdfObject::as_bool)
             .unwrap_or(true);
 
-        // For V4, the per-object method is named by the crypt filter referenced
-        // by /StmF (streams) and /StrF (strings). In practice both reference the
-        // same filter for the Standard handler; we read /StmF and look up its
-        // /CFM in /CF, falling back to RC4.
         let cf_method = if v == 4 {
             resolve_v4_method(dict)?
         } else {
-            // V1/V2/V3 always use RC4.
             CryptMethod::V2
         };
 
@@ -262,12 +508,85 @@ impl EncryptionInfo {
             p,
             encrypt_metadata,
             cf_method,
+            v5: None,
         })
     }
 
-    /// True if this object stream/string is encrypted with AES-128.
+    fn parse_v5(dict: &PdfDictionary, r: u8) -> Result<Self> {
+        if r != 5 && r != 6 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V=5 requires R=5 or R=6, got R={r}"
+            )));
+        }
+
+        let o = extract_bytes(dict, "O")?;
+        let u = extract_bytes(dict, "U")?;
+
+        // R5/R6 require exactly 48-byte O and U. Some writers pad to 32; be lenient
+        // on length but warn, since the structure matters.
+        if o.len() < 48 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V5 /O must be at least 48 bytes, got {}",
+                o.len()
+            )));
+        }
+        if u.len() < 48 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V5 /U must be at least 48 bytes, got {}",
+                u.len()
+            )));
+        }
+
+        let oe = extract_bytes(dict, "OE")?;
+        let ue = extract_bytes(dict, "UE")?;
+        let perms = extract_bytes(dict, "Perms")?;
+
+        if oe.len() != 32 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V5 /OE must be 32 bytes, got {}",
+                oe.len()
+            )));
+        }
+        if ue.len() != 32 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V5 /UE must be 32 bytes, got {}",
+                ue.len()
+            )));
+        }
+        if perms.len() != 16 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V5 /Perms must be 16 bytes, got {}",
+                perms.len()
+            )));
+        }
+
+        let p = dict.get_integer("P").unwrap_or(-4) as i32;
+        let encrypt_metadata = dict
+            .get("EncryptMetadata")
+            .and_then(PdfObject::as_bool)
+            .unwrap_or(true);
+
+        Ok(EncryptionInfo {
+            v: 5,
+            r,
+            key_length: 256,
+            o,
+            u,
+            p,
+            encrypt_metadata,
+            cf_method: CryptMethod::AesV3,
+            v5: Some(V5Fields { oe, ue, perms }),
+        })
+    }
+
+    /// True if this object stream/string is encrypted with AES-128 (V4/AESV2).
     pub fn is_aes(&self) -> bool {
         self.cf_method == CryptMethod::AesV2
+    }
+
+    /// True if this is a V5 (AES-256) encrypted document.
+    pub fn is_v5(&self) -> bool {
+        self.v == 5
     }
 }
 
@@ -278,7 +597,6 @@ fn resolve_v4_method(dict: &PdfDictionary) -> Result<CryptMethod> {
         return Ok(CryptMethod::None);
     }
 
-    // Look up the named crypt filter in /CF and read its /CFM.
     if let Some(cf) = dict.get_dict("CF") {
         if let Some(filter) = cf.get_dict(stm_f) {
             return Ok(match filter.get_name("CFM") {
@@ -294,7 +612,6 @@ fn resolve_v4_method(dict: &PdfDictionary) -> Result<CryptMethod> {
         }
     }
 
-    // Some producers name AESV2 directly in /StmF instead of via /CF.
     Ok(match stm_f {
         "AESV2" => CryptMethod::AesV2,
         "AESV3" => CryptMethod::AesV3,
@@ -317,7 +634,7 @@ fn extract_bytes(dict: &PdfDictionary, key: &str) -> Result<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// 4  Key derivation (PDF 32000-1 §7.6.3.3)
+// 5  Key derivation — V1/V2/V4 (PDF 32000-1 §7.6.3.3)
 // ---------------------------------------------------------------------------
 
 /// The 32-byte password-padding string defined by the PDF specification.
@@ -335,7 +652,7 @@ pub fn pad_password(password: &[u8]) -> [u8; 32] {
     padded
 }
 
-/// Compute the file encryption key from a user password.
+/// Compute the file encryption key from a user password (V1/V2/V4).
 ///
 /// Algorithm (PDF 32000-1 §7.6.3.3, Algorithm 2):
 ///   1. Hash `padded_password + O + P(LE 4 bytes) + file_id`, plus
@@ -365,7 +682,7 @@ pub fn compute_encryption_key(password: &[u8], info: &EncryptionInfo, file_id: &
     hash[..key_len].to_vec()
 }
 
-/// Verify that `password` matches the `/U` user-password verifier.
+/// Verify that `password` matches the `/U` user-password verifier (V1/V2/V4).
 ///
 /// For `R >= 3` (Algorithm 5): RC4-encrypt `MD5(PADDING + file_id)` with the
 /// file key, iterate 19 more times with the key XORed by the iteration number,
@@ -396,10 +713,148 @@ pub fn verify_user_password(password: &[u8], info: &EncryptionInfo, file_id: &[u
 }
 
 // ---------------------------------------------------------------------------
-// 5  Object-level decryption
+// 6  Key derivation — V5 / R5 / R6 (ISO 32000-2 §7.6.4 / §7.6.5)
 // ---------------------------------------------------------------------------
 
-/// Compute the per-object decryption key.
+/// Truncate a V5 password to at most 127 UTF-8 bytes (SASLprep simplified).
+/// Full SASLprep normalisation is not implemented; this handles the common
+/// ASCII case correctly. Non-ASCII passwords may not interoperate with some
+/// writers if they rely on Unicode normalisation.
+fn truncate_v5_password(password: &[u8]) -> &[u8] {
+    if password.len() <= 127 {
+        password
+    } else {
+        // Truncate at a UTF-8 character boundary ≤ 127 bytes.
+        let mut end = 127;
+        while end > 0 && (password[end] & 0xC0) == 0x80 {
+            end -= 1;
+        }
+        &password[..end]
+    }
+}
+
+/// Verify a user password against the V5 `/U` entry (Algorithm 2.A, user path).
+///
+/// Returns `true` if the password matches.
+pub fn verify_v5_user_password(password: &[u8], info: &EncryptionInfo) -> bool {
+    if info.v5.is_none() {
+        return false;
+    }
+    let pwd = truncate_v5_password(password);
+    // /U layout: [0..32] = hash, [32..40] = validation_salt, [40..48] = key_salt
+    let validation_salt = &info.u[32..40];
+    let computed = if info.r == 6 {
+        r6_hash(pwd, validation_salt, None)
+    } else {
+        // R5: plain SHA-256(password || validation_salt)
+        let mut input = Vec::with_capacity(pwd.len() + 8);
+        input.extend_from_slice(pwd);
+        input.extend_from_slice(validation_salt);
+        sha256(&input)
+    };
+    // Compare first 32 bytes (the hash portion of /U)
+    info.u.len() >= 32 && computed == info.u[..32].try_into().unwrap_or([0u8; 32])
+}
+
+/// Verify an owner password against the V5 `/O` entry (Algorithm 2.A, owner path).
+///
+/// Returns `true` if the owner password matches.
+pub fn verify_v5_owner_password(password: &[u8], info: &EncryptionInfo) -> bool {
+    if info.v5.is_none() {
+        return false;
+    }
+    let pwd = truncate_v5_password(password);
+    // /O layout: [0..32] = hash, [32..40] = validation_salt, [40..48] = key_salt
+    let validation_salt = &info.o[32..40];
+    // Owner path includes the full 48-byte /U value in the hash input.
+    let u48 = &info.u[..48.min(info.u.len())];
+    let computed = if info.r == 6 {
+        r6_hash(pwd, validation_salt, Some(u48))
+    } else {
+        let mut input = Vec::with_capacity(pwd.len() + 8 + u48.len());
+        input.extend_from_slice(pwd);
+        input.extend_from_slice(validation_salt);
+        input.extend_from_slice(u48);
+        sha256(&input)
+    };
+    info.o.len() >= 32 && computed == info.o[..32].try_into().unwrap_or([0u8; 32])
+}
+
+/// Derive the 32-byte file encryption key from a verified user password (V5).
+///
+/// Algorithm 2.A step 4: intermediate_key = hash(password || U_key_salt),
+/// then file_key = AES-256-CBC-decrypt(key=intermediate_key, iv=zero, data=UE).
+pub fn derive_v5_file_key_from_user(password: &[u8], info: &EncryptionInfo) -> Result<Vec<u8>> {
+    let v5 = info.v5.as_ref().ok_or_else(|| {
+        OxideError::MalformedPdf("derive_v5_file_key_from_user called on non-V5 info".to_string())
+    })?;
+    let pwd = truncate_v5_password(password);
+    // /U layout: [40..48] = key_salt
+    let key_salt = &info.u[40..48];
+    let intermediate_key = if info.r == 6 {
+        r6_hash(pwd, key_salt, None)
+    } else {
+        let mut input = Vec::with_capacity(pwd.len() + 8);
+        input.extend_from_slice(pwd);
+        input.extend_from_slice(key_salt);
+        sha256(&input)
+    };
+    // Decrypt /UE with zero IV (no padding — 32-byte payload is exactly 2 blocks).
+    let zero_iv = [0u8; 16];
+    // UE is 32 bytes = 2 AES blocks, no padding needed
+    let file_key = aes256_cbc_no_pad(&intermediate_key, &zero_iv, &v5.ue)?;
+    Ok(file_key[..32].to_vec())
+}
+
+/// Derive the 32-byte file encryption key from a verified owner password (V5).
+///
+/// Algorithm 2.A step 7: intermediate_key = hash(password || O_key_salt || U_48),
+/// then file_key = AES-256-CBC-decrypt(key=intermediate_key, iv=zero, data=OE).
+pub fn derive_v5_file_key_from_owner(password: &[u8], info: &EncryptionInfo) -> Result<Vec<u8>> {
+    let v5 = info.v5.as_ref().ok_or_else(|| {
+        OxideError::MalformedPdf(
+            "derive_v5_file_key_from_owner called on non-V5 info".to_string(),
+        )
+    })?;
+    let pwd = truncate_v5_password(password);
+    // /O layout: [40..48] = key_salt
+    let key_salt = &info.o[40..48];
+    let u48 = &info.u[..48.min(info.u.len())];
+    let intermediate_key = if info.r == 6 {
+        r6_hash(pwd, key_salt, Some(u48))
+    } else {
+        let mut input = Vec::with_capacity(pwd.len() + 8 + u48.len());
+        input.extend_from_slice(pwd);
+        input.extend_from_slice(key_salt);
+        input.extend_from_slice(u48);
+        sha256(&input)
+    };
+    let zero_iv = [0u8; 16];
+    let file_key = aes256_cbc_no_pad(&intermediate_key, &zero_iv, &v5.oe)?;
+    Ok(file_key[..32].to_vec())
+}
+
+/// Verify the /Perms block and return `true` if the magic bytes are correct.
+///
+/// ISO 32000-2 §7.6.4.4: decrypt the 16-byte /Perms with AES-256-ECB using the
+/// file key. Bytes `[9]`, `[10]`, `[11]` of the result must be ASCII 'a', 'd', 'b'.
+pub fn verify_v5_perms(file_key: &[u8], info: &EncryptionInfo) -> bool {
+    let v5 = match &info.v5 {
+        Some(v) => v,
+        None => return false,
+    };
+    let block = match aes256_ecb_decrypt_block(file_key, &v5.perms) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    block[9] == b'a' && block[10] == b'd' && block[11] == b'b'
+}
+
+// ---------------------------------------------------------------------------
+// 7  Object-level decryption
+// ---------------------------------------------------------------------------
+
+/// Compute the per-object decryption key (V1/V2/V4 only — NOT used for V5).
 ///
 /// PDF 32000-1 §7.6.2 Algorithm 1: append `obj_num` (3 bytes LE) and `gen_num`
 /// (2 bytes LE) to the file key, plus the literal `sAlT` for AES, then MD5. The
@@ -422,6 +877,11 @@ pub fn object_key(file_key: &[u8], obj_num: u32, gen_num: u16, is_aes: bool) -> 
 
 /// Decrypt a PDF string value belonging to object `obj_num`/`gen_num`.
 ///
+/// For V5 (`is_v5 = true`): the file key is used DIRECTLY (no per-object
+/// derivation), and the IV is the first 16 bytes of the ciphertext.
+///
+/// For V1/V2/V4: a per-object key is derived via [`object_key`].
+///
 /// On any AES failure the original bytes are returned unchanged, so a single
 /// corrupt object can never poison the rest of the document.
 pub fn decrypt_string(
@@ -430,28 +890,34 @@ pub fn decrypt_string(
     obj_num: u32,
     gen_num: u16,
     is_aes: bool,
+    is_v5: bool,
 ) -> Vec<u8> {
     if data.is_empty() {
         return Vec::new();
     }
-    let key = object_key(file_key, obj_num, gen_num, is_aes);
-    if is_aes {
-        aes128_cbc_decrypt(&key, data).unwrap_or_else(|_| data.to_vec())
+    if is_v5 {
+        // V5: use file_key directly with AES-256-CBC; IV prepended.
+        aes256_cbc_decrypt(file_key, data).unwrap_or_else(|_| data.to_vec())
     } else {
-        Rc4::apply(&key, data)
+        let key = object_key(file_key, obj_num, gen_num, is_aes);
+        if is_aes {
+            aes128_cbc_decrypt(&key, data).unwrap_or_else(|_| data.to_vec())
+        } else {
+            Rc4::apply(&key, data)
+        }
     }
 }
 
-/// Decrypt a PDF stream's raw bytes. Streams use the same per-object key as
-/// strings.
+/// Decrypt a PDF stream's raw bytes. Streams use the same logic as strings.
 pub fn decrypt_stream(
     data: &[u8],
     file_key: &[u8],
     obj_num: u32,
     gen_num: u16,
     is_aes: bool,
+    is_v5: bool,
 ) -> Vec<u8> {
-    decrypt_string(data, file_key, obj_num, gen_num, is_aes)
+    decrypt_string(data, file_key, obj_num, gen_num, is_aes, is_v5)
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +942,6 @@ mod tests {
 
     #[test]
     fn rc4_known_vector_key_plaintext() {
-        // Classic RC4 test vector: RC4("Key", "Plaintext") = BBF316E8D940AF0AD3.
         let out = Rc4::apply(b"Key", b"Plaintext");
         assert_eq!(
             out,
@@ -506,11 +971,7 @@ mod tests {
             let data = b"test data";
             let enc = Rc4::apply(&key, data);
             let dec = Rc4::apply(&key, &enc);
-            assert_eq!(
-                dec,
-                data.to_vec(),
-                "RC4 round-trip failed for key len {len}"
-            );
+            assert_eq!(dec, data.to_vec(), "RC4 round-trip failed for key len {len}");
         }
     }
 
@@ -518,7 +979,6 @@ mod tests {
 
     #[test]
     fn md5_empty_string_vector() {
-        // MD5("") = d41d8cd98f00b204e9800998ecf8427e
         let hash = md5(b"");
         assert_eq!(
             hash,
@@ -531,13 +991,23 @@ mod tests {
 
     #[test]
     fn md5_abc_vector() {
-        // MD5("abc") = 900150983cd24fb0d6963f7d28e17f72
         let hash = md5(b"abc");
         assert_eq!(hash[0], 0x90, "first byte of MD5(abc)");
         assert_eq!(hash[1], 0x01, "second byte of MD5(abc)");
     }
 
-    // --- Key derivation ---
+    // --- SHA-256 ---
+
+    #[test]
+    fn sha256_empty_known_vector() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let h = sha256(b"");
+        assert_eq!(h[0], 0xe3);
+        assert_eq!(h[1], 0xb0);
+        assert_eq!(h[31], 0x55);
+    }
+
+    // --- Key derivation (V1/V2/V4) ---
 
     #[test]
     fn pad_password_empty_equals_padding() {
@@ -592,6 +1062,7 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            v5: None,
         };
         let file_id = vec![0x42u8; 16];
         let k1 = compute_encryption_key(b"", &info, &file_id);
@@ -611,6 +1082,7 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            v5: None,
         };
         let fid = vec![0u8; 16];
         assert_eq!(compute_encryption_key(b"", &make_info(40), &fid).len(), 5);
@@ -628,6 +1100,7 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            v5: None,
         };
         let fid = vec![0xABu8; 16];
         let k_empty = compute_encryption_key(b"", &info, &fid);
@@ -635,7 +1108,7 @@ mod tests {
         assert_ne!(k_empty, k_secret);
     }
 
-    // --- AES ---
+    // --- AES-128 ---
 
     #[test]
     fn aes128_cbc_round_trip_with_iv_prefix() {
@@ -644,10 +1117,10 @@ mod tests {
 
         let key = [0x00u8; 16];
         let iv = [0x00u8; 16];
-        let plain = b"0123456789ABCDEF"; // exactly 16 bytes
+        let plain = b"0123456789ABCDEF";
 
         let mut buf = plain.to_vec();
-        buf.resize(32, 0); // room for PKCS#7 padding block
+        buf.resize(32, 0);
         let ct_len = Aes128CbcEnc::new_from_slices(&key, &iv)
             .unwrap()
             .encrypt_padded_mut::<Pkcs7>(&mut buf, 16)
@@ -675,7 +1148,269 @@ mod tests {
         assert!(aes128_cbc_decrypt(&[0u8; 8], &ct).is_err());
     }
 
-    // --- verify_user_password ---
+    // --- AES-256 ---
+
+    #[test]
+    fn aes256_cbc_round_trip() {
+        use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+        let key = [0x42u8; 32];
+        let iv = [0x13u8; 16];
+        let plain = b"AES-256 PDF round-trip test data";
+
+        let mut buf = plain.to_vec();
+        buf.resize(plain.len() + 16, 0);
+        let ct_len = Aes256CbcEnc::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_mut::<Pkcs7>(&mut buf, plain.len())
+            .unwrap()
+            .len();
+        let ciphertext = &buf[..ct_len];
+
+        let mut pdf_ct = iv.to_vec();
+        pdf_ct.extend_from_slice(ciphertext);
+
+        let decrypted = aes256_cbc_decrypt(&key, &pdf_ct).unwrap();
+        assert_eq!(decrypted, plain.to_vec());
+    }
+
+    #[test]
+    fn aes256_wrong_key_length_errors() {
+        let ct = vec![0u8; 32];
+        assert!(aes256_cbc_decrypt(&[0u8; 16], &ct).is_err());
+    }
+
+    #[test]
+    fn aes256_ciphertext_shorter_than_iv_errors() {
+        assert!(aes256_cbc_decrypt(&[0u8; 32], b"too short").is_err());
+    }
+
+    // --- R6 hash (Algorithm 2.B) ---
+
+    #[test]
+    fn r6_hash_empty_password_is_deterministic() {
+        let salt = [0x01u8; 8];
+        let h1 = r6_hash(b"", &salt, None);
+        let h2 = r6_hash(b"", &salt, None);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn r6_hash_different_salts_differ() {
+        let s1 = [0x01u8; 8];
+        let s2 = [0x02u8; 8];
+        let h1 = r6_hash(b"password", &s1, None);
+        let h2 = r6_hash(b"password", &s2, None);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn r6_hash_owner_path_differs_from_user_path() {
+        let salt = [0xABu8; 8];
+        let u_entry = [0u8; 48];
+        let h_user = r6_hash(b"password", &salt, None);
+        let h_owner = r6_hash(b"password", &salt, Some(&u_entry));
+        assert_ne!(h_user, h_owner);
+    }
+
+    #[test]
+    fn r6_hash_different_passwords_differ() {
+        let salt = [0x77u8; 8];
+        let h1 = r6_hash(b"", &salt, None);
+        let h2 = r6_hash(b"userpass", &salt, None);
+        assert_ne!(h1, h2);
+    }
+
+    // --- V5 verify / key-derive (self-consistent round-trip) ---
+
+    fn make_v5_info(r: u8, password: &[u8]) -> EncryptionInfo {
+        // Build a self-consistent V5 EncryptionInfo from scratch so we can
+        // verify the verify + derive path is round-trip correct.
+        use aes::cipher::{block_padding::NoPadding, BlockEncryptMut, KeyIvInit};
+        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+        let file_key: [u8; 32] = {
+            let mut k = [0u8; 32];
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_add(0x11);
+            }
+            k
+        };
+
+        let zero_iv = [0u8; 16];
+
+        // /U: hash(pwd || v_salt) || v_salt || k_salt
+        let u_v_salt = [0x10u8, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17];
+        let u_k_salt = [0x20u8, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27];
+
+        let u_hash = if r == 6 {
+            r6_hash(password, &u_v_salt, None)
+        } else {
+            let mut input = password.to_vec();
+            input.extend_from_slice(&u_v_salt);
+            sha256(&input)
+        };
+
+        let mut u = Vec::with_capacity(48);
+        u.extend_from_slice(&u_hash);
+        u.extend_from_slice(&u_v_salt);
+        u.extend_from_slice(&u_k_salt);
+
+        // /UE: AES-256-CBC(key=ue_intermediate, iv=zero, data=file_key), no padding
+        let ue_intermediate = if r == 6 {
+            r6_hash(password, &u_k_salt, None)
+        } else {
+            let mut input = password.to_vec();
+            input.extend_from_slice(&u_k_salt);
+            sha256(&input)
+        };
+        let ue = {
+            let mut buf = file_key.to_vec();
+            buf.resize(32, 0);
+            Aes256CbcEnc::new_from_slices(&ue_intermediate, &zero_iv)
+                .unwrap()
+                .encrypt_padded_mut::<NoPadding>(&mut buf, 32)
+                .unwrap()
+                .to_vec()
+        };
+
+        // /O: hash(pwd || o_v_salt || U48) || o_v_salt || o_k_salt
+        let o_v_salt = [0x30u8, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37];
+        let o_k_salt = [0x40u8, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47];
+        let u48 = &u[..48];
+
+        let o_hash = if r == 6 {
+            r6_hash(password, &o_v_salt, Some(u48))
+        } else {
+            let mut input = password.to_vec();
+            input.extend_from_slice(&o_v_salt);
+            input.extend_from_slice(u48);
+            sha256(&input)
+        };
+
+        let mut o = Vec::with_capacity(48);
+        o.extend_from_slice(&o_hash);
+        o.extend_from_slice(&o_v_salt);
+        o.extend_from_slice(&o_k_salt);
+
+        // /OE: AES-256-CBC(key=o_intermediate, iv=0, data=file_key)
+        let oe_intermediate = if r == 6 {
+            r6_hash(password, &o_k_salt, Some(u48))
+        } else {
+            let mut input = password.to_vec();
+            input.extend_from_slice(&o_k_salt);
+            input.extend_from_slice(u48);
+            sha256(&input)
+        };
+        let oe = {
+            let mut buf = file_key.to_vec();
+            buf.resize(32, 0);
+            Aes256CbcEnc::new_from_slices(&oe_intermediate, &zero_iv)
+                .unwrap()
+                .encrypt_padded_mut::<NoPadding>(&mut buf, 32)
+                .unwrap()
+                .to_vec()
+        };
+
+        // /Perms: AES-256-ECB(key=file_key, plaintext)
+        // plaintext: [0..4]=P LE, [4..8]=0xFF, [8]=T/F encrypt_metadata, [9..12]="adb", [12..16]=zeros
+        let mut perms_plain = [0u8; 16];
+        let p: i32 = -4;
+        perms_plain[..4].copy_from_slice(&(p as u32).to_le_bytes());
+        perms_plain[4..8].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        perms_plain[8] = b'T';
+        perms_plain[9] = b'a';
+        perms_plain[10] = b'd';
+        perms_plain[11] = b'b';
+
+        let perms = {
+            use aes::cipher::{BlockEncrypt, KeyInit};
+            let cipher = aes::Aes256::new_from_slice(&file_key).unwrap();
+            let mut block = aes::Block::clone_from_slice(&perms_plain);
+            cipher.encrypt_block(&mut block);
+            block.to_vec()
+        };
+
+        EncryptionInfo {
+            v: 5,
+            r,
+            key_length: 256,
+            o,
+            u,
+            p,
+            encrypt_metadata: true,
+            cf_method: CryptMethod::AesV3,
+            v5: Some(V5Fields { oe, ue, perms }),
+        }
+    }
+
+    #[test]
+    fn v5_r6_user_password_verify_and_key_derive() {
+        let password = b"userpass";
+        let info = make_v5_info(6, password);
+
+        assert!(verify_v5_user_password(password, &info), "user password should verify");
+        assert!(!verify_v5_user_password(b"wrongpass", &info), "wrong password should fail");
+
+        let file_key = derive_v5_file_key_from_user(password, &info).unwrap();
+        assert_eq!(file_key.len(), 32);
+        assert!(verify_v5_perms(&file_key, &info), "perms should verify with correct file key");
+        assert!(!verify_v5_perms(&[0u8; 32], &info), "perms should fail with wrong key");
+    }
+
+    #[test]
+    fn v5_r5_user_password_verify_and_key_derive() {
+        let password = b"";
+        let info = make_v5_info(5, password);
+
+        assert!(verify_v5_user_password(password, &info), "empty user password should verify for R5");
+        assert!(!verify_v5_user_password(b"wrong", &info), "wrong password should fail for R5");
+
+        let file_key = derive_v5_file_key_from_user(password, &info).unwrap();
+        assert_eq!(file_key.len(), 32);
+        assert!(verify_v5_perms(&file_key, &info), "perms R5");
+    }
+
+    #[test]
+    fn v5_owner_password_verify_and_key_derive() {
+        let password = b"ownerpass";
+        let info = make_v5_info(6, password);
+
+        assert!(verify_v5_owner_password(password, &info), "owner password should verify");
+        assert!(!verify_v5_owner_password(b"wrong", &info), "wrong owner password should fail");
+
+        let file_key = derive_v5_file_key_from_owner(password, &info).unwrap();
+        assert_eq!(file_key.len(), 32);
+        assert!(verify_v5_perms(&file_key, &info), "perms should verify via owner key");
+    }
+
+    #[test]
+    fn v5_decrypt_string_round_trip() {
+        use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
+        type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+
+        let file_key = [0x55u8; 32];
+        let iv = [0xAAu8; 16];
+        let plain = b"Hello AES-256 PDF string";
+
+        let mut buf = plain.to_vec();
+        buf.resize(plain.len() + 16, 0);
+        let ct_len = Aes256CbcEnc::new_from_slices(&file_key, &iv)
+            .unwrap()
+            .encrypt_padded_mut::<Pkcs7>(&mut buf, plain.len())
+            .unwrap()
+            .len();
+
+        let mut ciphertext = iv.to_vec();
+        ciphertext.extend_from_slice(&buf[..ct_len]);
+
+        let decrypted = decrypt_string(&ciphertext, &file_key, 1, 0, false, true);
+        assert_eq!(decrypted, plain.to_vec());
+    }
+
+    // --- verify_user_password (V1/V2/V4) ---
 
     #[test]
     fn verify_user_password_rejects_mismatch() {
@@ -688,16 +1423,17 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            v5: None,
         };
         let file_id = vec![0x01u8; 16];
         assert!(!verify_user_password(b"wrong-password", &info, &file_id));
     }
 
-    // --- decrypt_string ---
+    // --- decrypt_string (V1/V2/V4) ---
 
     #[test]
     fn decrypt_string_empty_data_returns_empty() {
-        let result = decrypt_string(b"", &[0x01u8; 5], 1, 0, false);
+        let result = decrypt_string(b"", &[0x01u8; 5], 1, 0, false, false);
         assert!(result.is_empty());
     }
 
@@ -707,7 +1443,7 @@ mod tests {
         let original = b"Hello PDF World";
         let key = object_key(&file_key, 7, 0, false);
         let encrypted = Rc4::apply(&key, original);
-        let decrypted = decrypt_string(&encrypted, &file_key, 7, 0, false);
+        let decrypted = decrypt_string(&encrypted, &file_key, 7, 0, false, false);
         assert_eq!(decrypted, original.to_vec());
     }
 
@@ -730,18 +1466,62 @@ mod tests {
     }
 
     #[test]
-    fn from_dict_rejects_v5_aes256() {
+    fn from_dict_v5_r6_parses_successfully() {
         let d = dict(&[
             ("Filter", PdfObject::Name("Standard".to_string())),
             ("V", PdfObject::Integer(5)),
             ("R", PdfObject::Integer(6)),
             ("O", PdfObject::String(vec![0u8; 48])),
             ("U", PdfObject::String(vec![0u8; 48])),
+            ("OE", PdfObject::String(vec![0u8; 32])),
+            ("UE", PdfObject::String(vec![0u8; 32])),
+            ("Perms", PdfObject::String(vec![0u8; 16])),
+            ("P", PdfObject::Integer(-4)),
+        ]);
+        let info = EncryptionInfo::from_dict(&d).unwrap();
+        assert_eq!(info.v, 5);
+        assert_eq!(info.r, 6);
+        assert_eq!(info.key_length, 256);
+        assert!(info.v5.is_some());
+        assert_eq!(info.cf_method, CryptMethod::AesV3);
+        assert!(info.is_v5());
+    }
+
+    #[test]
+    fn from_dict_v5_r5_parses_successfully() {
+        let d = dict(&[
+            ("Filter", PdfObject::Name("Standard".to_string())),
+            ("V", PdfObject::Integer(5)),
+            ("R", PdfObject::Integer(5)),
+            ("O", PdfObject::String(vec![1u8; 48])),
+            ("U", PdfObject::String(vec![2u8; 48])),
+            ("OE", PdfObject::String(vec![3u8; 32])),
+            ("UE", PdfObject::String(vec![4u8; 32])),
+            ("Perms", PdfObject::String(vec![5u8; 16])),
+            ("P", PdfObject::Integer(-3904)),
+        ]);
+        let info = EncryptionInfo::from_dict(&d).unwrap();
+        assert_eq!(info.v, 5);
+        assert_eq!(info.r, 5);
+        assert!(info.is_v5());
+    }
+
+    #[test]
+    fn from_dict_v5_bad_r_errors() {
+        let d = dict(&[
+            ("Filter", PdfObject::Name("Standard".to_string())),
+            ("V", PdfObject::Integer(5)),
+            ("R", PdfObject::Integer(4)),
+            ("O", PdfObject::String(vec![0u8; 48])),
+            ("U", PdfObject::String(vec![0u8; 48])),
+            ("OE", PdfObject::String(vec![0u8; 32])),
+            ("UE", PdfObject::String(vec![0u8; 32])),
+            ("Perms", PdfObject::String(vec![0u8; 16])),
             ("P", PdfObject::Integer(-4)),
         ]);
         assert!(matches!(
             EncryptionInfo::from_dict(&d),
-            Err(OxideError::UnsupportedFeature(_))
+            Err(OxideError::MalformedPdf(_))
         ));
     }
 
@@ -764,6 +1544,7 @@ mod tests {
         assert!(info.encrypt_metadata);
         assert_eq!(info.cf_method, CryptMethod::V2);
         assert!(!info.is_aes());
+        assert!(!info.is_v5());
     }
 
     #[test]
@@ -802,6 +1583,7 @@ mod tests {
         let info = EncryptionInfo::from_dict(&d).unwrap();
         assert_eq!(info.cf_method, CryptMethod::AesV2);
         assert!(info.is_aes());
+        assert!(!info.is_v5());
     }
 
     #[test]

@@ -1,11 +1,12 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::RwLock;
 
 use crate::crypto::{
-    compute_encryption_key, decrypt_stream, decrypt_string, verify_user_password, CryptMethod,
-    EncryptionInfo,
+    compute_encryption_key, decrypt_stream, decrypt_string, derive_v5_file_key_from_owner,
+    derive_v5_file_key_from_user, verify_user_password, verify_v5_owner_password,
+    verify_v5_perms, verify_v5_user_password, EncryptionInfo,
 };
 use crate::error::{OxideError, Result};
 use crate::filters::decode_stream_from_dict;
@@ -26,10 +27,14 @@ pub enum XrefEntry {
 /// has its strings and stream bytes decrypted transparently.
 #[derive(Clone, Debug)]
 pub struct EncryptionContext {
-    /// The file-wide encryption key (5 bytes for 40-bit, 16 bytes for 128-bit).
+    /// The file-wide encryption key (5 bytes for 40-bit, 16 bytes for 128-bit,
+    /// or 32 bytes for V5/AES-256).
     pub file_key: Vec<u8>,
     /// True when streams and strings are encrypted with AES-128 (`/CFM /AESV2`).
     pub is_aes: bool,
+    /// True when this is a V5 (AES-256) document. For V5 the file key is used
+    /// directly for every object — no per-object key derivation.
+    pub is_v5: bool,
     /// Mirrors `/EncryptMetadata`; when false, `/Type /Metadata` streams are
     /// left as plaintext.
     pub encrypt_metadata: bool,
@@ -42,7 +47,14 @@ pub struct PdfReader {
     version: String,
     xref: HashMap<(u32, u16), XrefEntry>,
     trailer: PdfDictionary,
-    object_stream_cache: RefCell<ObjectStreamCache>,
+    /// Cache of decoded object streams (`/Type /ObjStm`). Wrapped in an
+    /// `RwLock` rather than a `RefCell` so the whole `PdfReader` — and therefore
+    /// `ContentEngine` — is `Send + Sync`. This lets a single parsed engine be
+    /// shared across rayon threads via `Arc` for parallel page extraction and
+    /// rendering instead of cloning/reparsing the PDF per
+    /// thread. Reads dominate; the lock is only taken for writing the first time
+    /// a given object stream is decoded.
+    object_stream_cache: RwLock<ObjectStreamCache>,
     encryption: Option<EncryptionContext>,
 }
 
@@ -88,7 +100,7 @@ impl PdfReader {
             version,
             xref,
             trailer,
-            object_stream_cache: RefCell::new(HashMap::new()),
+            object_stream_cache: RwLock::new(HashMap::new()),
             encryption,
         })
     }
@@ -108,6 +120,34 @@ impl PdfReader {
         &self.version
     }
 
+    /// Total size of the input PDF in bytes (the length of the parsed buffer).
+    /// Reported by the `info` tool.
+    pub fn file_size(&self) -> usize {
+        self.data.len()
+    }
+
+    /// The exact original file bytes, as opened. Digital-signature verification
+    /// hashes the bytes selected by a signature's `/ByteRange` against these —
+    /// it must use the raw bytes, never a re-serialization.
+    pub fn file_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// The raw, resolved `/Encrypt` dictionary, if the document is encrypted.
+    ///
+    /// The `/Encrypt` dictionary's own verifier strings (`/O`, `/U`, `/OE`,
+    /// `/UE`, `/Perms`) are **not** encrypted (PDF 32000-1 §7.6.1). They must
+    /// therefore be read WITHOUT the per-object decryption pass that
+    /// [`Self::get_object`] applies — otherwise the reader would AES/RC4-decrypt
+    /// the plaintext verifiers and corrupt them (e.g. a 16-byte `/Perms`
+    /// decrypts to empty). We parse the `/Encrypt` object straight from the file
+    /// bytes, exactly as encryption setup does. Returns `None` for unencrypted
+    /// documents and on any parse failure.
+    pub fn encrypt_dictionary(&self) -> Option<PdfDictionary> {
+        let encrypt = self.trailer.get("Encrypt")?;
+        resolve_encrypt_dict(&self.data, &self.xref, encrypt).ok().flatten()
+    }
+
     pub fn trailer(&self) -> &PdfDictionary {
         &self.trailer
     }
@@ -118,6 +158,50 @@ impl PdfReader {
 
     pub fn root_reference(&self) -> Option<(u32, u16)> {
         self.trailer.get_reference("Root")
+    }
+
+    /// The first element of the trailer `/ID` array, if present. The PDF
+    /// writer copies this into manipulated output so the produced file keeps a
+    /// stable identifier derived from a source document.
+    pub fn first_file_id(&self) -> Option<Vec<u8>> {
+        match self.trailer.get("ID") {
+            Some(PdfObject::Array(arr)) => match arr.first() {
+                Some(PdfObject::String(bytes)) => Some(bytes.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The trailer `/Info` reference, if present. The document information
+    /// dictionary holds metadata (Title, Author, Producer, …); the PDF writer
+    /// copies it into rewritten/manipulated output when available.
+    pub fn info_reference(&self) -> Option<(u32, u16)> {
+        self.trailer.get_reference("Info")
+    }
+
+    /// Enumerate every in-use indirect object id `(number, generation)` known
+    /// to the cross-reference table, in ascending object-number order.
+    ///
+    /// Free entries (object 0 and any other `f` entries) are excluded, as are
+    /// compressed *container* streams' sub-objects' duplicates — each logical
+    /// object appears once. Objects stored inside an object stream
+    /// (`XrefEntry::Compressed`) are reported with the generation `0` the xref
+    /// stream assigns them, so they can be fetched via [`Self::get_object`].
+    ///
+    /// This is the enumeration the [`crate::writer`] uses for a faithful
+    /// whole-document round-trip (copy every object, identity-renumber, emit a
+    /// fresh file). For page-level manipulation (merge/split/extract) the
+    /// writer instead walks a dependency closure and never needs this.
+    pub fn object_ids(&self) -> Vec<(u32, u16)> {
+        let mut ids: Vec<(u32, u16)> = self
+            .xref
+            .iter()
+            .filter(|(_, entry)| !matches!(entry, XrefEntry::Free))
+            .map(|((number, generation), _)| (*number, *generation))
+            .collect();
+        ids.sort_unstable();
+        ids
     }
 
     pub fn get_object(&self, number: u32, generation: u16) -> Result<PdfObject> {
@@ -142,7 +226,10 @@ impl PdfReader {
                 // of decrypting the containing ObjStm, so they must NOT be
                 // decrypted again here (PDF 32000-1 §7.6.2 note).
                 self.ensure_object_stream_cached(stream_obj)?;
-                let cache = self.object_stream_cache.borrow();
+                let cache = self
+                    .object_stream_cache
+                    .read()
+                    .expect("object stream cache lock poisoned");
                 let objects = cache
                     .get(&stream_obj)
                     .ok_or(OxideError::MissingObject { number, generation })?;
@@ -187,6 +274,7 @@ impl PdfReader {
                 obj_num,
                 gen_num,
                 ctx.is_aes,
+                ctx.is_v5,
             )),
             PdfObject::Stream { dict, raw } => {
                 match dict.get_name("Type") {
@@ -196,7 +284,7 @@ impl PdfReader {
                     Some("Metadata") if !ctx.encrypt_metadata => PdfObject::Stream { dict, raw },
                     _ => {
                         let decrypted =
-                            decrypt_stream(&raw, &ctx.file_key, obj_num, gen_num, ctx.is_aes);
+                            decrypt_stream(&raw, &ctx.file_key, obj_num, gen_num, ctx.is_aes, ctx.is_v5);
                         // String values inside the stream dictionary are also
                         // encrypted; decrypt them too.
                         let dict = match self.decrypt_object_inner(
@@ -274,12 +362,26 @@ impl PdfReader {
     }
 
     fn ensure_object_stream_cached(&self, stream_obj: u32) -> Result<()> {
-        if self.object_stream_cache.borrow().contains_key(&stream_obj) {
+        // Fast path: already cached. Release the read lock before doing any
+        // parsing work.
+        if self
+            .object_stream_cache
+            .read()
+            .expect("object stream cache lock poisoned")
+            .contains_key(&stream_obj)
+        {
             return Ok(());
         }
+        // Parse WITHOUT holding the lock: `parse_object_stream` calls back into
+        // `get_object`, which may itself acquire this lock for a *different*
+        // object stream. Holding the write lock across that recursion would
+        // deadlock. Parsing the same stream twice under a race is harmless and
+        // idempotent (the result is value-identical), so we accept that and let
+        // the last writer win.
         let objects = self.parse_object_stream(stream_obj)?;
         self.object_stream_cache
-            .borrow_mut()
+            .write()
+            .expect("object stream cache lock poisoned")
             .insert(stream_obj, objects);
         Ok(())
     }
@@ -302,18 +404,6 @@ impl PdfReader {
     }
 }
 
-/// Detect and initialise the decryption context from the trailer's `/Encrypt`
-/// entry.
-///
-/// Returns:
-/// - `Ok(None)` when the document is not encrypted.
-/// - `Ok(Some(ctx))` when it is encrypted and a password (supplied or empty)
-///   successfully verifies against `/U`.
-/// - `Err(OxideError::EncryptedPdf(_))` when it is encrypted but no password
-///   verifies (truly password-protected).
-/// - `Err(OxideError::EncryptedDocument)` when the `/Encrypt` dictionary is
-///   present but malformed/unsupported in a way that predates this handler
-///   (preserves the historical error surface for those inputs).
 fn setup_encryption(
     data: &[u8],
     xref: &HashMap<(u32, u16), XrefEntry>,
@@ -329,18 +419,14 @@ fn setup_encryption(
         None => return Err(OxideError::EncryptedDocument),
     };
 
-    // A malformed or unsupported /Encrypt dictionary maps to the historical
-    // EncryptedDocument error; a well-formed one that we can attempt is handled
-    // below and maps to EncryptedPdf on password failure.
     let info = match EncryptionInfo::from_dict(&encrypt_dict) {
         Ok(info) => info,
         Err(_) => return Err(OxideError::EncryptedDocument),
     };
 
-    if info.cf_method == CryptMethod::AesV3 {
-        return Err(OxideError::UnsupportedFeature(
-            "AES-256 (V5/R6) encryption is not yet supported".to_string(),
-        ));
+    // V5 (AES-256, R5/R6) — entirely different key derivation path.
+    if info.is_v5() {
+        return setup_encryption_v5(password, &info);
     }
 
     let file_id = extract_file_id(trailer);
@@ -359,9 +445,76 @@ fn setup_encryption(
             return Ok(Some(EncryptionContext {
                 file_key,
                 is_aes: info.is_aes(),
+                is_v5: false,
                 encrypt_metadata: info.encrypt_metadata,
             }));
         }
+    }
+
+    Err(OxideError::EncryptedPdf(
+        "PDF is password-protected; provide the correct password".to_string(),
+    ))
+}
+
+/// Set up decryption for a V5 (AES-256, R5/R6) document.
+///
+/// Tries the supplied password as a user password, then as an owner password,
+/// then both again with the empty password as a fallback.
+fn setup_encryption_v5(
+    password: &[u8],
+    info: &EncryptionInfo,
+) -> Result<Option<EncryptionContext>> {
+    // Build candidate list: supplied pwd first (user then owner), then empty pwd fallback.
+    struct Candidate<'a> {
+        pwd: &'a [u8],
+        is_owner: bool,
+    }
+
+    let mut candidates: Vec<Candidate> = Vec::new();
+    if !password.is_empty() {
+        candidates.push(Candidate { pwd: password, is_owner: false });
+        candidates.push(Candidate { pwd: password, is_owner: true });
+    }
+    // Always try empty password as fallback (permission-only encryption).
+    candidates.push(Candidate { pwd: b"", is_owner: false });
+    candidates.push(Candidate { pwd: b"", is_owner: true });
+
+    for c in &candidates {
+        let verified = if c.is_owner {
+            verify_v5_owner_password(c.pwd, info)
+        } else {
+            verify_v5_user_password(c.pwd, info)
+        };
+
+        if !verified {
+            continue;
+        }
+
+        let file_key_result = if c.is_owner {
+            derive_v5_file_key_from_owner(c.pwd, info)
+        } else {
+            derive_v5_file_key_from_user(c.pwd, info)
+        };
+
+        let file_key = match file_key_result {
+            Ok(k) => k,
+            Err(_) => continue,
+        };
+
+        // /Perms verification: confirms the file key is correct and
+        // permissions haven't been tampered with. Log a warning on failure
+        // but don't reject — some writers produce slightly non-conformant
+        // /Perms blocks while the key itself is correct.
+        if !verify_v5_perms(&file_key, info) {
+            log::warn!("V5 /Perms magic-byte check failed; proceeding with derived key");
+        }
+
+        return Ok(Some(EncryptionContext {
+            file_key,
+            is_aes: false, // V5 uses AES-256 directly, not the is_aes (AES-128) flag
+            is_v5: true,
+            encrypt_metadata: info.encrypt_metadata,
+        }));
     }
 
     Err(OxideError::EncryptedPdf(
@@ -683,7 +836,14 @@ pub(crate) fn parse_object_stream_data(
     }
     let header = &decoded[..first];
     let mut pos = 0usize;
-    let mut table = Vec::with_capacity(n);
+    // `n` is the attacker-controlled `/N` count. Each table entry consumes at
+    // least one byte of the `first`-byte header (two whitespace-separated
+    // integer tokens), so a genuine stream can hold at most `first` entries.
+    // Cap the preallocation hint at that bound: a crafted `/N 4000000000` in a
+    // tiny stream must not reserve gigabytes before the per-entry loop rejects
+    // the truncated header. The loop below still reads exactly `n` entries and
+    // errors cleanly once the header runs out of tokens.
+    let mut table = Vec::with_capacity(n.min(first));
     for index in 0..n {
         let object_number = read_u64_token(header, &mut pos)?;
         let offset = read_u64_token(header, &mut pos)?;
@@ -987,6 +1147,21 @@ mod tests {
         assert_eq!(
             objects.get(&11).unwrap().1,
             PdfObject::Name("Name".to_string())
+        );
+    }
+
+    #[test]
+    fn object_stream_huge_n_does_not_allocate_or_panic() {
+        // A crafted object stream declaring a colossal /N count in a tiny
+        // buffer must NOT preallocate gigabytes (OOM) — the capacity hint is
+        // bounded by the header length — and must return a clean error once
+        // the header runs out of tokens. Regression for the unbounded
+        // `Vec::with_capacity(n)` allocation (fuzz finding: ObjStm /N OOM).
+        let decoded = b"10 0 true";
+        let result = parse_object_stream_data(decoded, usize::MAX, 5, None);
+        assert!(
+            result.is_err(),
+            "huge /N over a short header must error, not allocate or panic"
         );
     }
 }
