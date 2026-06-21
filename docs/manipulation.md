@@ -144,6 +144,72 @@ limitations):
 
 These are flagged as future enhancements, not silent omissions.
 
+## Structural-write operations (Bucket 2)
+
+These document-mutating ops build on a **content-preserving** rewrite
+(`writer::rewrite_document`) that copies the whole object graph — so unlike
+merge/split they **keep** AcroForm fields, outlines, annotations, and the
+structure tree. CLI + library API for each:
+
+### `oxide encrypt` (`oxide_engine::encrypt`)
+
+Encrypts with the Standard Security Handler, reusing the read-side key-
+derivation primitives in the write direction. `--algo aes256` (V5/R6, the
+secure **default**), `aes128` (V4/R4), or `rc4` (V2/R3); `--user-pw`,
+`--owner-pw`, `--permissions` (signed `/P` bitmask).
+
+- **AES-256 is the verified, interoperable default**: qpdf and Poppler decrypt
+  Oxide's AES-256 output with both the user and owner password, and Oxide reads
+  theirs. Round-trip content is exact.
+- **RC4-128 / AES-128 are legacy/compat** and round-trip through Oxide's own
+  reader, but Oxide's legacy V4 crypt-filter handling has a deviation other
+  readers don't accept, so cross-reader interop is **not** guaranteed for the
+  legacy algorithms — the CLI warns when one is selected. Prefer AES-256.
+- Encrypted output is **not byte-deterministic** (random IV/salt/file key per
+  the spec); the **decrypted content** is deterministic.
+
+### `oxide rotate` (`oxide_engine::rotate_pages`)
+
+Sets `/Rotate` (0/90/180/270, normalized) on `--pages` (default all),
+`--angle N` absolute or `--relative` (offset from each page's current effective
+rotation). Written on the leaf page objects; the whole document is otherwise
+preserved. Re-parsing shows the new rotation and the read-side honors it, so
+render/extract stay consistent.
+
+### `oxide optimize` (`oxide_engine::optimize`)
+
+Produces a smaller, cleaner PDF **without changing visible content**:
+- garbage-collects objects unreachable from the catalog (the rewrite copies
+  only live objects, dropping dead ones and stale `/Type /XRef` streams);
+- recompresses **uncompressed** content streams with `FlateDecode` when smaller.
+  Image-codec streams (`DCTDecode`/`JPX`/`CCITT`/`JBIG2`) and already-filtered
+  streams are left untouched — no lossy re-encoding, image fidelity preserved.
+- **Visually safe**: a rendered page of the output is byte-identical to the
+  original under the same renderer (asserted in `tests/structural_ops.rs`; the
+  0B harness is the belt-and-braces check).
+- Note: a file that was already **object-stream / xref-stream packed** (PDF 1.5+)
+  may grow, because the writer emits classic objects + a classic xref (object-
+  stream packing is not yet implemented — see Future enhancements). The op
+  reports input/output bytes so the effect is visible.
+
+### `oxide repair` (`oxide_engine::repair`)
+
+Persists the reader's recovery (missing `%%EOF`, stale classic-xref offsets,
+misplaced `xref`, bad/oversized/missing stream `/Length`) as a clean, normalized
+PDF with a fresh xref + trailer + corrected lengths. Best-effort salvage:
+unrecoverable objects are dropped; inputs so damaged the xref/trailer can't be
+located at all (e.g. `startxref` past EOF, truncated files) currently fail to
+open and so can't be repaired — a from-scratch object scan + trailer synthesis
+is recorded as future work. Repaired output is unencrypted.
+
+### `oxide linearize` — deferred
+
+Linearization (fast web view) is **not implemented**: it needs cross-reference-
+stream + object-stream output and a precise two-pass object/offset layout with
+hint streams (ISO 32000 Annex F) that the current classic-xref writer lacks.
+The command and `structural::linearize::linearize()` return an explicit error
+with that diagnosis rather than emitting a non-linearized file.
+
 ## Validation
 
 The writer is validated three ways (see `crates/engine/tests/writer.rs`):
@@ -166,10 +232,19 @@ The writer is validated three ways (see `crates/engine/tests/writer.rs`):
 
 ## Future enhancements
 
-- Re-encryption of manipulation output.
-- Carrying AcroForm fields, outlines, named destinations, and page annotations.
-- Cross-reference **streams** (PDF 1.5+) and object streams in output (smaller
-  files).
-- Stream re-compression of uncompressed inputs.
-- Server endpoints (`POST /api/v1/{merge,split,extract-pages}`) — deferred this
-  round; the CLI is complete.
+- **Linearization** (fast web view) — deferred; needs xref/object-stream output
+  (see above).
+- **Object-stream / cross-reference-stream output** (PDF 1.5+) so `optimize`
+  shrinks object-heavy / already-packed files instead of growing them.
+- **Cross-reader-interoperable legacy (V4) encryption** — AES-256 is verified;
+  the RC4/AES-128 V4 crypt-filter path needs a spec-conformance fix for qpdf/
+  Poppler interop.
+- **From-scratch xref/trailer rebuild** in `repair` for inputs where the
+  cross-reference can't be located at all.
+- Carrying AcroForm/outlines/annotations through **merge/split** (the Bucket-2
+  ops already preserve them via the content-preserving rewrite).
+- Server endpoints for the structural ops — deferred; the CLI + library are
+  complete.
+
+Done this round (Bucket 2): `encrypt` (AES-256 verified), `rotate`, `optimize`
+(GC + recompression, visually safe), `repair` (persisted recovery).
