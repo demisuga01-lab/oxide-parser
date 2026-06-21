@@ -2,6 +2,97 @@ use crate::content::BlendMode;
 use crate::images::decoder::RawImage;
 use crate::render::path::{FillRule, FlatPath};
 
+/// Gamma-correct compositing helpers.
+///
+/// Antialiasing and alpha compositing are physically a mixing of *light*, and
+/// light adds linearly — but 8-bit sRGB pixel values are **gamma-encoded**, so
+/// blending them directly (the common shortcut, and what Poppler's Splash
+/// backend does) mixes in the wrong space. The visible symptom is that
+/// antialiased edges (especially dark text on a light background) come out too
+/// dark, producing a "halo"/over-bold look. Converting sRGB → linear, mixing
+/// there, and converting back yields edges and transparency that are
+/// measurably closer to ground truth.
+///
+/// The conversions use 8-bit → f32 lookup tables (decode) and a 4096-entry
+/// linear → 8-bit table (encode), so the hot path is two table lookups per
+/// channel with no `powf` calls.
+#[allow(dead_code)]
+pub(crate) mod gamma {
+    use std::sync::OnceLock;
+
+    fn srgb_to_linear_table() -> &'static [f32; 256] {
+        static TABLE: OnceLock<[f32; 256]> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut t = [0.0f32; 256];
+            for (i, slot) in t.iter_mut().enumerate() {
+                let c = i as f32 / 255.0;
+                *slot = if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                };
+            }
+            t
+        })
+    }
+
+    const ENC_SIZE: usize = 4096;
+
+    fn linear_to_srgb_table() -> &'static [u8; ENC_SIZE] {
+        static TABLE: OnceLock<[u8; ENC_SIZE]> = OnceLock::new();
+        TABLE.get_or_init(|| {
+            let mut t = [0u8; ENC_SIZE];
+            for (i, slot) in t.iter_mut().enumerate() {
+                let lin = i as f32 / (ENC_SIZE as f32 - 1.0);
+                let s = if lin <= 0.003_130_8 {
+                    lin * 12.92
+                } else {
+                    1.055 * lin.powf(1.0 / 2.4) - 0.055
+                };
+                *slot = (s * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+            t
+        })
+    }
+
+    /// Decode an 8-bit sRGB component to linear light.
+    #[inline]
+    pub fn to_linear(byte: u8) -> f32 {
+        srgb_to_linear_table()[byte as usize]
+    }
+
+    /// Encode a linear-light value in [0, 1] back to an 8-bit sRGB component.
+    #[inline]
+    pub fn to_srgb(linear: f32) -> u8 {
+        let idx = (linear.clamp(0.0, 1.0) * (ENC_SIZE as f32 - 1.0)).round() as usize;
+        linear_to_srgb_table()[idx.min(ENC_SIZE - 1)]
+    }
+
+    /// Decode a normalised sRGB component in [0, 1] to linear light (the exact
+    /// analytic transfer function — used where the value is already an f32, as
+    /// in [`crate::render::color::RenderColor`]).
+    #[inline]
+    pub fn to_linear_f32(c: f32) -> f32 {
+        let c = c.clamp(0.0, 1.0);
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    /// Encode a linear-light value in [0, 1] back to a normalised sRGB f32.
+    #[inline]
+    pub fn to_srgb_f32(lin: f32) -> f32 {
+        let lin = lin.clamp(0.0, 1.0);
+        if lin <= 0.003_130_8 {
+            lin * 12.92
+        } else {
+            1.055 * lin.powf(1.0 / 2.4) - 0.055
+        }
+    }
+}
+
 /// RGBA color: [R, G, B, A] each 0-255.
 pub type PixelColor = [u8; 4];
 
@@ -11,6 +102,41 @@ pub const TRANSPARENT: PixelColor = [0, 0, 0, 0];
 pub const RED: PixelColor = [255, 0, 0, 255];
 pub const GREEN: PixelColor = [0, 255, 0, 255];
 pub const BLUE: PixelColor = [0, 0, 255, 255];
+
+/// Raster compositing mode.
+///
+/// `Compat` is the default Poppler/Splash-compatible path: antialiased coverage
+/// and transparency are composited directly in sRGB byte space. `HighQuality`
+/// keeps the same geometry and AA coverage but performs RGB compositing in
+/// linear light for opt-in display fidelity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    #[default]
+    Compat,
+    HighQuality,
+}
+
+impl RenderMode {
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "compat" | "compatible" | "poppler" | "proof" => Some(Self::Compat),
+            "high" | "high-quality" | "highquality" | "hq" => Some(Self::HighQuality),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compat => "compat",
+            Self::HighQuality => "high",
+        }
+    }
+
+    #[inline]
+    pub fn is_high_quality(self) -> bool {
+        matches!(self, Self::HighQuality)
+    }
+}
 
 /// Create a PixelColor with full alpha.
 pub fn rgb(r: u8, g: u8, b: u8) -> PixelColor {
@@ -354,11 +480,61 @@ fn ceil_i32(value: f64) -> i32 {
     }
 }
 
+fn blend_backdrop_rgb(blend_mode: BlendMode, src_rgb: [f32; 3], dst_rgb: [f32; 3]) -> [f32; 3] {
+    if blend_mode.is_separable() {
+        [
+            blend_mode.blend_channel(src_rgb[0], dst_rgb[0]),
+            blend_mode.blend_channel(src_rgb[1], dst_rgb[1]),
+            blend_mode.blend_channel(src_rgb[2], dst_rgb[2]),
+        ]
+    } else {
+        blend_mode.blend_rgb(src_rgb, dst_rgb)
+    }
+}
+
+fn composite_source_over(
+    src_rgb: [f32; 3],
+    src_alpha: f32,
+    dst_rgb: [f32; 3],
+    dst_alpha: f32,
+    blend_mode: BlendMode,
+) -> ([f32; 3], f32) {
+    let src_alpha = src_alpha.clamp(0.0, 1.0);
+    let dst_alpha = dst_alpha.clamp(0.0, 1.0);
+    let blended_rgb = if dst_alpha <= 1e-6 {
+        src_rgb
+    } else {
+        blend_backdrop_rgb(blend_mode, src_rgb, dst_rgb)
+    };
+    let source_contribution = [
+        src_rgb[0] * (1.0 - dst_alpha) + blended_rgb[0] * dst_alpha,
+        src_rgb[1] * (1.0 - dst_alpha) + blended_rgb[1] * dst_alpha,
+        src_rgb[2] * (1.0 - dst_alpha) + blended_rgb[2] * dst_alpha,
+    ];
+    let out_alpha = src_alpha + dst_alpha * (1.0 - src_alpha);
+
+    if out_alpha < 1e-6 {
+        return ([0.0, 0.0, 0.0], 0.0);
+    }
+
+    let inv_alpha = 1.0 / out_alpha;
+    let out_rgb = [
+        (source_contribution[0] * src_alpha + dst_rgb[0] * dst_alpha * (1.0 - src_alpha))
+            * inv_alpha,
+        (source_contribution[1] * src_alpha + dst_rgb[1] * dst_alpha * (1.0 - src_alpha))
+            * inv_alpha,
+        (source_contribution[2] * src_alpha + dst_rgb[2] * dst_alpha * (1.0 - src_alpha))
+            * inv_alpha,
+    ];
+    (out_rgb, out_alpha)
+}
+
 #[derive(Debug, Clone)]
 pub struct PixelBuffer {
     pub width: u32,
     pub height: u32,
     pub blend_mode: BlendMode,
+    render_mode: RenderMode,
     data: Vec<u8>,
     clip: Option<ClipMask>,
     smask: Option<AlphaMask>,
@@ -367,6 +543,11 @@ pub struct PixelBuffer {
 impl PixelBuffer {
     /// Allocate a new transparent buffer.
     pub fn new(width: u32, height: u32) -> Self {
+        Self::new_with_mode(width, height, RenderMode::Compat)
+    }
+
+    /// Allocate a new transparent buffer with an explicit render mode.
+    pub fn new_with_mode(width: u32, height: u32, render_mode: RenderMode) -> Self {
         let len = (width as usize)
             .checked_mul(height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
@@ -375,6 +556,7 @@ impl PixelBuffer {
             width,
             height,
             blend_mode: BlendMode::Normal,
+            render_mode,
             data: vec![0u8; len],
             clip: None,
             smask: None,
@@ -386,11 +568,30 @@ impl PixelBuffer {
         Self::new(width, height)
     }
 
+    /// Allocate a fully transparent buffer with an explicit render mode.
+    pub fn new_transparent_with_mode(width: u32, height: u32, render_mode: RenderMode) -> Self {
+        Self::new_with_mode(width, height, render_mode)
+    }
+
     /// Allocate and fill with the given color.
     pub fn new_filled(width: u32, height: u32, color: PixelColor) -> Self {
-        let mut buf = Self::new(width, height);
+        Self::new_filled_with_mode(width, height, color, RenderMode::Compat)
+    }
+
+    /// Allocate and fill with the given color and render mode.
+    pub fn new_filled_with_mode(
+        width: u32,
+        height: u32,
+        color: PixelColor,
+        render_mode: RenderMode,
+    ) -> Self {
+        let mut buf = Self::new_with_mode(width, height, render_mode);
         buf.fill(color);
         buf
+    }
+
+    pub fn render_mode(&self) -> RenderMode {
+        self.render_mode
     }
 
     fn pixel_index(&self, x: i32, y: i32) -> Option<usize> {
@@ -457,32 +658,31 @@ impl PixelBuffer {
             return;
         }
 
-        let dst_r = self.data[idx] as f32 / 255.0;
-        let dst_g = self.data[idx + 1] as f32 / 255.0;
-        let dst_b = self.data[idx + 2] as f32 / 255.0;
-        let dst_a = self.data[idx + 3] as f32 / 255.0;
-        let src_r = color[0] as f32 / 255.0;
-        let src_g = color[1] as f32 / 255.0;
-        let src_b = color[2] as f32 / 255.0;
+        // Compositing is done in sRGB (gamma) space — the channel values as
+        // stored — to match the reference renderer (Poppler/Splash), which is the
+        // visual-proof target. The source-over weighted sum and the blend-mode
+        // functions operate directly on the normalised sRGB channels [0,1]. (An
+        // earlier revision composited in linear light, which is arguably more
+        // physically correct but diverged from Poppler on every semi-transparent
+        // fill; the benchmark reference wins here.)
+        if self.render_mode.is_high_quality() {
+            self.blend_pixel_linear_light(idx, color, eff_a);
+            return;
+        }
 
-        let (blend_r, blend_g, blend_b) = if dst_a <= 1e-6 {
-            (src_r, src_g, src_b)
-        } else {
-            let bm = self.blend_mode;
-            if bm.is_separable() {
-                (
-                    bm.blend_channel(src_r, dst_r),
-                    bm.blend_channel(src_g, dst_g),
-                    bm.blend_channel(src_b, dst_b),
-                )
-            } else {
-                // Non-separable modes (Hue/Saturation/Color/Luminosity) operate
-                // on the whole RGB triple, not per channel.
-                let [r, g, b] = bm.blend_rgb([src_r, src_g, src_b], [dst_r, dst_g, dst_b]);
-                (r, g, b)
-            }
-        };
-        let out_a = eff_a + dst_a * (1.0 - eff_a);
+        let dst_rgb = [
+            self.data[idx] as f32 / 255.0,
+            self.data[idx + 1] as f32 / 255.0,
+            self.data[idx + 2] as f32 / 255.0,
+        ];
+        let dst_a = self.data[idx + 3] as f32 / 255.0;
+        let src_rgb = [
+            color[0] as f32 / 255.0,
+            color[1] as f32 / 255.0,
+            color[2] as f32 / 255.0,
+        ];
+        let (out_rgb, out_a) =
+            composite_source_over(src_rgb, eff_a, dst_rgb, dst_a, self.blend_mode);
 
         if out_a < 1e-6 {
             self.data[idx] = 0;
@@ -492,13 +692,39 @@ impl PixelBuffer {
             return;
         }
 
-        let inv_a = 1.0 / out_a;
-        self.data[idx] = ((blend_r * eff_a + dst_r * dst_a * (1.0 - eff_a)) * inv_a * 255.0)
-            .clamp(0.0, 255.0) as u8;
-        self.data[idx + 1] = ((blend_g * eff_a + dst_g * dst_a * (1.0 - eff_a)) * inv_a * 255.0)
-            .clamp(0.0, 255.0) as u8;
-        self.data[idx + 2] = ((blend_b * eff_a + dst_b * dst_a * (1.0 - eff_a)) * inv_a * 255.0)
-            .clamp(0.0, 255.0) as u8;
+        let to_byte = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        self.data[idx] = to_byte(out_rgb[0]);
+        self.data[idx + 1] = to_byte(out_rgb[1]);
+        self.data[idx + 2] = to_byte(out_rgb[2]);
+        self.data[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
+    }
+
+    fn blend_pixel_linear_light(&mut self, idx: usize, color: PixelColor, eff_a: f32) {
+        let dst_rgb = [
+            gamma::to_linear(self.data[idx]),
+            gamma::to_linear(self.data[idx + 1]),
+            gamma::to_linear(self.data[idx + 2]),
+        ];
+        let dst_a = self.data[idx + 3] as f32 / 255.0;
+        let src_rgb = [
+            gamma::to_linear(color[0]),
+            gamma::to_linear(color[1]),
+            gamma::to_linear(color[2]),
+        ];
+        let (out_rgb, out_a) =
+            composite_source_over(src_rgb, eff_a, dst_rgb, dst_a, self.blend_mode);
+
+        if out_a < 1e-6 {
+            self.data[idx] = 0;
+            self.data[idx + 1] = 0;
+            self.data[idx + 2] = 0;
+            self.data[idx + 3] = 0;
+            return;
+        }
+
+        self.data[idx] = gamma::to_srgb(out_rgb[0]);
+        self.data[idx + 1] = gamma::to_srgb(out_rgb[1]);
+        self.data[idx + 2] = gamma::to_srgb(out_rgb[2]);
         self.data[idx + 3] = (out_a * 255.0).clamp(0.0, 255.0) as u8;
     }
 
@@ -634,6 +860,46 @@ impl PixelBuffer {
         out
     }
 
+    /// Flatten this straight-alpha buffer onto an opaque background.
+    ///
+    /// PDF pages are transparency groups: page content starts transparent, then
+    /// the finished page is composited onto the output medium. PNG/JPEG render
+    /// outputs use white paper as that medium, but blend modes must not see that
+    /// white as their initial backdrop while the page content is still painting.
+    pub fn flatten_onto_background(&mut self, background: PixelColor) {
+        let bg_a = background[3] as f32 / 255.0;
+        for chunk in self.data.chunks_exact_mut(4) {
+            let src_a = chunk[3] as f32 / 255.0;
+            if src_a >= 1.0 && bg_a >= 1.0 {
+                chunk[3] = 255;
+                continue;
+            }
+
+            let out_a = src_a + bg_a * (1.0 - src_a);
+            if out_a <= 1e-6 {
+                chunk.copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+
+            if self.render_mode.is_high_quality() {
+                for c in 0..3 {
+                    let src = gamma::to_linear(chunk[c]);
+                    let bg = gamma::to_linear(background[c]);
+                    let out = (src * src_a + bg * bg_a * (1.0 - src_a)) / out_a;
+                    chunk[c] = gamma::to_srgb(out);
+                }
+            } else {
+                for c in 0..3 {
+                    let src = chunk[c] as f32 / 255.0;
+                    let bg = background[c] as f32 / 255.0;
+                    let out = (src * src_a + bg * bg_a * (1.0 - src_a)) / out_a;
+                    chunk[c] = (out * 255.0).round().clamp(0.0, 255.0) as u8;
+                }
+            }
+            chunk[3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
     /// Return RGBA bytes.
     pub fn to_rgba_bytes(&self) -> Vec<u8> {
         self.data.clone()
@@ -685,6 +951,14 @@ impl PixelBuffer {
         }
         let saved_blend = self.blend_mode;
         self.blend_mode = blend_mode;
+        // The caller passes the active page soft mask as `soft_mask`; that is the
+        // single source of masking for this group-flatten composite. `blend_pixel`
+        // would *also* multiply by `self.smask` (the same page mask, still installed
+        // on this buffer), squaring the mask (e.g. 0.5 -> 0.25) — confirmed against
+        // Poppler/Splash, which applies the soft mask exactly once. Temporarily
+        // detach `self.smask` for the duration of the composite and restore it
+        // afterwards so subsequent direct paints under the same /SMask stay masked.
+        let saved_smask = self.smask.take();
         let w = self.width.min(src.width) as i32;
         let h = self.height.min(src.height) as i32;
         for y in 0..h {
@@ -706,6 +980,7 @@ impl PixelBuffer {
             }
         }
         self.blend_mode = saved_blend;
+        self.smask = saved_smask;
     }
 
     /// Remove a backdrop's contribution from this buffer (a non-isolated
@@ -829,8 +1104,21 @@ mod tests {
     #[test]
     fn new_buffer_is_transparent() {
         let buf = PixelBuffer::new(4, 4);
+        assert_eq!(buf.render_mode(), RenderMode::Compat);
         assert_eq!(buf.get_pixel(0, 0), TRANSPARENT);
         assert_eq!(buf.get_pixel(3, 3), TRANSPARENT);
+    }
+
+    #[test]
+    fn render_mode_names_parse() {
+        assert_eq!(RenderMode::from_name("compat"), Some(RenderMode::Compat));
+        assert_eq!(RenderMode::from_name("high"), Some(RenderMode::HighQuality));
+        assert_eq!(
+            RenderMode::from_name("high-quality"),
+            Some(RenderMode::HighQuality)
+        );
+        assert_eq!(RenderMode::from_name("unknown"), None);
+        assert_eq!(RenderMode::HighQuality.as_str(), "high");
     }
 
     #[test]
@@ -870,6 +1158,46 @@ mod tests {
     }
 
     #[test]
+    fn gamma_tables_round_trip_endpoints() {
+        // Black and white survive the linear round trip exactly.
+        assert_eq!(gamma::to_srgb(gamma::to_linear(0)), 0);
+        assert_eq!(gamma::to_srgb(gamma::to_linear(255)), 255);
+        // Mid-gray sRGB 128 decodes to ~0.216 linear, re-encodes back to ~128.
+        let mid = gamma::to_srgb(gamma::to_linear(128));
+        assert!((mid as i32 - 128).abs() <= 1, "128 round-trips, got {mid}");
+        // sRGB 188 ~= 0.5 in linear light.
+        assert!((gamma::to_linear(188) - 0.5).abs() < 0.02);
+    }
+
+    #[test]
+    fn blend_50pct_black_over_white_is_srgb_midpoint() {
+        // Compositing is done in sRGB space to match the reference renderer
+        // (Poppler/Splash): 50% black over white lands at the sRGB midpoint 128,
+        // NOT the linear-light value ~188. This is the deliberate
+        // benchmark-matching behaviour (see the sRGB note in `blend_pixel`).
+        let mut buf = PixelBuffer::new_filled(1, 1, WHITE);
+        buf.blend_pixel(0, 0, BLACK, 0.5);
+        let p = buf.get_pixel(0, 0);
+        assert!(
+            (p[0] as i32 - 128).abs() <= 2,
+            "50% black over white should be ~128 (sRGB midpoint), got {}",
+            p[0]
+        );
+    }
+
+    #[test]
+    fn high_quality_blend_50pct_black_over_white_is_linear_light_midpoint() {
+        let mut buf = PixelBuffer::new_filled_with_mode(1, 1, WHITE, RenderMode::HighQuality);
+        buf.blend_pixel(0, 0, BLACK, 0.5);
+        let p = buf.get_pixel(0, 0);
+        assert!(
+            (p[0] as i32 - 188).abs() <= 2,
+            "50% black over white should be ~188 in linear light, got {}",
+            p[0]
+        );
+    }
+
+    #[test]
     fn blend_pixel_with_zero_coverage_is_no_op() {
         let mut buf = PixelBuffer::new(1, 1);
         buf.fill(WHITE);
@@ -883,6 +1211,23 @@ mod tests {
         buf.set_pixel(0, 0, [255, 0, 0, 128]);
         buf.set_pixel(1, 0, [0, 255, 0, 255]);
         assert_eq!(buf.to_rgb_bytes(), vec![255, 0, 0, 0, 255, 0]);
+    }
+
+    #[test]
+    fn flatten_onto_background_outputs_opaque_white_paper() {
+        let mut buf = PixelBuffer::new_transparent(2, 1);
+        buf.set_pixel(0, 0, [0, 0, 255, 128]);
+        buf.flatten_onto_background(WHITE);
+
+        assert_eq!(buf.get_pixel(1, 0), WHITE);
+        let p = buf.get_pixel(0, 0);
+        assert_eq!(p[3], 255);
+        assert!(p[2] > 240, "blue channel stays high: {:?}", p);
+        assert!(
+            (p[0] as i32 - 127).abs() <= 2 && (p[1] as i32 - 127).abs() <= 2,
+            "transparent blue flattens over white: {:?}",
+            p
+        );
     }
 
     #[test]
@@ -1063,6 +1408,36 @@ mod tests {
         assert_eq!(BlendMode::from_name("Unknown"), BlendMode::Normal);
     }
 
+    /// Spec-formula exact assertions for the cases that historically diverged:
+    /// Screen over white (the object vanishes — `B(1, cs) = 1`) AND Multiply over
+    /// white (the source shows — `B(1, cs) = cs`), plus both over a mid-tone
+    /// backdrop. Both modes must be correct *simultaneously*; this table pins
+    /// that no fix to one mode can silently break the other.
+    #[test]
+    fn screen_and_multiply_over_white_and_midtone_both_correct() {
+        let white = 1.0_f32;
+        let mid = 0.5_f32;
+
+        // Screen over white: s + 1 - s*1 = 1 for every source -> object vanishes.
+        for &s in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            assert!(
+                (BlendMode::Screen.blend_channel(s, white) - 1.0).abs() < 1e-3,
+                "Screen({s}, white=1) must be 1 (object vanishes over white)"
+            );
+        }
+        // Multiply over white: s * 1 = s -> the source shows through.
+        for &s in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            assert!(
+                (BlendMode::Multiply.blend_channel(s, white) - s).abs() < 1e-3,
+                "Multiply({s}, white=1) must equal source {s} (source shows over white)"
+            );
+        }
+        // Mid-tone backdrop, the already-known anchors, kept here so the table
+        // is the single proof of simultaneous correctness.
+        assert!((BlendMode::Multiply.blend_channel(0.8, mid) - 0.4).abs() < 1e-3);
+        assert!((BlendMode::Screen.blend_channel(0.8, mid) - 0.9).abs() < 1e-3);
+    }
+
     #[test]
     fn multiply_blend_pixel_darkens_destination() {
         let mut buf = PixelBuffer::new_filled(1, 1, [200, 200, 200, 255]);
@@ -1078,13 +1453,39 @@ mod tests {
         buf.blend_mode = BlendMode::Screen;
         buf.blend_pixel(0, 0, [100, 100, 100, 255], 1.0);
         let result = buf.get_pixel(0, 0);
-        let mid = 100.0 / 255.0_f32;
-        let expected = ((mid + mid - mid * mid) * 255.0) as u8;
+        // Compositing is in sRGB space (matches Poppler). Screen in sRGB on the
+        // normalised channel: 1 - (1-c)(1-c) with c = 100/255.
+        let c = 100.0f32 / 255.0;
+        let screened = 1.0 - (1.0 - c) * (1.0 - c);
+        let expected = (screened * 255.0).round() as i32;
+        assert!(result[0] > 100, "Screen must lighten: {}", result[0]);
         assert!(
-            (result[0] as i32 - expected as i32).abs() <= 3,
+            (result[0] as i32 - expected).abs() <= 2,
             "Screen blend result: {} expected: {}",
             result[0],
             expected
+        );
+    }
+
+    #[test]
+    fn screen_over_partially_transparent_backdrop_matches_pdf_compositing() {
+        let mut buf = PixelBuffer::new_transparent(1, 1);
+        buf.blend_mode = BlendMode::Multiply;
+        buf.blend_pixel(0, 0, [255, 0, 0, 115], 1.0);
+        buf.blend_mode = BlendMode::Screen;
+        buf.blend_pixel(0, 0, [0, 0, 255, 140], 1.0);
+        buf.flatten_onto_background(WHITE);
+
+        let result = buf.get_pixel(0, 0);
+        assert!(
+            (result[0] as i32 - 178).abs() <= 2,
+            "red channel should include uncovered source contribution: {:?}",
+            result
+        );
+        assert!(
+            (result[1] as i32 - 63).abs() <= 2 && (result[2] as i32 - 203).abs() <= 2,
+            "green/blue channels should match PDF source-over blend math: {:?}",
+            result
         );
     }
 
@@ -1150,14 +1551,25 @@ mod tests {
     #[test]
     fn composite_from_half_alpha_red_over_white_is_pink() {
         // A fully-opaque red source composited at 50% group alpha onto white
-        // must produce the same pink as a 50%-alpha red paint: 255 / 127 / 127.
+        // must produce the same pink as a 50%-alpha red paint. With sRGB-space
+        // compositing (matching Poppler/Splash) the GREEN/BLUE channels mix 50%
+        // of black (red's G/B = 0) with white at the sRGB midpoint 128 (see
+        // `blend_50pct_black_over_white_is_srgb_midpoint`).
         let mut dst = PixelBuffer::new_filled(2, 2, WHITE);
         let src = PixelBuffer::new_filled(2, 2, RED);
         dst.composite_from(&src, 0.5, BlendMode::Normal, None);
         let p = dst.get_pixel(0, 0);
         assert_eq!(p[0], 255, "red channel stays max");
-        assert!((p[1] as i32 - 127).abs() <= 2, "green ~127, got {}", p[1]);
-        assert!((p[2] as i32 - 127).abs() <= 2, "blue ~127, got {}", p[2]);
+        assert!(
+            (p[1] as i32 - 128).abs() <= 2,
+            "green ~128 (sRGB), got {}",
+            p[1]
+        );
+        assert!(
+            (p[2] as i32 - 128).abs() <= 2,
+            "blue ~128 (sRGB), got {}",
+            p[2]
+        );
     }
 
     #[test]

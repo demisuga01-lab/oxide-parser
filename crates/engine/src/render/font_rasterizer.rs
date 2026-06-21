@@ -4,7 +4,7 @@ use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
 use crate::render::buffer::{PixelBuffer, PixelColor, BLACK};
 use crate::render::line::DashState;
-use crate::render::path::{FillRule, Path, PathPainter};
+use crate::render::path::{FillRule, GlyphHinting, Path, PathPainter};
 use crate::render::transform::{Transform2D, Viewport};
 use ttf_parser::OutlineBuilder;
 
@@ -267,23 +267,56 @@ pub(crate) mod cff_support {
         }
     }
 
-    /// Extract a glyph outline and advance for a Unicode scalar in a *simple*
-    /// (SID-keyed) CFF font, mapping the code point through the CFF encoding +
-    /// charset. Latin-1 code points only (CFF simple-font encoding is 8-bit).
-    /// Returns `None` when the font is not bare CFF.
-    pub(crate) fn outline_by_char(font_bytes: &[u8], ch: char) -> Option<(Option<Path>, f64)> {
+    /// Extract a glyph outline and advance for an original 8-bit PDF character
+    /// code in a *simple* (SID-keyed) CFF font, mapping the code through the
+    /// CFF encoding + charset. Returns `None` when the font is not bare CFF.
+    pub(crate) fn outline_by_code(font_bytes: &[u8], code: u8) -> Option<(Option<Path>, f64)> {
         let table = parse(font_bytes)?;
-        let code = u32::from(ch);
-        let glyph_id = if code <= 0xFF {
-            table.glyph_index(code as u8).unwrap_or(GlyphId(0))
-        } else {
-            GlyphId(0)
-        };
+        let glyph_id = table.glyph_index(code).unwrap_or(GlyphId(0));
         let advance = table.glyph_width(glyph_id).map(f64::from).unwrap_or(1000.0);
         let mut builder = GlyphToPath::new();
         match table.outline(glyph_id, &mut builder) {
             Ok(_) => Some((Some(builder.into_path()), advance)),
             Err(_) => Some((None, advance)),
+        }
+    }
+
+    /// Extract a glyph outline and advance by Adobe glyph name from a
+    /// SID-keyed CFF font. PDF `/Encoding /Differences` entries are glyph-name
+    /// based and override the CFF program's own 8-bit encoding, so this is the
+    /// preferred simple-font lookup whenever the PDF resolved a glyph name.
+    pub(crate) fn outline_by_name(
+        font_bytes: &[u8],
+        glyph_name: &str,
+    ) -> Option<(Option<Path>, f64)> {
+        let table = parse(font_bytes)?;
+        let glyph_id = table.glyph_index_by_name(glyph_name)?;
+        let advance = table.glyph_width(glyph_id).map(f64::from).unwrap_or(1000.0);
+        let mut builder = GlyphToPath::new();
+        match table.outline(glyph_id, &mut builder) {
+            Ok(_) => Some((Some(builder.into_path()), advance)),
+            Err(_) => Some((None, advance)),
+        }
+    }
+
+    /// Extract a glyph outline and advance for a Unicode scalar in a *simple*
+    /// (SID-keyed) CFF font. This is a fallback for callers that no longer have
+    /// the original PDF character code; prefer [`outline_by_code`] for PDF
+    /// simple fonts so high-byte WinAnsi punctuation does not collapse to
+    /// `.notdef`.
+    pub(crate) fn outline_by_char(font_bytes: &[u8], ch: char) -> Option<(Option<Path>, f64)> {
+        let code = u32::from(ch);
+        if code <= 0xFF {
+            outline_by_code(font_bytes, code as u8)
+        } else {
+            let table = parse(font_bytes)?;
+            let glyph_id = GlyphId(0);
+            let advance = table.glyph_width(glyph_id).map(f64::from).unwrap_or(1000.0);
+            let mut builder = GlyphToPath::new();
+            match table.outline(glyph_id, &mut builder) {
+                Ok(_) => Some((Some(builder.into_path()), advance)),
+                Err(_) => Some((None, advance)),
+            }
         }
     }
 }
@@ -338,14 +371,20 @@ impl FontRasterizer {
         let tm_t = Transform2D::from(*tm);
         let glyph_ctm = scale_t.concat(&tm_t).concat(ctm);
 
+        // Keep production glyph rendering on the non-distorting coverage path.
+        // Light grid-fitting is available to test but is deferred for default
+        // rendering until it improves Poppler comparisons instead of regressing.
+        let glyph_hinting = GlyphHinting::disabled();
+
         match render_mode {
-            0 | 4 => PathPainter::fill(
+            0 | 4 => PathPainter::fill_glyph(
                 buf,
                 &glyph_path,
                 &glyph_ctm,
                 viewport,
                 color,
                 FillRule::NonZero,
+                glyph_hinting,
             ),
             1 | 5 => PathPainter::stroke(
                 buf,
@@ -357,13 +396,14 @@ impl FontRasterizer {
                 &DashState::solid(),
             ),
             2 | 6 => {
-                PathPainter::fill(
+                PathPainter::fill_glyph(
                     buf,
                     &glyph_path,
                     &glyph_ctm,
                     viewport,
                     color,
                     FillRule::NonZero,
+                    glyph_hinting,
                 );
                 PathPainter::stroke(
                     buf,
@@ -569,7 +609,9 @@ mod tests {
         let face = ttf_parser::Face::parse(font, 0).expect("DejaVu should parse");
         // Greek alpha (Symbol), summation/integral (math), check mark + black
         // circle (ZapfDingbats), right arrow (Wingdings-ish).
-        for ch in ['\u{03B1}', '\u{2211}', '\u{222B}', '\u{2713}', '\u{25CF}', '\u{2192}'] {
+        for ch in [
+            '\u{03B1}', '\u{2211}', '\u{222B}', '\u{2713}', '\u{25CF}', '\u{2192}',
+        ] {
             assert!(
                 face.glyph_index(ch).is_some(),
                 "DejaVu should cover U+{:04X}",

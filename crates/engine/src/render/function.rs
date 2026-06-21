@@ -22,7 +22,11 @@ use crate::render::shading::{eval_type2, eval_type3, get_float_array};
 /// Evaluate a PDF function with one or more inputs, returning its output
 /// components. Returns an empty `Vec` for unsupported types or malformed input
 /// (never panics).
-pub(crate) fn eval_function_n(func_obj: &PdfObject, inputs: &[f64], reader: &PdfReader) -> Vec<f64> {
+pub(crate) fn eval_function_n(
+    func_obj: &PdfObject,
+    inputs: &[f64],
+    reader: &PdfReader,
+) -> Vec<f64> {
     let dict = match resolve_to_dict(func_obj, reader) {
         Some(d) => d,
         None => return Vec::new(),
@@ -901,7 +905,13 @@ mod tests {
     #[test]
     fn type0_16bit_samples() {
         // 2 samples, 16-bit: 0x0000 and 0xFFFF over [0,1].
-        let obj = type0_stream(&[2], 16, &[0.0, 1.0], &[0.0, 1.0], vec![0x00, 0x00, 0xFF, 0xFF]);
+        let obj = type0_stream(
+            &[2],
+            16,
+            &[0.0, 1.0],
+            &[0.0, 1.0],
+            vec![0x00, 0x00, 0xFF, 0xFF],
+        );
         let r = reader_for_tests();
         assert!((eval_function_n(&obj, &[0.0], &r)[0]).abs() < 0.01);
         assert!((eval_function_n(&obj, &[1.0], &r)[0] - 1.0).abs() < 0.01);

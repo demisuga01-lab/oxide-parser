@@ -19,6 +19,7 @@
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
 use crate::render::buffer::{PixelBuffer, PixelColor};
+use crate::render::color::{ColorSpaceHandler, RenderColor};
 use crate::render::transform::{Transform2D, Viewport};
 
 /// A minimal valid PDF used by render tests that need a `PdfReader` but never
@@ -27,17 +28,19 @@ use crate::render::transform::{Transform2D, Viewport};
 #[cfg(test)]
 pub(crate) fn tests_minimal_pdf() -> Vec<u8> {
     let mut pdf = b"%PDF-1.4\n".to_vec();
-    let mut off = vec![0usize; 4];
+    let mut off = [0usize; 4];
     off[1] = pdf.len();
     pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
     off[2] = pdf.len();
     pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
     off[3] = pdf.len();
-    pdf.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>\nendobj\n");
+    pdf.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 10 10] >>\nendobj\n",
+    );
     let xref = pdf.len();
     pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
-    for i in 1..=3 {
-        pdf.extend_from_slice(format!("{:010} 00000 n \n", off[i]).as_bytes());
+    for offset in off.iter().take(4).skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
     }
     pdf.extend_from_slice(
         format!("trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
@@ -161,33 +164,14 @@ pub(crate) fn get_bool_pair(dict: &PdfDictionary, key: &str) -> Option<[bool; 2]
 }
 
 /// Convert shading function output components to an opaque pixel colour.
+#[cfg(test)]
 pub(crate) fn components_to_pixel(components: &[f64], color_space: &str) -> PixelColor {
-    let to_u8 = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    match color_space {
-        "DeviceGray" | "CalGray" | "G" => {
-            let g = to_u8(components.first().copied().unwrap_or(0.0));
-            [g, g, g, 255]
-        }
-        "DeviceCMYK" | "CMYK" => {
-            let c = components.first().copied().unwrap_or(0.0);
-            let m = components.get(1).copied().unwrap_or(0.0);
-            let y = components.get(2).copied().unwrap_or(0.0);
-            let k = components.get(3).copied().unwrap_or(0.0);
-            [
-                to_u8((1.0 - c) * (1.0 - k)),
-                to_u8((1.0 - m) * (1.0 - k)),
-                to_u8((1.0 - y) * (1.0 - k)),
-                255,
-            ]
-        }
-        // DeviceRGB / CalRGB / ICCBased(3) / unknown: treat as RGB triple.
-        _ => [
-            to_u8(components.first().copied().unwrap_or(0.0)),
-            to_u8(components.get(1).copied().unwrap_or(0.0)),
-            to_u8(components.get(2).copied().unwrap_or(0.0)),
-            255,
-        ],
-    }
+    components_to_render_color(components, color_space).to_pixel_color()
+}
+
+/// Convert shading function output components to a float render colour.
+pub(crate) fn components_to_render_color(components: &[f64], color_space: &str) -> RenderColor {
+    ColorSpaceHandler::from_components(color_space, components, 1.0)
 }
 
 /// Read the shading's colour-space name. Handles both a bare name and an array
@@ -209,6 +193,77 @@ fn shading_color_space_name(dict: &PdfDictionary) -> String {
 // ---------------------------------------------------------------------------
 
 pub struct ShadingRenderer;
+
+const SHADING_LUT_STEPS: usize = 4096;
+
+const BAYER_8X8: [u8; 64] = [
+    0, 48, 12, 60, 3, 51, 15, 63, 32, 16, 44, 28, 35, 19, 47, 31, 8, 56, 4, 52, 11, 59, 7, 55, 40,
+    24, 36, 20, 43, 27, 39, 23, 2, 50, 14, 62, 1, 49, 13, 61, 34, 18, 46, 30, 33, 17, 45, 29, 10,
+    58, 6, 54, 9, 57, 5, 53, 42, 26, 38, 22, 41, 25, 37, 21,
+];
+
+#[derive(Debug, Clone)]
+struct ShadingColorCache {
+    entries: Vec<Option<RenderColor>>,
+}
+
+impl ShadingColorCache {
+    fn new() -> Self {
+        Self {
+            entries: vec![None; SHADING_LUT_STEPS + 1],
+        }
+    }
+
+    #[inline]
+    fn bucket(s: f64) -> usize {
+        (s.clamp(0.0, 1.0) * SHADING_LUT_STEPS as f64).round() as usize
+    }
+
+    #[inline]
+    fn get(&self, s: f64) -> Option<RenderColor> {
+        self.entries.get(Self::bucket(s)).and_then(|entry| *entry)
+    }
+
+    #[inline]
+    fn set(&mut self, s: f64, color: RenderColor) {
+        if let Some(slot) = self.entries.get_mut(Self::bucket(s)) {
+            *slot = Some(color);
+        }
+    }
+}
+
+#[inline]
+fn ordered_dither_offset(x: i32, y: i32) -> f32 {
+    let xi = x.rem_euclid(8) as usize;
+    let yi = y.rem_euclid(8) as usize;
+    (BAYER_8X8[yi * 8 + xi] as f32 + 0.5) / 64.0 - 0.5
+}
+
+#[inline]
+fn quantize_shading_channel(value: f32, dither_offset: f32, dither: bool) -> u8 {
+    let scaled = value.clamp(0.0, 1.0) * 255.0;
+    let adjusted = if dither {
+        scaled + dither_offset
+    } else {
+        scaled
+    };
+    adjusted.round().clamp(0.0, 255.0) as u8
+}
+
+#[inline]
+fn quantize_shading_color(color: RenderColor, x: i32, y: i32, dither: bool) -> PixelColor {
+    let offset = if dither {
+        ordered_dither_offset(x, y)
+    } else {
+        0.0
+    };
+    [
+        quantize_shading_channel(color.r, offset, dither),
+        quantize_shading_channel(color.g, offset, dither),
+        quantize_shading_channel(color.b, offset, dither),
+        (color.a.clamp(0.0, 1.0) * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
 
 impl ShadingRenderer {
     /// Paint a shading dictionary into `buf`, bounded by the buffer's current
@@ -268,10 +323,13 @@ impl ShadingRenderer {
             _ => Transform2D::identity(),
         };
         let color_space = shading_color_space_name(dict);
+        let dither = buf.render_mode().is_high_quality();
 
         // device pixel → user space → domain space.
         let pixel_to_user = Self::pixel_to_user(ctm, viewport);
-        let user_to_domain = shading_matrix.inverse().unwrap_or_else(Transform2D::identity);
+        let user_to_domain = shading_matrix
+            .inverse()
+            .unwrap_or_else(Transform2D::identity);
 
         let w = buf.width as i32;
         let h = buf.height as i32;
@@ -282,15 +340,17 @@ impl ShadingRenderer {
                 }
                 let (ux, uy) = pixel_to_user.transform_point(px as f64 + 0.5, py as f64 + 0.5);
                 let (mx, my) = user_to_domain.transform_point(ux, uy);
-                if mx < dx0.min(dx1) || mx > dx0.max(dx1) || my < dy0.min(dy1) || my > dy0.max(dy1) {
+                if mx < dx0.min(dx1) || mx > dx0.max(dx1) || my < dy0.min(dy1) || my > dy0.max(dy1)
+                {
                     continue;
                 }
                 let comps = crate::render::function::eval_function_n(&func_obj, &[mx, my], reader);
                 if comps.is_empty() {
                     continue;
                 }
-                let color = components_to_pixel(&comps, &color_space);
-                buf.blend_pixel(px, py, color, 1.0);
+                let color = components_to_render_color(&comps, &color_space);
+                let pixel = quantize_shading_color(color, px, py, dither);
+                buf.blend_pixel(px, py, pixel, 1.0);
             }
         }
     }
@@ -349,9 +409,11 @@ impl ShadingRenderer {
         let w = buf.width as i32;
         let h = buf.height as i32;
 
-        // Cache colours by quantised t to avoid re-evaluating the function per
-        // pixel (a 256-bucket lookup is visually indistinguishable here).
-        let mut cache: Vec<Option<PixelColor>> = vec![None; 257];
+        // Cache high-resolution float colours to avoid re-evaluating the
+        // function per pixel without prematurely stepping the gradient at 8-bit
+        // output precision.
+        let mut cache = ShadingColorCache::new();
+        let dither = buf.render_mode().is_high_quality();
 
         for py in 0..h {
             for px in 0..w {
@@ -377,7 +439,8 @@ impl ShadingRenderer {
                     &mut cache,
                 );
                 if let Some(color) = color {
-                    buf.blend_pixel(px, py, color, 1.0);
+                    let pixel = quantize_shading_color(color, px, py, dither);
+                    buf.blend_pixel(px, py, pixel, 1.0);
                 }
             }
         }
@@ -422,7 +485,8 @@ impl ShadingRenderer {
         let pixel_to_user = Self::pixel_to_user(ctm, viewport);
         let w = buf.width as i32;
         let h = buf.height as i32;
-        let mut cache: Vec<Option<PixelColor>> = vec![None; 257];
+        let mut cache = ShadingColorCache::new();
+        let dither = buf.render_mode().is_high_quality();
 
         for py in 0..h {
             for px in 0..w {
@@ -465,7 +529,8 @@ impl ShadingRenderer {
                 };
                 let color = Self::color_for(s, t0, t1, &func_obj, &color_space, reader, &mut cache);
                 if let Some(color) = color {
-                    buf.blend_pixel(px, py, color, 1.0);
+                    let pixel = quantize_shading_color(color, px, py, dither);
+                    buf.blend_pixel(px, py, pixel, 1.0);
                 }
             }
         }
@@ -480,10 +545,9 @@ impl ShadingRenderer {
         func_obj: &PdfObject,
         color_space: &str,
         reader: &PdfReader,
-        cache: &mut [Option<PixelColor>],
-    ) -> Option<PixelColor> {
-        let bucket = (s.clamp(0.0, 1.0) * 256.0).round() as usize;
-        if let Some(cached) = cache.get(bucket).and_then(|c| *c) {
+        cache: &mut ShadingColorCache,
+    ) -> Option<RenderColor> {
+        if let Some(cached) = cache.get(s) {
             return Some(cached);
         }
         let t = t0 + s * (t1 - t0);
@@ -491,10 +555,8 @@ impl ShadingRenderer {
         if components.is_empty() {
             return None;
         }
-        let color = components_to_pixel(&components, color_space);
-        if let Some(slot) = cache.get_mut(bucket) {
-            *slot = Some(color);
-        }
+        let color = components_to_render_color(&components, color_space);
+        cache.set(s, color);
         Some(color)
     }
 }
@@ -509,7 +571,7 @@ struct MeshVertex {
     /// Device-space x, y (already mapped through CTM + viewport).
     dx: f64,
     dy: f64,
-    color: [f64; 4],
+    color: RenderColor,
 }
 
 /// Decode parameters shared by the mesh vertex stream readers.
@@ -560,10 +622,18 @@ impl MeshDecode {
         let xr = br.read(self.bits_per_coord)? as f64;
         let yr = br.read(self.bits_per_coord)? as f64;
         let xmax_raw = crate::render::function::max_value(self.bits_per_coord);
-        let x = decode_value(xr, xmax_raw, self.decode.first().copied().unwrap_or(0.0),
-            self.decode.get(1).copied().unwrap_or(1.0));
-        let y = decode_value(yr, xmax_raw, self.decode.get(2).copied().unwrap_or(0.0),
-            self.decode.get(3).copied().unwrap_or(1.0));
+        let x = decode_value(
+            xr,
+            xmax_raw,
+            self.decode.first().copied().unwrap_or(0.0),
+            self.decode.get(1).copied().unwrap_or(1.0),
+        );
+        let y = decode_value(
+            yr,
+            xmax_raw,
+            self.decode.get(2).copied().unwrap_or(0.0),
+            self.decode.get(3).copied().unwrap_or(1.0),
+        );
         let (dx, dy) = to_device.transform_point(x, y);
 
         let cmax_raw = crate::render::function::max_value(self.bits_per_comp);
@@ -604,7 +674,7 @@ fn resolve_vertex_color(
     func_obj: Option<&PdfObject>,
     color_space: &str,
     reader: &PdfReader,
-) -> [f64; 4] {
+) -> RenderColor {
     let resolved = if has_function {
         match func_obj {
             Some(f) => {
@@ -616,13 +686,7 @@ fn resolve_vertex_color(
     } else {
         comps.to_vec()
     };
-    let px = components_to_pixel(&resolved, color_space);
-    [
-        px[0] as f64 / 255.0,
-        px[1] as f64 / 255.0,
-        px[2] as f64 / 255.0,
-        1.0,
-    ]
+    components_to_render_color(&resolved, color_space)
 }
 
 impl ShadingRenderer {
@@ -666,8 +730,13 @@ impl ShadingRenderer {
                 let mut row = Vec::with_capacity(per_row);
                 let mut complete = true;
                 for _ in 0..per_row {
-                    match dec.read_vertex(&mut br, &to_device, func_obj.as_ref(), &color_space, reader)
-                    {
+                    match dec.read_vertex(
+                        &mut br,
+                        &to_device,
+                        func_obj.as_ref(),
+                        &color_space,
+                        reader,
+                    ) {
                         Some(v) => row.push(v),
                         None => {
                             complete = false;
@@ -701,11 +770,12 @@ impl ShadingRenderer {
                 Some(f) => f,
                 None => break,
             };
-            let v = match dec.read_vertex(&mut br, &to_device, func_obj.as_ref(), &color_space, reader)
-            {
-                Some(v) => v,
-                None => break,
-            };
+            let v =
+                match dec.read_vertex(&mut br, &to_device, func_obj.as_ref(), &color_space, reader)
+                {
+                    Some(v) => v,
+                    None => break,
+                };
             br.align_to_byte();
             match flag {
                 0 => {
@@ -775,7 +845,7 @@ impl ShadingRenderer {
         // Previous patch's control points (in patch/user space, pre-device) and
         // corner colors, for edge sharing (flags 1/2/3).
         let mut prev_pts: Vec<(f64, f64)> = Vec::new();
-        let mut prev_cols: Vec<[f64; 4]> = Vec::new();
+        let mut prev_cols: Vec<RenderColor> = Vec::new();
 
         loop {
             if br.bits_remaining() < dec.bits_per_flag {
@@ -785,7 +855,11 @@ impl ShadingRenderer {
                 Some(f) => f,
                 None => break,
             };
-            let new_pts_count = if flag == 0 { n_points_new } else { n_points_new - 4 };
+            let new_pts_count = if flag == 0 {
+                n_points_new
+            } else {
+                n_points_new - 4
+            };
             let new_cols_count = if flag == 0 { 4 } else { 2 };
 
             // Read new control points (user space).
@@ -798,12 +872,18 @@ impl ShadingRenderer {
                     ok = false;
                     break;
                 };
-                let x = decode_value(xr as f64, coord_max,
+                let x = decode_value(
+                    xr as f64,
+                    coord_max,
                     dec.decode.first().copied().unwrap_or(0.0),
-                    dec.decode.get(1).copied().unwrap_or(1.0));
-                let y = decode_value(yr as f64, coord_max,
+                    dec.decode.get(1).copied().unwrap_or(1.0),
+                );
+                let y = decode_value(
+                    yr as f64,
+                    coord_max,
                     dec.decode.get(2).copied().unwrap_or(0.0),
-                    dec.decode.get(3).copied().unwrap_or(1.0));
+                    dec.decode.get(3).copied().unwrap_or(1.0),
+                );
                 new_pts.push((x, y));
             }
             if !ok {
@@ -864,7 +944,7 @@ impl ShadingRenderer {
 /// A point in patch/user space (pre-device).
 type PatchPoint = (f64, f64);
 /// A patch's resolved control points and 4 corner colors.
-type PatchData = (Vec<PatchPoint>, Vec<[f64; 4]>);
+type PatchData = (Vec<PatchPoint>, Vec<RenderColor>);
 
 /// Assemble a patch's full 12 Coons boundary control points and 4 corner colors,
 /// honoring edge-sharing flags 1/2/3 (the new patch shares one edge with the
@@ -895,9 +975,9 @@ type PatchData = (Vec<PatchPoint>, Vec<[f64; 4]>);
 fn assemble_patch(
     flag: u32,
     new_pts: &[(f64, f64)],
-    new_cols: &[[f64; 4]],
+    new_cols: &[RenderColor],
     prev_pts: &[(f64, f64)],
-    prev_cols: &[[f64; 4]],
+    prev_cols: &[RenderColor],
     shading_type: i64,
 ) -> Option<PatchData> {
     // Keep only the 12 boundary points; tensor patches carry 4 extra interior
@@ -979,7 +1059,7 @@ fn shared_color_indices(flag: u32) -> [usize; 2] {
 fn render_coons_patch(
     buf: &mut PixelBuffer,
     pts12: &[(f64, f64)],
-    cols4: &[[f64; 4]],
+    cols4: &[RenderColor],
     to_device: &Transform2D,
 ) {
     if pts12.len() < 12 || cols4.len() < 4 {
@@ -1062,14 +1142,18 @@ fn bezier(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64
 
 /// Bilinearly interpolate the 4 patch corner colors. Corner order: c0 at
 /// (u0,v0), c1 at (u0,v1), c2 at (u1,v1), c3 at (u1,v0).
-fn bilerp_color(c: &[[f64; 4]], u: f64, v: f64) -> [f64; 4] {
-    let mut out = [0.0; 4];
-    for k in 0..4 {
-        let top = (1.0 - v) * c[0][k] + v * c[1][k];
-        let bot = (1.0 - v) * c[3][k] + v * c[2][k];
-        out[k] = (1.0 - u) * top + u * bot;
-    }
-    out
+fn bilerp_color(c: &[RenderColor], u: f64, v: f64) -> RenderColor {
+    let channel = |select: fn(RenderColor) -> f32| -> f32 {
+        let top = (1.0 - v) * select(c[0]) as f64 + v * select(c[1]) as f64;
+        let bot = (1.0 - v) * select(c[3]) as f64 + v * select(c[2]) as f64;
+        ((1.0 - u) * top + u * bot) as f32
+    };
+    RenderColor::new(
+        channel(|color| color.r),
+        channel(|color| color.g),
+        channel(|color| color.b),
+        channel(|color| color.a),
+    )
 }
 
 /// Rasterize a Gouraud-shaded triangle into `buf` with barycentric color
@@ -1087,6 +1171,7 @@ fn fill_gouraud_triangle(buf: &mut PixelBuffer, v0: MeshVertex, v1: MeshVertex, 
     if area.abs() < 1e-9 {
         return; // degenerate
     }
+    let dither = buf.render_mode().is_high_quality();
 
     for py in min_y..=max_y {
         for px in min_x..=max_x {
@@ -1102,15 +1187,16 @@ fn fill_gouraud_triangle(buf: &mut PixelBuffer, v0: MeshVertex, v1: MeshVertex, 
             if w0 < -1e-6 || w1 < -1e-6 || w2 < -1e-6 {
                 continue;
             }
-            let r = w0 * v0.color[0] + w1 * v1.color[0] + w2 * v2.color[0];
-            let g = w0 * v0.color[1] + w1 * v1.color[1] + w2 * v2.color[1];
-            let b = w0 * v0.color[2] + w1 * v1.color[2] + w2 * v2.color[2];
-            let color = [
-                (r.clamp(0.0, 1.0) * 255.0).round() as u8,
-                (g.clamp(0.0, 1.0) * 255.0).round() as u8,
-                (b.clamp(0.0, 1.0) * 255.0).round() as u8,
-                255,
-            ];
+            let r = w0 * v0.color.r as f64 + w1 * v1.color.r as f64 + w2 * v2.color.r as f64;
+            let g = w0 * v0.color.g as f64 + w1 * v1.color.g as f64 + w2 * v2.color.g as f64;
+            let b = w0 * v0.color.b as f64 + w1 * v1.color.b as f64 + w2 * v2.color.b as f64;
+            let a = w0 * v0.color.a as f64 + w1 * v1.color.a as f64 + w2 * v2.color.a as f64;
+            let color = quantize_shading_color(
+                RenderColor::new(r as f32, g as f32, b as f32, a as f32),
+                px,
+                py,
+                dither,
+            );
             buf.blend_pixel(px, py, color, 1.0);
         }
     }
@@ -1265,22 +1351,108 @@ mod tests {
     #[test]
     fn components_to_pixel_cmyk_black_and_white() {
         let black = components_to_pixel(&[0.0, 0.0, 0.0, 1.0], "DeviceCMYK");
-        assert_eq!(black, [0, 0, 0, 255]);
+        assert_eq!(black, [35, 31, 32, 255]);
         let white = components_to_pixel(&[0.0, 0.0, 0.0, 0.0], "DeviceCMYK");
         assert_eq!(white, [255, 255, 255, 255]);
     }
 
+    #[test]
+    fn shading_color_cache_keeps_sub_byte_gradient_steps() {
+        let func = PdfObject::Dictionary(make_type2_dict(&[0.0], &[1.0], 1.0));
+        let reader = crate::reader::PdfReader::from_bytes(super::tests_minimal_pdf()).unwrap();
+        let mut cache = ShadingColorCache::new();
+
+        let c0 =
+            ShadingRenderer::color_for(0.1000, 0.0, 1.0, &func, "DeviceGray", &reader, &mut cache)
+                .expect("color at first sample");
+        let c1 =
+            ShadingRenderer::color_for(0.1010, 0.0, 1.0, &func, "DeviceGray", &reader, &mut cache)
+                .expect("color at nearby sample");
+
+        assert!(
+            c1.r > c0.r && (c1.r - c0.r) > 0.0005,
+            "cache should preserve sub-byte progression: {c0:?} -> {c1:?}"
+        );
+    }
+
+    fn longest_run(values: &[u8]) -> usize {
+        let mut longest = 0usize;
+        let mut current = 0usize;
+        let mut previous = None;
+        for &value in values {
+            if previous == Some(value) {
+                current += 1;
+            } else {
+                current = 1;
+                previous = Some(value);
+            }
+            longest = longest.max(current);
+        }
+        longest
+    }
+
+    #[test]
+    fn ordered_dither_breaks_long_quantization_runs_and_is_deterministic() {
+        const W: i32 = 1024;
+        let plain: Vec<u8> = (0..W)
+            .map(|x| {
+                let t = 0.49 + 0.02 * x as f32 / (W - 1) as f32;
+                quantize_shading_color(RenderColor::gray(t), x, 0, false)[0]
+            })
+            .collect();
+        let dithered: Vec<u8> = (0..W)
+            .map(|x| {
+                let t = 0.49 + 0.02 * x as f32 / (W - 1) as f32;
+                quantize_shading_color(RenderColor::gray(t), x, 0, true)[0]
+            })
+            .collect();
+        let dithered_again: Vec<u8> = (0..W)
+            .map(|x| {
+                let t = 0.49 + 0.02 * x as f32 / (W - 1) as f32;
+                quantize_shading_color(RenderColor::gray(t), x, 0, true)[0]
+            })
+            .collect();
+
+        assert_eq!(dithered, dithered_again);
+        assert!(
+            longest_run(&plain) > 100,
+            "undithered shallow gradient should visibly band"
+        );
+        assert!(
+            longest_run(&dithered) < longest_run(&plain) / 4,
+            "dithered gradient should break long runs: plain {}, dithered {}",
+            longest_run(&plain),
+            longest_run(&dithered)
+        );
+    }
+
+    #[test]
+    fn ordered_dither_does_not_texture_exact_byte_flat_colors() {
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(
+                    quantize_shading_color(RenderColor::gray(128.0 / 255.0), x, y, true),
+                    [128, 128, 128, 255]
+                );
+            }
+        }
+    }
+
     // ---- Coons/tensor shared-edge patch reconstruction ---------------------
+
+    fn rc(r: f32, g: f32, b: f32, a: f32) -> RenderColor {
+        RenderColor::new(r, g, b, a)
+    }
 
     /// Helper: a deterministic 12-point "previous" patch where point i is
     /// (i*10, i*10) and corner colors are distinguishable. Lets us assert exact
     /// index reuse for each flag.
-    fn prev_patch() -> (Vec<(f64, f64)>, Vec<[f64; 4]>) {
-        let pts: Vec<(f64, f64)> = (0..12).map(|i| (i as f64 * 10.0, i as f64 * 10.0)).collect();
-        // 4 corner colors, each tagged in its red channel by its index.
-        let cols: Vec<[f64; 4]> = (0..4)
-            .map(|i| [i as f64 / 10.0, 0.0, 0.0, 1.0])
+    fn prev_patch() -> (Vec<(f64, f64)>, Vec<RenderColor>) {
+        let pts: Vec<(f64, f64)> = (0..12)
+            .map(|i| (i as f64 * 10.0, i as f64 * 10.0))
             .collect();
+        // 4 corner colors, each tagged in its red channel by its index.
+        let cols: Vec<RenderColor> = (0..4).map(|i| rc(i as f32 / 10.0, 0.0, 0.0, 1.0)).collect();
         (pts, cols)
     }
 
@@ -1288,7 +1460,7 @@ mod tests {
     fn assemble_patch_flag0_is_independent() {
         // Flag 0: all 12 points and 4 colors come straight from the stream.
         let new_pts: Vec<(f64, f64)> = (0..12).map(|i| (i as f64, 0.0)).collect();
-        let new_cols: Vec<[f64; 4]> = (0..4).map(|_| [0.0, 0.0, 0.0, 1.0]).collect();
+        let new_cols: Vec<RenderColor> = (0..4).map(|_| rc(0.0, 0.0, 0.0, 1.0)).collect();
         let (pts, cols) =
             assemble_patch(0, &new_pts, &new_cols, &[], &[], 6).expect("flag 0 must assemble");
         assert_eq!(pts.len(), 12);
@@ -1302,7 +1474,7 @@ mod tests {
         let (pp, pc) = prev_patch();
         // 8 new boundary points (p5..p12) + 2 new colors (c3, c4).
         let new_pts: Vec<(f64, f64)> = (0..8).map(|i| (100.0 + i as f64, -1.0)).collect();
-        let new_cols = vec![[0.7, 0.0, 0.0, 1.0], [0.8, 0.0, 0.0, 1.0]];
+        let new_cols = vec![rc(0.7, 0.0, 0.0, 1.0), rc(0.8, 0.0, 0.0, 1.0)];
         let (pts, cols) =
             assemble_patch(1, &new_pts, &new_cols, &pp, &pc, 6).expect("flag 1 must assemble");
         // Shared edge p1..p4 = prev indices [3,4,5,6].
@@ -1324,7 +1496,7 @@ mod tests {
     fn assemble_patch_flag2_reuses_edge_p7_p10_and_colors_c3_c4() {
         let (pp, pc) = prev_patch();
         let new_pts: Vec<(f64, f64)> = (0..8).map(|i| (200.0 + i as f64, -2.0)).collect();
-        let new_cols = vec![[0.6, 0.0, 0.0, 1.0], [0.9, 0.0, 0.0, 1.0]];
+        let new_cols = vec![rc(0.6, 0.0, 0.0, 1.0), rc(0.9, 0.0, 0.0, 1.0)];
         let (pts, cols) =
             assemble_patch(2, &new_pts, &new_cols, &pp, &pc, 6).expect("flag 2 must assemble");
         assert_eq!(pts[0], pp[6]);
@@ -1339,7 +1511,7 @@ mod tests {
     fn assemble_patch_flag3_reuses_edge_p10_p1_and_colors_c4_c1() {
         let (pp, pc) = prev_patch();
         let new_pts: Vec<(f64, f64)> = (0..8).map(|i| (300.0 + i as f64, -3.0)).collect();
-        let new_cols = vec![[0.5, 0.0, 0.0, 1.0], [0.4, 0.0, 0.0, 1.0]];
+        let new_cols = vec![rc(0.5, 0.0, 0.0, 1.0), rc(0.4, 0.0, 0.0, 1.0)];
         let (pts, cols) =
             assemble_patch(3, &new_pts, &new_cols, &pp, &pc, 6).expect("flag 3 must assemble");
         // Shared edge p1..p4 = prev indices [9,10,11,0] (wraps to p1).
@@ -1356,7 +1528,7 @@ mod tests {
         // Tensor flag 0: 16 stream points; only the first 12 boundary points are
         // kept (interior points 12..15 are dropped by the Coons surface).
         let new_pts: Vec<(f64, f64)> = (0..16).map(|i| (i as f64, 0.0)).collect();
-        let new_cols: Vec<[f64; 4]> = (0..4).map(|_| [0.0, 0.0, 0.0, 1.0]).collect();
+        let new_cols: Vec<RenderColor> = (0..4).map(|_| rc(0.0, 0.0, 0.0, 1.0)).collect();
         let (pts, _cols) =
             assemble_patch(0, &new_pts, &new_cols, &[], &[], 7).expect("tensor flag 0");
         assert_eq!(pts.len(), 12);
@@ -1369,7 +1541,7 @@ mod tests {
         // interior); only the 8 boundary ones are appended after the shared edge.
         let (pp, pc) = prev_patch();
         let new_pts: Vec<(f64, f64)> = (0..12).map(|i| (100.0 + i as f64, -1.0)).collect();
-        let new_cols = vec![[0.7, 0.0, 0.0, 1.0], [0.8, 0.0, 0.0, 1.0]];
+        let new_cols = vec![rc(0.7, 0.0, 0.0, 1.0), rc(0.8, 0.0, 0.0, 1.0)];
         let (pts, cols) =
             assemble_patch(1, &new_pts, &new_cols, &pp, &pc, 7).expect("tensor flag 1");
         assert_eq!(pts.len(), 12);

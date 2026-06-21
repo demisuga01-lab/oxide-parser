@@ -3,23 +3,24 @@ use crate::content::operation::{ContentOperation, Operand};
 use crate::content::state::{BlendMode, ColorSpace, GraphicsState};
 use crate::engine::{ContentEngine, PageResources};
 use crate::error::Result;
-use crate::fonts::cmap::extract_to_unicode_map;
-use crate::fonts::resolver::{
-    detect_font_subtype, get_descendant_font, lookup_cid_width, FontSubtype,
-};
+use crate::fonts::cid::{cid_font_has_embedded_program, cid_to_gid};
+use crate::fonts::resolver::{detect_font_subtype, get_descendant_font, FontSubtype};
+use crate::fonts::variations::VariationRequest;
 use crate::fonts::FontResolver;
 use crate::images::decoder::ImageDecoder;
 use crate::images::locator::ImageReference;
+use crate::info::decode_pdf_text_string;
 use crate::object::{PdfDictionary, PdfObject};
-use crate::render::buffer::{AlphaMask, ClipMask, PixelBuffer, PixelColor};
+use crate::render::buffer::{AlphaMask, ClipMask, PixelBuffer, PixelColor, RenderMode, WHITE};
 use crate::render::color::ColorSpaceHandler;
-use crate::render::font_rasterizer::{get_fallback_font, FontRasterizer, GlyphToPath};
+use crate::render::font_rasterizer::{get_fallback_font, FontRasterizer};
 use crate::render::glyph_cache::{CachedGlyph, GlyphCache, GlyphCacheKey};
 use crate::render::image_painter::ImagePainter;
 use crate::render::line::DashState;
-use crate::render::path::{flatten_path, FillRule, FlatPath, Path, PathPainter};
+use crate::render::path::{flatten_path, FillRule, FlatPath, GlyphHinting, Path, PathPainter};
 use crate::render::shading::ShadingRenderer;
 use crate::render::transform::{Transform2D, Viewport};
+use std::fmt::Write as _;
 
 pub struct PageRenderer;
 
@@ -33,6 +34,22 @@ impl PageRenderer {
         Self::render_page_cancellable(engine, page_number, dpi, &CancelToken::none())
     }
 
+    /// Render a single PDF page to a PixelBuffer with an explicit render mode.
+    pub fn render_page_with_mode(
+        engine: &ContentEngine,
+        page_number: usize,
+        dpi: u32,
+        render_mode: RenderMode,
+    ) -> Result<PixelBuffer> {
+        Self::render_page_cancellable_with_mode(
+            engine,
+            page_number,
+            dpi,
+            &CancelToken::none(),
+            render_mode,
+        )
+    }
+
     /// Render a page, polling `cancel` periodically so a runaway content
     /// stream can be stopped from outside (e.g. a request-timeout timer).
     pub fn render_page_cancellable(
@@ -41,10 +58,41 @@ impl PageRenderer {
         dpi: u32,
         cancel: &CancelToken,
     ) -> Result<PixelBuffer> {
+        Self::render_page_cancellable_with_mode(
+            engine,
+            page_number,
+            dpi,
+            cancel,
+            RenderMode::Compat,
+        )
+    }
+
+    /// Render a page with cancellation and an explicit render mode.
+    pub fn render_page_cancellable_with_mode(
+        engine: &ContentEngine,
+        page_number: usize,
+        dpi: u32,
+        cancel: &CancelToken,
+        render_mode: RenderMode,
+    ) -> Result<PixelBuffer> {
         let ops = engine.get_page_content(page_number)?;
         let viewport = engine.page_viewport(page_number, dpi)?;
-        let buf = engine.create_page_buffer(page_number, dpi)?;
         let resources = engine.get_page_resources(page_number)?;
+        let transparent_page_group = uses_top_level_transparency(&ops, &resources, engine);
+        let buf = if transparent_page_group {
+            PixelBuffer::new_transparent_with_mode(
+                viewport.width_px,
+                viewport.height_px,
+                render_mode,
+            )
+        } else {
+            PixelBuffer::new_filled_with_mode(
+                viewport.width_px,
+                viewport.height_px,
+                WHITE,
+                render_mode,
+            )
+        };
 
         let mut state = RenderState::new(buf, viewport, resources, engine, page_number);
         state.cancel = cancel.clone();
@@ -53,7 +101,13 @@ impl PageRenderer {
         // surface that as a distinct error so the caller returns a timeout
         // response rather than a half-rendered page presented as success.
         cancel.check("page render")?;
-        Ok(state.into_buffer())
+        state.render_page_annotations();
+        cancel.check("page annotation render")?;
+        let mut buf = state.into_buffer();
+        if transparent_page_group {
+            buf.flatten_onto_background(WHITE);
+        }
+        Ok(buf)
     }
 }
 
@@ -210,7 +264,7 @@ impl<'a> RenderState<'a> {
             }
             "Q" => {
                 self.gs.process(op);
-                self.buf.blend_mode = self.gs.blend_mode;
+                self.sync_blend_mode();
                 match self.clip_stack.pop() {
                     Some(saved) => self.buf.restore_clip(saved),
                     None => log::warn!("PageRenderer: Q with empty clip stack"),
@@ -284,6 +338,11 @@ impl<'a> RenderState<'a> {
         Transform2D::from(self.gs.ctm)
     }
 
+    /// Push the graphics-state blend mode onto the pixel buffer.
+    fn sync_blend_mode(&mut self) {
+        self.buf.blend_mode = self.gs.blend_mode;
+    }
+
     fn fill_pixel_color(&self) -> PixelColor {
         self.resolve_paint_color(&self.gs.fill_color, self.gs.fill_alpha as f32)
     }
@@ -298,11 +357,7 @@ impl<'a> RenderState<'a> {
     /// transform is evaluated and converted via the alternate space.
     /// `/Separation /None` (and all-`/None` DeviceN) resolve to a fully
     /// transparent colour so the paint produces no marks.
-    fn resolve_paint_color(
-        &self,
-        color: &crate::content::state::Color,
-        alpha: f32,
-    ) -> PixelColor {
+    fn resolve_paint_color(&self, color: &crate::content::state::Color, alpha: f32) -> PixelColor {
         if let ColorSpace::Named(name) = &color.space {
             if let Some(space_obj) = self.resources.color_spaces.get(name) {
                 let reader = self.engine.document().reader();
@@ -346,7 +401,7 @@ impl<'a> RenderState<'a> {
         let color = self.stroke_pixel_color();
         let width = self.gs.line_width;
         let dash = self.dash_state();
-        PathPainter::stroke_with_cap(
+        PathPainter::stroke_with_style(
             &mut self.buf,
             &self.path,
             &ctm,
@@ -355,6 +410,8 @@ impl<'a> RenderState<'a> {
             width,
             &dash,
             &self.gs.line_cap,
+            &self.gs.line_join,
+            self.gs.miter_limit,
         );
         self.path.clear();
     }
@@ -390,7 +447,7 @@ impl<'a> RenderState<'a> {
         let stroke = self.stroke_pixel_color();
         let width = self.gs.line_width;
         let dash = self.dash_state();
-        PathPainter::stroke_with_cap(
+        PathPainter::stroke_with_style(
             &mut self.buf,
             &self.path,
             &ctm,
@@ -399,6 +456,8 @@ impl<'a> RenderState<'a> {
             width,
             &dash,
             &self.gs.line_cap,
+            &self.gs.line_join,
+            self.gs.miter_limit,
         );
         self.path.clear();
     }
@@ -433,7 +492,7 @@ impl<'a> RenderState<'a> {
         };
         if let Some(dict) = self.resources.ext_g_states.get(name).cloned() {
             self.gs.apply_ext_g_state(&dict);
-            self.buf.blend_mode = self.gs.blend_mode;
+            self.sync_blend_mode();
             self.apply_ext_g_state_smask(&dict);
         } else {
             log::warn!("PageRenderer: ExtGState '{}' not found", name);
@@ -544,11 +603,12 @@ impl<'a> RenderState<'a> {
         //    color (still opaque). Black-backdrop is the spec default.
         //  - Alpha: fully transparent, so the alpha channel reflects only what
         //    the mask group actually paints.
+        let render_mode = self.buf.render_mode();
         let mut mask_buf = if is_alpha {
-            PixelBuffer::new_transparent(self.buf.width, self.buf.height)
+            PixelBuffer::new_transparent_with_mode(self.buf.width, self.buf.height, render_mode)
         } else {
             let bc = smask_backdrop_color(&smask_dict, &g_dict);
-            PixelBuffer::new_filled(self.buf.width, self.buf.height, bc)
+            PixelBuffer::new_filled_with_mode(self.buf.width, self.buf.height, bc, render_mode)
         };
         mask_buf.blend_mode = BlendMode::Normal;
 
@@ -643,10 +703,13 @@ impl<'a> RenderState<'a> {
         let bpc = if is_mask {
             1
         } else {
-            dict_int(&dict, "BitsPerComponent").unwrap_or(8).clamp(1, 16) as u8
+            dict_int(&dict, "BitsPerComponent")
+                .unwrap_or(8)
+                .clamp(1, 16) as u8
         };
         let color_space = dict_name(&dict, "ColorSpace").unwrap_or("DeviceGray");
         let filters: Vec<&str> = dict_filter_list(&dict);
+        let interpolate = dict_bool(&dict, "Interpolate").unwrap_or(false);
 
         // Inline image masks are stencil masks: paint the current fill color
         // through the 1-bit mask. We currently decode them as a grayscale image
@@ -668,7 +731,13 @@ impl<'a> RenderState<'a> {
         };
 
         let ctm = self.ctm();
-        ImagePainter::paint_image(&mut self.buf, &raw, &ctm, &self.viewport);
+        ImagePainter::paint_image_with_options(
+            &mut self.buf,
+            &raw,
+            &ctm,
+            &self.viewport,
+            interpolate,
+        );
     }
 
     fn handle_do(&mut self, name: &str) {
@@ -736,7 +805,25 @@ impl<'a> RenderState<'a> {
         match ImageDecoder::decode(&image_ref, self.engine.document().reader()) {
             Ok(raw) => {
                 let ctm = self.ctm();
-                ImagePainter::paint_image(&mut self.buf, &raw, &ctm, &self.viewport);
+                let smooth_jpx = image_ref.filter.iter().any(|filter| filter == "JPXDecode");
+                if image_interpolate(dict) {
+                    ImagePainter::paint_image_with_options(
+                        &mut self.buf,
+                        &raw,
+                        &ctm,
+                        &self.viewport,
+                        true,
+                    );
+                } else if smooth_jpx {
+                    ImagePainter::paint_image_with_jpx_compat(
+                        &mut self.buf,
+                        &raw,
+                        &ctm,
+                        &self.viewport,
+                    );
+                } else {
+                    ImagePainter::paint_image(&mut self.buf, &raw, &ctm, &self.viewport);
+                }
             }
             Err(err) => log::warn!("PageRenderer: image '{}' decode failed: {}", name, err),
         }
@@ -920,8 +1007,9 @@ impl<'a> RenderState<'a> {
         // interact with what is already painted. We remove that backdrop
         // contribution again before compositing the group result back, so the
         // backdrop is not counted twice (PDF 32000-1 §11.4.8).
+        let render_mode = self.buf.render_mode();
         let mut group_buf = if isolated {
-            PixelBuffer::new_transparent(self.buf.width, self.buf.height)
+            PixelBuffer::new_transparent_with_mode(self.buf.width, self.buf.height, render_mode)
         } else {
             let mut copy = self.buf.clone();
             copy.clear_clip();
@@ -1019,7 +1107,7 @@ impl<'a> RenderState<'a> {
         self.resources = saved_resources;
         self.gs = saved_gs;
         self.base_ctm = saved_base_ctm;
-        self.buf.blend_mode = self.gs.blend_mode;
+        self.sync_blend_mode();
         match self.clip_stack.pop() {
             Some(saved) => self.buf.restore_clip(saved),
             None => log::warn!("PageRenderer: Form cleanup with empty clip stack"),
@@ -1028,6 +1116,186 @@ impl<'a> RenderState<'a> {
             Some(saved) => self.buf.restore_smask(saved),
             None => log::warn!("PageRenderer: Form cleanup with empty SMask stack"),
         }
+    }
+
+    fn render_page_annotations(&mut self) {
+        let reader = self.engine.document().reader();
+        let pages = match self.engine.document().get_pages() {
+            Ok(pages) => pages,
+            Err(err) => {
+                log::debug!("PageRenderer: could not load pages for annotations: {err}");
+                return;
+            }
+        };
+        let Some(page) = pages.get(self.page_number.saturating_sub(1)) else {
+            return;
+        };
+        let page_dict = match reader.get_and_resolve(page.object_number, page.generation_number) {
+            Ok(PdfObject::Dictionary(dict)) => dict,
+            Ok(_) => return,
+            Err(err) => {
+                log::debug!("PageRenderer: could not resolve page annotations: {err}");
+                return;
+            }
+        };
+        let Some(annots_obj) = page_dict.get("Annots").cloned() else {
+            return;
+        };
+        let annots = match reader.resolve(annots_obj) {
+            Ok(PdfObject::Array(items)) => items,
+            _ => return,
+        };
+
+        for (index, annot_obj) in annots.into_iter().enumerate() {
+            if self.cancel.is_cancelled() {
+                return;
+            }
+            let annot = match reader.resolve(annot_obj) {
+                Ok(PdfObject::Dictionary(dict)) => dict,
+                _ => continue,
+            };
+            if annotation_is_hidden_or_no_view(&annot) {
+                continue;
+            }
+            if annot.get_name("Subtype") != Some("Widget") {
+                continue;
+            }
+            let Some(rect) = extract_rect(&annot) else {
+                continue;
+            };
+            let Some((appearance_dict, appearance_raw)) =
+                select_annotation_appearance(&annot, reader).or_else(|| {
+                    synthesize_annotation_appearance(&annot, reader, self.engine, rect)
+                })
+            else {
+                continue;
+            };
+            if appearance_dict.get_name("Subtype") != Some("Form") {
+                continue;
+            }
+            self.render_annotation_appearance(
+                &format!("Annot{}", index + 1),
+                &appearance_dict,
+                appearance_raw,
+                rect,
+            );
+        }
+    }
+
+    fn render_annotation_appearance(
+        &mut self,
+        name: &str,
+        form_dict: &PdfDictionary,
+        raw_bytes: Vec<u8>,
+        rect: [f64; 4],
+    ) {
+        if self.form_depth >= 8 {
+            log::warn!(
+                "PageRenderer: annotation appearance nesting depth limit (8) exceeded at '{}'",
+                name
+            );
+            return;
+        }
+
+        let Some(bbox) = extract_bbox(form_dict) else {
+            log::debug!(
+                "PageRenderer: annotation appearance '{}' missing /BBox",
+                name
+            );
+            return;
+        };
+        let Some(placement) = annotation_appearance_ctm(rect, bbox) else {
+            return;
+        };
+
+        let saved_gs = self.gs.clone();
+        let saved_clip = self.buf.clip_mask().cloned();
+        let saved_smask = self.buf.smask_mask().cloned();
+        self.buf.clear_clip();
+        self.buf.clear_smask();
+        self.gs = GraphicsState::default();
+        self.gs.ctm = placement.to_array();
+        self.sync_blend_mode();
+
+        let stream_obj = PdfObject::Stream {
+            dict: form_dict.clone(),
+            raw: raw_bytes.clone(),
+        };
+        let reader = self.engine.document().reader();
+        let content_bytes = match crate::filters::decode_stream(&stream_obj, reader) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                log::warn!(
+                    "PageRenderer: annotation appearance '{}' stream decode failed: {}",
+                    name,
+                    err
+                );
+                self.gs = saved_gs;
+                self.buf.restore_clip(saved_clip);
+                self.buf.restore_smask(saved_smask);
+                self.sync_blend_mode();
+                return;
+            }
+        };
+
+        if is_transparency_group(form_dict) {
+            self.handle_do_form_group(name, 0, 0, form_dict, &content_bytes);
+        } else {
+            self.render_form_content_stream(name, form_dict, &content_bytes);
+        }
+
+        self.gs = saved_gs;
+        self.buf.restore_clip(saved_clip);
+        self.buf.restore_smask(saved_smask);
+        self.sync_blend_mode();
+    }
+
+    fn render_form_content_stream(
+        &mut self,
+        name: &str,
+        form_dict: &PdfDictionary,
+        content_bytes: &[u8],
+    ) {
+        let reader = self.engine.document().reader();
+        let form_matrix = extract_form_matrix(form_dict);
+        let bbox = extract_bbox(form_dict);
+
+        let saved_gs = self.gs.clone();
+        self.clip_stack.push(self.buf.clip_mask().cloned());
+        self.smask_stack.push(self.buf.smask_mask().cloned());
+        let saved_resources = self.resources.clone();
+        let saved_base_ctm = self.base_ctm;
+        self.form_depth += 1;
+
+        let current_ctm = Transform2D::from(self.gs.ctm);
+        let form_t = Transform2D::from(form_matrix);
+        self.gs.ctm = form_t.concat(&current_ctm).to_array();
+        self.base_ctm = Transform2D::from(self.gs.ctm);
+
+        if let Some(bb) = bbox {
+            self.apply_form_bbox_clip(bb);
+        }
+
+        if let Some(res_obj) = form_dict.get("Resources") {
+            let form_res = crate::engine::parse_resources_from_obj(res_obj, reader);
+            self.resources = merge_resources(form_res, &saved_resources);
+        }
+
+        let ops = match crate::content::ContentParser::parse(content_bytes) {
+            Ok(ops) => ops,
+            Err(err) => {
+                log::warn!(
+                    "PageRenderer: Form XObject '{}' content parse failed: {}",
+                    name,
+                    err
+                );
+                self.cleanup_after_form(saved_gs, saved_resources, saved_base_ctm);
+                return;
+            }
+        };
+
+        self.dispatch_all(&ops);
+        self.cleanup_after_form(saved_gs, saved_resources, saved_base_ctm);
     }
 
     /// Clip subsequent painting to the Form's BBox, transformed by the current
@@ -1263,7 +1531,13 @@ impl<'a> RenderState<'a> {
                 let translate =
                     Transform2D::new(1.0, 0.0, 0.0, 1.0, i as f64 * x_step, j as f64 * y_step);
                 let tile_ctm = translate.concat(&pattern_ctm);
-                self.render_pattern_tile(&ops, &pat_resources, tile_ctm, bbox, forced_color.as_ref());
+                self.render_pattern_tile(
+                    &ops,
+                    &pat_resources,
+                    tile_ctm,
+                    bbox,
+                    forced_color.as_ref(),
+                );
             }
         }
 
@@ -1318,7 +1592,7 @@ impl<'a> RenderState<'a> {
         self.resources = saved_resources;
         self.base_ctm = saved_base_ctm;
         self.buf.restore_clip(saved_clip);
-        self.buf.blend_mode = self.gs.blend_mode;
+        self.sync_blend_mode();
     }
 
     /// Paint a shading pattern (PatternType 2) clipped to the current path.
@@ -1392,6 +1666,7 @@ impl<'a> RenderState<'a> {
         }
         let decoded = self.decode_text_bytes(bytes, &font_name);
         let font_bytes = self.get_font_bytes(&font_name);
+        let variation = self.font_variation_request(&font_name);
         let font_hash = font_bytes
             .as_ref()
             .filter(|bytes| !bytes.is_empty())
@@ -1403,19 +1678,32 @@ impl<'a> RenderState<'a> {
             .filter(|value| *value > 0.0)
             .unwrap_or(1000.0);
 
+        if let (Some(font_bytes), Some(font_hash)) = (font_bytes.as_ref(), font_hash) {
+            if let Some(text) = decoded_text_for_shaping(&decoded) {
+                if let Some(shaped) = crate::render::shaping::shape_run(font_bytes, &text, upem) {
+                    self.render_shaped_glyphs(&shaped, font_bytes, font_hash, &variation, upem);
+                    return;
+                }
+            }
+        }
+
         for glyph in decoded {
             let mut ttf_advance = None;
             if !matches!(self.gs.text.rendering_mode, 3 | 7) {
                 if let (Some(font_bytes), Some(font_hash)) = (font_bytes.as_ref(), font_hash) {
                     if !font_bytes.is_empty() {
-                        ttf_advance = self.render_glyph_with_cache(
-                            glyph.code,
-                            glyph.unicode,
-                            glyph.is_gid,
+                        ttf_advance = self.render_glyph_with_cache(GlyphRenderRequest {
+                            code: glyph.code,
+                            ch: glyph.unicode,
+                            glyph_name: glyph.glyph_name.as_deref(),
+                            is_gid: glyph.is_gid,
                             font_bytes,
                             font_hash,
+                            variation: &variation,
                             upem,
-                        );
+                            offset_x: 0.0,
+                            offset_y: 0.0,
+                        });
                     }
                 }
             }
@@ -1424,28 +1712,58 @@ impl<'a> RenderState<'a> {
         }
     }
 
-    fn render_glyph_with_cache(
+    fn render_shaped_glyphs(
         &mut self,
-        code: u16,
-        ch: char,
-        is_gid: bool,
+        glyphs: &[crate::render::shaping::ShapedGlyph],
         font_bytes: &[u8],
         font_hash: u64,
+        variation: &VariationRequest,
         upem: f64,
-    ) -> Option<f64> {
+    ) {
+        for glyph in glyphs {
+            if !matches!(self.gs.text.rendering_mode, 3 | 7) {
+                let _ = self.render_glyph_with_cache(GlyphRenderRequest {
+                    code: glyph.gid,
+                    ch: '\u{FFFD}',
+                    glyph_name: None,
+                    is_gid: true,
+                    font_bytes,
+                    font_hash,
+                    variation,
+                    upem,
+                    offset_x: glyph.offset_x,
+                    offset_y: glyph.offset_y,
+                });
+            }
+            self.advance_text(glyph.advance, false);
+        }
+    }
+
+    fn render_glyph_with_cache(&mut self, request: GlyphRenderRequest<'_>) -> Option<f64> {
         let cache_key = GlyphCacheKey {
-            font_hash,
-            code,
-            is_gid,
+            font_hash: request.font_hash,
+            variation_hash: request.variation.cache_hash(),
+            code: request.code,
+            is_gid: request.is_gid,
         };
         let cached = self.glyph_cache.get(&cache_key).cloned();
         let cached = match cached {
             Some(cached) => cached,
             None => {
-                let (path, advance_width) = if is_gid {
-                    Self::extract_glyph_path_by_gid(font_bytes, code)
+                let (path, advance_width) = if request.is_gid {
+                    crate::render::glyph_outline::extract_glyph_path_by_gid_var(
+                        request.font_bytes,
+                        request.code,
+                        request.variation,
+                    )
                 } else {
-                    Self::extract_glyph_path(font_bytes, ch)
+                    crate::render::glyph_outline::extract_glyph_path_for_simple_var(
+                        request.font_bytes,
+                        request.code,
+                        request.ch,
+                        request.glyph_name,
+                        request.variation,
+                    )
                 };
                 let cached = CachedGlyph {
                     path,
@@ -1461,26 +1779,43 @@ impl<'a> RenderState<'a> {
             return Some(advance_width);
         };
 
-        let scale = font_size_scale(self.gs.text.font_size, upem);
-        if scale <= 0.0 {
+        let scale = font_size_scale(self.gs.text.font_size, request.upem);
+        let th = self.gs.text.horizontal_scaling / 100.0;
+        let scale_x = scale * th;
+        if scale <= 0.0 || !scale_x.is_finite() {
             return Some(advance_width);
         }
 
-        let scale_t = Transform2D::scale(scale, scale);
+        let scale_t = Transform2D::scale(scale_x, scale);
+        let offset_t = Transform2D::translation(
+            request.offset_x / 1000.0 * self.gs.text.font_size * th,
+            request.offset_y / 1000.0 * self.gs.text.font_size,
+        );
+        let rise_t = Transform2D::translation(0.0, self.gs.text.rise);
         let tm_t = Transform2D::from(self.gs.text.tm);
         let ctm = self.ctm();
-        let glyph_ctm = scale_t.concat(&tm_t).concat(&ctm);
+        let glyph_ctm = scale_t
+            .concat(&offset_t)
+            .concat(&rise_t)
+            .concat(&tm_t)
+            .concat(&ctm);
         let fill_color = self.fill_pixel_color();
         let stroke_color = self.stroke_pixel_color();
 
+        // Stem/baseline grid-fitting is intentionally not enabled by default:
+        // the first R&D pass regressed Tracemonkey vs Poppler. Keep glyph
+        // coverage/tighter flattening active and revisit hinting with fixtures.
+        let glyph_hinting = GlyphHinting::disabled();
+
         match self.gs.text.rendering_mode {
-            0 | 4 => PathPainter::fill(
+            0 | 4 => PathPainter::fill_glyph(
                 &mut self.buf,
                 &glyph_path,
                 &glyph_ctm,
                 &self.viewport,
                 fill_color,
                 FillRule::NonZero,
+                glyph_hinting,
             ),
             1 | 5 => PathPainter::stroke(
                 &mut self.buf,
@@ -1492,13 +1827,14 @@ impl<'a> RenderState<'a> {
                 &DashState::solid(),
             ),
             2 | 6 => {
-                PathPainter::fill(
+                PathPainter::fill_glyph(
                     &mut self.buf,
                     &glyph_path,
                     &glyph_ctm,
                     &self.viewport,
                     fill_color,
                     FillRule::NonZero,
+                    glyph_hinting,
                 );
                 PathPainter::stroke(
                     &mut self.buf,
@@ -1516,79 +1852,14 @@ impl<'a> RenderState<'a> {
         Some(advance_width)
     }
 
+    #[cfg(test)]
     fn extract_glyph_path(font_bytes: &[u8], ch: char) -> (Option<Path>, f64) {
-        let face = match ttf_parser::Face::parse(font_bytes, 0) {
-            Ok(face) => face,
-            Err(err) => {
-                // Bare CFF (FontFile3 /Type1C) is not sfnt-wrapped, so Face::parse
-                // rejects it. Fall back to the standalone CFF parser before
-                // giving up. This is the OpenType-CFF / Type1C glyph path.
-                if let Some(result) =
-                    crate::render::font_rasterizer::cff_support::outline_by_char(font_bytes, ch)
-                {
-                    return result;
-                }
-                log::warn!(
-                    "PageRenderer: extract_glyph_path font parse failed: {:?}",
-                    err
-                );
-                return (None, 500.0);
-            }
-        };
-
-        let upem = f64::from(face.units_per_em());
-        let glyph_id = face
-            .glyph_index(ch)
-            .unwrap_or_else(|| ttf_parser::GlyphId(glyph_cache_code(ch).saturating_sub(1)));
-        let advance = face
-            .glyph_hor_advance(glyph_id)
-            .map(|width| f64::from(width) / upem * 1000.0)
-            .unwrap_or(500.0);
-
-        let mut builder = GlyphToPath::new();
-        if face.outline_glyph(glyph_id, &mut builder).is_none() {
-            return (None, advance);
-        }
-
-        (Some(builder.into_path()), advance)
-    }
-
-    fn extract_glyph_path_by_gid(font_bytes: &[u8], gid: u16) -> (Option<Path>, f64) {
-        let face = match ttf_parser::Face::parse(font_bytes, 0) {
-            Ok(face) => face,
-            Err(err) => {
-                // Bare CFF (FontFile3 /CIDFontType0C, used by CJK Type0 fonts)
-                // is keyed by glyph index; fall back to the standalone CFF
-                // parser before giving up.
-                if let Some(result) =
-                    crate::render::font_rasterizer::cff_support::outline_by_gid(font_bytes, gid)
-                {
-                    return result;
-                }
-                log::warn!(
-                    "PageRenderer: extract_glyph_path_by_gid font parse failed: {:?}",
-                    err
-                );
-                return (None, 500.0);
-            }
-        };
-
-        let upem = f64::from(face.units_per_em());
-        if upem <= 0.0 {
-            return (None, 500.0);
-        }
-        let glyph_id = ttf_parser::GlyphId(gid);
-        let advance = face
-            .glyph_hor_advance(glyph_id)
-            .map(|width| f64::from(width) / upem * 1000.0)
-            .unwrap_or(1000.0);
-
-        let mut builder = GlyphToPath::new();
-        if face.outline_glyph(glyph_id, &mut builder).is_none() {
-            return (None, advance);
-        }
-
-        (Some(builder.into_path()), advance)
+        crate::render::glyph_outline::extract_glyph_path_for_simple(
+            font_bytes,
+            glyph_cache_code(ch),
+            ch,
+            None,
+        )
     }
 
     fn get_upem(font_bytes: &[u8]) -> Option<u16> {
@@ -1598,6 +1869,9 @@ impl<'a> RenderState<'a> {
         // Bare CFF reports a 1000-unit em (FontMatrix 0.001 convention).
         if crate::render::font_rasterizer::cff_support::is_bare_cff(font_bytes) {
             return Some(crate::render::font_rasterizer::cff_support::units_per_em() as u16);
+        }
+        if crate::fonts::type1::Type1Font::is_type1(font_bytes) {
+            return Some(crate::fonts::type1::units_per_em() as u16);
         }
         None
     }
@@ -1629,6 +1903,7 @@ impl<'a> RenderState<'a> {
             };
             let text = resolver.decode_char(code);
             let ch = text.chars().next().unwrap_or('\u{FFFD}');
+            let glyph_name = resolver.glyph_name(code).map(str::to_string);
             let width = if has_explicit_widths {
                 let width = resolver.glyph_width(code).max(0.0);
                 if width > 0.0 {
@@ -1642,6 +1917,7 @@ impl<'a> RenderState<'a> {
             glyphs.push(DecodedGlyph {
                 code,
                 unicode: ch,
+                glyph_name,
                 is_space: resolver.is_space_code(code) || ch == ' ',
                 width,
                 is_gid: false,
@@ -1657,38 +1933,73 @@ impl<'a> RenderState<'a> {
         reader: &crate::reader::PdfReader,
     ) -> Vec<DecodedGlyph> {
         let descendant_font = get_descendant_font(font_dict, reader);
-        let unicode_map = extract_to_unicode_map(font_dict, reader);
+        let resolver = FontResolver::new(font_dict, reader);
+        let render_as_gid = cid_font_has_embedded_program(descendant_font.as_ref(), reader);
         let mut glyphs = Vec::new();
         let mut idx = 0usize;
+        let code_size = resolver.code_size().max(1);
 
-        while idx + 1 < bytes.len() {
-            let cid = (u16::from(bytes[idx]) << 8) | u16::from(bytes[idx + 1]);
-            idx += 2;
+        while idx < bytes.len() {
+            let cid = if code_size == 2 {
+                let high = bytes[idx];
+                let low = bytes.get(idx + 1).copied().unwrap_or(0);
+                idx = idx.saturating_add(2);
+                (u16::from(high) << 8) | u16::from(low)
+            } else {
+                let code = u16::from(bytes[idx]);
+                idx = idx.saturating_add(1);
+                code
+            };
 
-            let unicode = unicode_map
-                .as_ref()
-                .and_then(|map| map.get(&u32::from(cid)))
-                .copied()
-                .unwrap_or('\u{FFFD}');
-            let width = Some(
-                descendant_font
-                    .as_ref()
-                    .map(|dict| lookup_cid_width(u32::from(cid), dict))
-                    .unwrap_or(1000.0),
-            )
-            .filter(|width| *width > 0.0);
-            let gid = cid_to_gid(cid, descendant_font.as_ref());
+            let text = resolver.decode_char(cid);
+            let unicode = text.chars().next().unwrap_or('\u{FFFD}');
+            let width = if render_as_gid {
+                Some(resolver.glyph_width(cid)).filter(|width| *width > 0.0)
+            } else {
+                None
+            };
+            let code = if render_as_gid {
+                cid_to_gid(cid, descendant_font.as_ref(), reader)
+            } else {
+                u16::try_from(unicode as u32).unwrap_or(cid)
+            };
 
             glyphs.push(DecodedGlyph {
-                code: gid,
+                code,
                 unicode,
-                is_space: unicode == ' ' || cid == 0x0020,
+                glyph_name: None,
+                is_space: resolver.is_space_code(cid) || unicode == ' ',
                 width,
-                is_gid: true,
+                is_gid: render_as_gid,
             });
         }
 
         glyphs
+    }
+
+    /// Build the variable-font [`VariationRequest`] for a font resource from its
+    /// `FontDescriptor` (`/FontWeight` → `wght`, `/FontStretch` → `wdth`). Returns
+    /// the empty request (default instance) when there is no descriptor or no
+    /// non-normal weight/stretch — so static fonts and default-instance variable
+    /// fonts keep the byte-identical pre-variation cache key and outline.
+    fn font_variation_request(&self, font_name: &str) -> VariationRequest {
+        let reader = self.engine.document().reader();
+        let Some(font_dict) = self.resources.fonts.get(font_name) else {
+            return VariationRequest::none();
+        };
+        // For Type0 fonts the descriptor lives on the descendant CIDFont.
+        let descriptor = if detect_font_subtype(font_dict) == FontSubtype::Type0 {
+            get_descendant_font(font_dict, reader)
+                .and_then(|d| resolve_descriptor(&d, reader))
+        } else {
+            resolve_descriptor(font_dict, reader)
+        };
+        let Some(descriptor) = descriptor else {
+            return VariationRequest::none();
+        };
+        let weight = descriptor.get("FontWeight").and_then(PdfObject::as_number);
+        let stretch = descriptor.get_name("FontStretch");
+        VariationRequest::from_descriptor(weight, stretch)
     }
 
     fn get_font_bytes(&self, font_name: &str) -> Option<Vec<u8>> {
@@ -1737,23 +2048,51 @@ impl<'a> RenderState<'a> {
     }
 
     fn translate_text_matrix(&mut self, tx: f64, ty: f64) {
-        let new_tm = Transform2D::from(self.gs.text.tm)
-            .concat(&Transform2D::translation(tx, ty))
-            .to_array();
-        self.gs.text.tm = new_tm;
+        let mut tm = self.gs.text.tm;
+        tm[4] += tm[0] * tx + tm[2] * ty;
+        tm[5] += tm[1] * tx + tm[3] * ty;
+        self.gs.text.tm = tm;
     }
 }
 
 struct DecodedGlyph {
     code: u16,
     unicode: char,
+    glyph_name: Option<String>,
     is_space: bool,
     width: Option<f64>,
     is_gid: bool,
 }
 
+struct GlyphRenderRequest<'a> {
+    code: u16,
+    ch: char,
+    glyph_name: Option<&'a str>,
+    is_gid: bool,
+    font_bytes: &'a [u8],
+    font_hash: u64,
+    /// The variable-font instance to render (empty for static / default).
+    variation: &'a VariationRequest,
+    upem: f64,
+    offset_x: f64,
+    offset_y: f64,
+}
+
+#[cfg(test)]
 fn glyph_cache_code(ch: char) -> u16 {
     u16::try_from(ch as u32).unwrap_or(0xFFFD)
+}
+
+/// Resolve a font dict's `/FontDescriptor` (which may be an indirect reference)
+/// to its dictionary.
+fn resolve_descriptor(
+    font_dict: &PdfDictionary,
+    reader: &crate::reader::PdfReader,
+) -> Option<PdfDictionary> {
+    match reader.resolve(font_dict.get("FontDescriptor")?.clone()).ok()? {
+        PdfObject::Dictionary(dict) => Some(dict),
+        _ => None,
+    }
 }
 
 fn latin1_glyphs(bytes: &[u8]) -> Vec<DecodedGlyph> {
@@ -1762,6 +2101,7 @@ fn latin1_glyphs(bytes: &[u8]) -> Vec<DecodedGlyph> {
         .map(|byte| DecodedGlyph {
             code: u16::from(*byte),
             unicode: decode_win_ansi(*byte),
+            glyph_name: None,
             is_space: *byte == b' ',
             width: None,
             is_gid: false,
@@ -1769,15 +2109,15 @@ fn latin1_glyphs(bytes: &[u8]) -> Vec<DecodedGlyph> {
         .collect()
 }
 
-fn cid_to_gid(cid: u16, desc_dict: Option<&PdfDictionary>) -> u16 {
-    match desc_dict.and_then(|dict| dict.get("CIDToGIDMap")) {
-        Some(PdfObject::Name(name)) if name == "Identity" => cid,
-        Some(PdfObject::Stream { .. }) | Some(PdfObject::Reference { .. }) => {
-            log::debug!("CIDToGIDMap stream is not implemented; using identity mapping");
-            cid
+fn decoded_text_for_shaping(glyphs: &[DecodedGlyph]) -> Option<String> {
+    let mut text = String::new();
+    for glyph in glyphs {
+        if glyph.is_gid || glyph.unicode == '\u{FFFD}' {
+            return None;
         }
-        _ => cid,
+        text.push(glyph.unicode);
     }
+    crate::render::shaping::needs_shaping(&text).then_some(text)
 }
 
 fn decode_win_ansi(byte: u8) -> char {
@@ -1849,11 +2189,91 @@ fn extract_filter_names(dict: &PdfDictionary) -> Vec<String> {
     }
 }
 
+fn image_interpolate(dict: &PdfDictionary) -> bool {
+    dict.get_bool("Interpolate")
+        .or_else(|| dict.get_bool("I"))
+        .unwrap_or(false)
+}
+
 fn font_size_scale(font_size: f64, upem: f64) -> f64 {
     if font_size <= 0.0 || upem <= 0.0 || !font_size.is_finite() || !upem.is_finite() {
         0.0
     } else {
         font_size / upem
+    }
+}
+
+fn uses_top_level_transparency(
+    ops: &[ContentOperation],
+    resources: &PageResources,
+    engine: &ContentEngine,
+) -> bool {
+    for op in ops {
+        match op.operator.as_str() {
+            "gs" => {
+                if let Some(name) = op.name(0) {
+                    if resources
+                        .ext_g_states
+                        .get(name)
+                        .is_some_and(ext_g_state_needs_transparent_backdrop)
+                    {
+                        return true;
+                    }
+                }
+            }
+            "Do" => {
+                if let Some(name) = op.name(0) {
+                    if xobject_needs_transparent_backdrop(name, resources, engine) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn ext_g_state_needs_transparent_backdrop(dict: &PdfDictionary) -> bool {
+    let alpha_changed = ["ca", "CA"].iter().any(|key| {
+        dict.get(key)
+            .and_then(PdfObject::as_number)
+            .is_some_and(|v| v < 0.999)
+    });
+    if alpha_changed {
+        return true;
+    }
+
+    let blend_changed = match dict.get("BM") {
+        Some(PdfObject::Name(name)) => name != "Normal" && name != "Compatible",
+        Some(PdfObject::Array(items)) => items
+            .iter()
+            .filter_map(PdfObject::as_name)
+            .any(|name| name != "Normal" && name != "Compatible"),
+        _ => false,
+    };
+    if blend_changed {
+        return true;
+    }
+
+    match dict.get("SMask") {
+        Some(PdfObject::Name(name)) if name == "None" => false,
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn xobject_needs_transparent_backdrop(
+    name: &str,
+    resources: &PageResources,
+    engine: &ContentEngine,
+) -> bool {
+    let Some(&(obj_num, gen_num)) = resources.xobjects.get(name) else {
+        return false;
+    };
+    match engine.document().reader().get_object(obj_num, gen_num) {
+        Ok(PdfObject::Stream { dict, .. }) => is_transparency_group(&dict),
+        _ => false,
     }
 }
 
@@ -1894,7 +2314,10 @@ fn dict_bool(map: &std::collections::HashMap<String, Operand>, key: &str) -> Opt
     }
 }
 
-fn dict_name<'a>(map: &'a std::collections::HashMap<String, Operand>, key: &str) -> Option<&'a str> {
+fn dict_name<'a>(
+    map: &'a std::collections::HashMap<String, Operand>,
+    key: &str,
+) -> Option<&'a str> {
     match map.get(key)? {
         Operand::Name(n) => Some(n.as_str()),
         _ => None,
@@ -2085,6 +2508,944 @@ fn get_float_array_dict(dict: &PdfDictionary, key: &str) -> Option<Vec<f64>> {
     }
 }
 
+fn annotation_is_hidden_or_no_view(dict: &PdfDictionary) -> bool {
+    let flags = dict.get_integer("F").unwrap_or(0);
+    const INVISIBLE: i64 = 1 << 0;
+    const HIDDEN: i64 = 1 << 1;
+    const NO_VIEW: i64 = 1 << 5;
+    flags & (INVISIBLE | HIDDEN | NO_VIEW) != 0
+}
+
+fn select_annotation_appearance(
+    annot: &PdfDictionary,
+    reader: &crate::reader::PdfReader,
+) -> Option<(PdfDictionary, Vec<u8>)> {
+    let ap = annot.get("AP")?.clone();
+    let ap = match reader.resolve(ap).ok()? {
+        PdfObject::Dictionary(dict) => dict,
+        _ => return None,
+    };
+    let normal = ap.get("N")?.clone();
+    match reader.resolve(normal).ok()? {
+        PdfObject::Stream { dict, raw } => Some((dict, raw)),
+        PdfObject::Dictionary(states) => {
+            let state_name = annot.get_name("AS").unwrap_or("Off");
+            if let Some(selected) = states.get(state_name) {
+                return resolve_appearance_stream(selected, reader);
+            }
+            if state_name != "Off" {
+                if let Some(off) = states.get("Off") {
+                    return resolve_appearance_stream(off, reader);
+                }
+            }
+            states
+                .entries()
+                .find(|(name, _)| name.as_str() != "Off")
+                .and_then(|(_, value)| resolve_appearance_stream(value, reader))
+        }
+        _ => None,
+    }
+}
+
+const FIELD_FLAG_MULTILINE: i64 = 1 << 12;
+const FIELD_FLAG_RADIO: i64 = 1 << 15;
+const FIELD_FLAG_PUSHBUTTON: i64 = 1 << 16;
+const FIELD_FLAG_COMBO: i64 = 1 << 17;
+
+#[derive(Clone, Copy, Debug)]
+struct DefaultAppearance {
+    font_size: f64,
+    color: (f64, f64, f64),
+}
+
+impl Default for DefaultAppearance {
+    fn default() -> Self {
+        Self {
+            font_size: 10.0,
+            color: (0.0, 0.0, 0.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ButtonAppearanceKind {
+    Checkbox,
+    Radio,
+    PushButton,
+}
+
+#[derive(Clone, Copy)]
+struct WidgetAppearanceBox<'a> {
+    width: f64,
+    height: f64,
+    mk: Option<&'a PdfDictionary>,
+}
+
+#[derive(Clone, Copy)]
+struct TextFieldAppearance {
+    default_appearance: DefaultAppearance,
+    alignment: i64,
+    multiline: bool,
+}
+
+struct ButtonAppearance<'a> {
+    kind: ButtonAppearanceKind,
+    selected: bool,
+    caption: &'a str,
+    caption_bytes: &'a [u8],
+    default_appearance: DefaultAppearance,
+}
+
+impl<'a> WidgetAppearanceBox<'a> {
+    fn new(width: f64, height: f64, mk: Option<&'a PdfDictionary>) -> Self {
+        Self { width, height, mk }
+    }
+}
+
+fn synthesize_annotation_appearance(
+    annot: &PdfDictionary,
+    reader: &crate::reader::PdfReader,
+    engine: &ContentEngine,
+    rect: [f64; 4],
+) -> Option<(PdfDictionary, Vec<u8>)> {
+    let width = (rect[2] - rect[0]).abs();
+    let height = (rect[3] - rect[1]).abs();
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+
+    let field_chain = collect_field_chain(annot, reader);
+    let field_type_obj = inherited_field_object(&field_chain, "FT")?;
+    let field_type = field_type_obj.as_name()?.to_string();
+    let acroform = resolve_acroform_dict(engine, reader);
+    let need_appearances = acroform
+        .as_ref()
+        .and_then(|dict| dict.get_bool("NeedAppearances"))
+        .unwrap_or(false);
+    let field_flags = inherited_field_integer(&field_chain, "Ff").unwrap_or(0);
+    let alignment = inherited_field_integer(&field_chain, "Q")
+        .or_else(|| acroform.as_ref().and_then(|dict| dict.get_integer("Q")))
+        .unwrap_or(0);
+    let default_appearance = inherited_field_object(&field_chain, "DA")
+        .and_then(|obj| object_string_bytes(&obj))
+        .or_else(|| {
+            acroform
+                .as_ref()
+                .and_then(|dict| dict.get("DA"))
+                .and_then(object_string_bytes)
+        })
+        .as_deref()
+        .map(parse_default_appearance)
+        .unwrap_or_default();
+    let value = inherited_field_object(&field_chain, "V");
+    let options = inherited_field_object(&field_chain, "Opt");
+    let mk = annot.get_dict("MK").cloned();
+
+    let mut content = String::new();
+    match field_type.as_str() {
+        "Tx" => {
+            let (text, text_bytes) = value.as_ref().and_then(display_text_from_object)?;
+            if text.is_empty() {
+                return None;
+            }
+            append_text_field_appearance(
+                &mut content,
+                WidgetAppearanceBox::new(width, height, mk.as_ref()),
+                &text,
+                &text_bytes,
+                TextFieldAppearance {
+                    default_appearance,
+                    alignment,
+                    multiline: field_flags & FIELD_FLAG_MULTILINE != 0,
+                },
+            );
+        }
+        "Btn" => {
+            let kind = if field_flags & FIELD_FLAG_PUSHBUTTON != 0 {
+                ButtonAppearanceKind::PushButton
+            } else if field_flags & FIELD_FLAG_RADIO != 0 {
+                ButtonAppearanceKind::Radio
+            } else {
+                ButtonAppearanceKind::Checkbox
+            };
+            let selected = button_is_selected(kind, annot, value.as_ref());
+            let caption = mk
+                .as_ref()
+                .and_then(|dict| dict.get("CA"))
+                .and_then(display_text_from_object)
+                .unwrap_or_else(|| (String::new(), Vec::new()));
+            if kind == ButtonAppearanceKind::PushButton && caption.0.is_empty() {
+                return None;
+            }
+            if kind != ButtonAppearanceKind::PushButton && caption.0.chars().count() > 1 {
+                return None;
+            }
+            if kind != ButtonAppearanceKind::PushButton && !selected {
+                return None;
+            }
+            let has_explicit_button_chrome = mk
+                .as_ref()
+                .map(|dict| {
+                    dict.contains_key("CA") || dict.contains_key("BG") || dict.contains_key("BC")
+                })
+                .unwrap_or(false);
+            if kind != ButtonAppearanceKind::PushButton
+                && !need_appearances
+                && !has_explicit_button_chrome
+            {
+                return None;
+            }
+            if kind == ButtonAppearanceKind::Checkbox && selected {
+                if let Some(label) = checkbox_label_state(annot, value.as_ref()) {
+                    append_text_field_appearance(
+                        &mut content,
+                        WidgetAppearanceBox::new(width, height, mk.as_ref()),
+                        &label,
+                        label.as_bytes(),
+                        TextFieldAppearance {
+                            default_appearance,
+                            alignment,
+                            multiline: false,
+                        },
+                    );
+                } else {
+                    append_button_appearance(
+                        &mut content,
+                        WidgetAppearanceBox::new(width, height, mk.as_ref()),
+                        ButtonAppearance {
+                            kind,
+                            selected,
+                            caption: &caption.0,
+                            caption_bytes: &caption.1,
+                            default_appearance,
+                        },
+                    );
+                }
+            } else {
+                append_button_appearance(
+                    &mut content,
+                    WidgetAppearanceBox::new(width, height, mk.as_ref()),
+                    ButtonAppearance {
+                        kind,
+                        selected,
+                        caption: &caption.0,
+                        caption_bytes: &caption.1,
+                        default_appearance,
+                    },
+                );
+            }
+        }
+        "Ch" => {
+            let selected = choice_display_text(value.as_ref(), options.as_ref())?;
+            if selected.0.is_empty() {
+                return None;
+            }
+            append_text_field_appearance(
+                &mut content,
+                WidgetAppearanceBox::new(width, height, mk.as_ref()),
+                &selected.0,
+                &selected.1,
+                TextFieldAppearance {
+                    default_appearance,
+                    alignment,
+                    multiline: field_flags & FIELD_FLAG_COMBO == 0,
+                },
+            );
+        }
+        _ => return None,
+    }
+
+    if content.is_empty() {
+        return None;
+    }
+
+    let mut form = synthesized_appearance_form_dict(width, height);
+    form.insert("Length", PdfObject::Integer(content.len() as i64));
+    Some((form, content.into_bytes()))
+}
+
+fn collect_field_chain(
+    annot: &PdfDictionary,
+    reader: &crate::reader::PdfReader,
+) -> Vec<PdfDictionary> {
+    let mut chain = vec![annot.clone()];
+    let mut parent = annot.get("Parent").cloned();
+    for _ in 0..16 {
+        let Some(parent_obj) = parent else {
+            break;
+        };
+        let Ok(PdfObject::Dictionary(parent_dict)) = reader.resolve(parent_obj) else {
+            break;
+        };
+        parent = parent_dict.get("Parent").cloned();
+        chain.push(parent_dict);
+    }
+    chain
+}
+
+fn inherited_field_object(chain: &[PdfDictionary], key: &str) -> Option<PdfObject> {
+    chain.iter().find_map(|dict| dict.get(key).cloned())
+}
+
+fn inherited_field_integer(chain: &[PdfDictionary], key: &str) -> Option<i64> {
+    chain.iter().find_map(|dict| dict.get_integer(key))
+}
+
+fn resolve_acroform_dict(
+    engine: &ContentEngine,
+    reader: &crate::reader::PdfReader,
+) -> Option<PdfDictionary> {
+    let catalog = engine.document().get_catalog().ok()?;
+    let acroform = catalog.get("AcroForm")?.clone();
+    match reader.resolve(acroform).ok()? {
+        PdfObject::Dictionary(dict) => Some(dict),
+        _ => None,
+    }
+}
+
+fn object_string_bytes(obj: &PdfObject) -> Option<Vec<u8>> {
+    obj.as_string().map(|bytes| bytes.to_vec())
+}
+
+fn parse_default_appearance(bytes: &[u8]) -> DefaultAppearance {
+    let mut appearance = DefaultAppearance::default();
+    let Ok(operations) = crate::content::ContentParser::parse(bytes) else {
+        return appearance;
+    };
+    for op in operations {
+        match op.operator.as_str() {
+            "Tf" => {
+                if let Some(size) = op.number(1) {
+                    appearance.font_size = size;
+                }
+            }
+            "g" => {
+                if let Some(gray) = op.number(0) {
+                    let gray = clamp_unit(gray);
+                    appearance.color = (gray, gray, gray);
+                }
+            }
+            "rg" => {
+                if let (Some(r), Some(g), Some(b)) = (op.number(0), op.number(1), op.number(2)) {
+                    appearance.color = (clamp_unit(r), clamp_unit(g), clamp_unit(b));
+                }
+            }
+            "k" => {
+                if let (Some(c), Some(m), Some(y), Some(k)) =
+                    (op.number(0), op.number(1), op.number(2), op.number(3))
+                {
+                    appearance.color = cmyk_to_rgb(c, m, y, k);
+                }
+            }
+            _ => {}
+        }
+    }
+    appearance
+}
+
+fn synthesized_appearance_form_dict(width: f64, height: f64) -> PdfDictionary {
+    let mut font = PdfDictionary::empty();
+    font.insert("Type", PdfObject::Name("Font".to_string()));
+    font.insert("Subtype", PdfObject::Name("Type1".to_string()));
+    font.insert("BaseFont", PdfObject::Name("Helvetica".to_string()));
+    font.insert("Encoding", PdfObject::Name("WinAnsiEncoding".to_string()));
+
+    let mut fonts = PdfDictionary::empty();
+    fonts.insert("F1", PdfObject::Dictionary(font));
+
+    let mut resources = PdfDictionary::empty();
+    resources.insert("Font", PdfObject::Dictionary(fonts));
+
+    let mut form = PdfDictionary::empty();
+    form.insert("Type", PdfObject::Name("XObject".to_string()));
+    form.insert("Subtype", PdfObject::Name("Form".to_string()));
+    form.insert(
+        "BBox",
+        PdfObject::Array(vec![
+            PdfObject::Real(0.0),
+            PdfObject::Real(0.0),
+            PdfObject::Real(width),
+            PdfObject::Real(height),
+        ]),
+    );
+    form.insert("Resources", PdfObject::Dictionary(resources));
+    form
+}
+
+fn append_text_field_appearance(
+    content: &mut String,
+    geometry: WidgetAppearanceBox<'_>,
+    text: &str,
+    text_bytes: &[u8],
+    appearance: TextFieldAppearance,
+) {
+    append_explicit_widget_chrome(content, geometry.width, geometry.height, geometry.mk);
+    if text.is_empty() {
+        return;
+    }
+
+    let font_size = effective_font_size(
+        appearance.default_appearance.font_size,
+        text,
+        geometry.width,
+        geometry.height,
+        appearance.multiline,
+    );
+    if appearance.multiline {
+        let line_height = font_size * 1.2;
+        let max_lines = ((geometry.height - 6.0).max(font_size) / line_height)
+            .floor()
+            .max(1.0) as usize;
+        let mut y = (geometry.height - font_size - 3.0).max(2.0);
+        for line in text.lines().take(max_lines) {
+            append_text_run(
+                content,
+                line.as_bytes(),
+                font_size,
+                appearance.default_appearance.color,
+                text_x_for_alignment(line, font_size, geometry.width, appearance.alignment),
+                y,
+            );
+            y -= line_height;
+            if y < 2.0 {
+                break;
+            }
+        }
+    } else {
+        let literal_bytes = if text_bytes.is_empty() {
+            text.as_bytes()
+        } else {
+            text_bytes
+        };
+        let y = ((geometry.height - font_size) * 0.5).max(2.0);
+        append_text_run(
+            content,
+            literal_bytes,
+            font_size,
+            appearance.default_appearance.color,
+            text_x_for_alignment(text, font_size, geometry.width, appearance.alignment),
+            y,
+        );
+    }
+}
+
+fn append_button_appearance(
+    content: &mut String,
+    geometry: WidgetAppearanceBox<'_>,
+    appearance: ButtonAppearance<'_>,
+) {
+    match appearance.kind {
+        ButtonAppearanceKind::Checkbox => {
+            append_widget_background_and_border(
+                content,
+                geometry.width,
+                geometry.height,
+                geometry.mk,
+                (1.0, 1.0, 1.0),
+            );
+            if appearance.selected {
+                let stroke = (geometry.width.min(geometry.height) * 0.09).clamp(1.2, 3.0);
+                let x1 = geometry.width * 0.22;
+                let y1 = geometry.height * 0.50;
+                let x2 = geometry.width * 0.42;
+                let y2 = geometry.height * 0.28;
+                let x3 = geometry.width * 0.80;
+                let y3 = geometry.height * 0.76;
+                let _ = writeln!(
+                    content,
+                    "q 0 0 0 RG {} w {} {} m {} {} l {} {} l S Q",
+                    pdf_num(stroke),
+                    pdf_num(x1),
+                    pdf_num(y1),
+                    pdf_num(x2),
+                    pdf_num(y2),
+                    pdf_num(x3),
+                    pdf_num(y3)
+                );
+            }
+        }
+        ButtonAppearanceKind::Radio => {
+            append_widget_background(
+                content,
+                geometry.width,
+                geometry.height,
+                geometry.mk,
+                (1.0, 1.0, 1.0),
+            );
+            let border = mk_rgb(geometry.mk, "BC").unwrap_or((0.0, 0.0, 0.0));
+            append_circle(
+                content,
+                geometry.width * 0.5,
+                geometry.height * 0.5,
+                geometry.width.min(geometry.height) * 0.42,
+                border,
+                false,
+            );
+            if appearance.selected {
+                append_circle(
+                    content,
+                    geometry.width * 0.5,
+                    geometry.height * 0.5,
+                    geometry.width.min(geometry.height) * 0.20,
+                    border,
+                    true,
+                );
+            }
+        }
+        ButtonAppearanceKind::PushButton => {
+            append_widget_background_and_border(
+                content,
+                geometry.width,
+                geometry.height,
+                geometry.mk,
+                (0.92, 0.92, 0.92),
+            );
+            if !appearance.caption.is_empty() {
+                let font_size = effective_font_size(
+                    appearance.default_appearance.font_size,
+                    appearance.caption,
+                    geometry.width,
+                    geometry.height,
+                    false,
+                );
+                let literal_bytes = if appearance.caption_bytes.is_empty() {
+                    appearance.caption.as_bytes()
+                } else {
+                    appearance.caption_bytes
+                };
+                append_text_run(
+                    content,
+                    literal_bytes,
+                    font_size,
+                    appearance.default_appearance.color,
+                    text_x_for_alignment(appearance.caption, font_size, geometry.width, 1),
+                    ((geometry.height - font_size) * 0.5).max(2.0),
+                );
+            }
+        }
+    }
+}
+
+fn append_widget_background_and_border(
+    content: &mut String,
+    width: f64,
+    height: f64,
+    mk: Option<&PdfDictionary>,
+    default_bg: (f64, f64, f64),
+) {
+    append_widget_background(content, width, height, mk, default_bg);
+    let border = mk_rgb(mk, "BC").unwrap_or((0.0, 0.0, 0.0));
+    let _ = writeln!(
+        content,
+        "q {} {} {} RG 1 w 0.5 0.5 {} {} re S Q",
+        pdf_num(border.0),
+        pdf_num(border.1),
+        pdf_num(border.2),
+        pdf_num((width - 1.0).max(0.0)),
+        pdf_num((height - 1.0).max(0.0))
+    );
+}
+
+fn append_explicit_widget_chrome(
+    content: &mut String,
+    width: f64,
+    height: f64,
+    mk: Option<&PdfDictionary>,
+) {
+    if let Some(bg) = mk_rgb(mk, "BG") {
+        let _ = writeln!(
+            content,
+            "q {} {} {} rg 0 0 {} {} re f Q",
+            pdf_num(bg.0),
+            pdf_num(bg.1),
+            pdf_num(bg.2),
+            pdf_num(width),
+            pdf_num(height)
+        );
+    }
+    if let Some(border) = mk_rgb(mk, "BC") {
+        let _ = writeln!(
+            content,
+            "q {} {} {} RG 1 w 0.5 0.5 {} {} re S Q",
+            pdf_num(border.0),
+            pdf_num(border.1),
+            pdf_num(border.2),
+            pdf_num((width - 1.0).max(0.0)),
+            pdf_num((height - 1.0).max(0.0))
+        );
+    }
+}
+
+fn append_widget_background(
+    content: &mut String,
+    width: f64,
+    height: f64,
+    mk: Option<&PdfDictionary>,
+    default_bg: (f64, f64, f64),
+) {
+    let bg = mk_rgb(mk, "BG").unwrap_or(default_bg);
+    let _ = writeln!(
+        content,
+        "q {} {} {} rg 0 0 {} {} re f Q",
+        pdf_num(bg.0),
+        pdf_num(bg.1),
+        pdf_num(bg.2),
+        pdf_num(width),
+        pdf_num(height)
+    );
+}
+
+fn append_text_run(
+    content: &mut String,
+    bytes: &[u8],
+    font_size: f64,
+    color: (f64, f64, f64),
+    x: f64,
+    y: f64,
+) {
+    let _ = writeln!(
+        content,
+        "q BT /F1 {} Tf {} {} {} rg 1 0 0 1 {} {} Tm {} Tj ET Q",
+        pdf_num(font_size),
+        pdf_num(color.0),
+        pdf_num(color.1),
+        pdf_num(color.2),
+        pdf_num(x),
+        pdf_num(y),
+        pdf_literal_bytes(bytes)
+    );
+}
+
+fn append_circle(
+    content: &mut String,
+    cx: f64,
+    cy: f64,
+    radius: f64,
+    color: (f64, f64, f64),
+    fill: bool,
+) {
+    let k = radius * 0.552_284_749_830_793_6;
+    let op = if fill { "f" } else { "S" };
+    let color_op = if fill { "rg" } else { "RG" };
+    let _ = writeln!(
+        content,
+        "q {} {} {} {} 1 w {} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c h {} Q",
+        pdf_num(color.0),
+        pdf_num(color.1),
+        pdf_num(color.2),
+        color_op,
+        pdf_num(cx + radius),
+        pdf_num(cy),
+        pdf_num(cx + radius),
+        pdf_num(cy + k),
+        pdf_num(cx + k),
+        pdf_num(cy + radius),
+        pdf_num(cx),
+        pdf_num(cy + radius),
+        pdf_num(cx - k),
+        pdf_num(cy + radius),
+        pdf_num(cx - radius),
+        pdf_num(cy + k),
+        pdf_num(cx - radius),
+        pdf_num(cy),
+        pdf_num(cx - radius),
+        pdf_num(cy - k),
+        pdf_num(cx - k),
+        pdf_num(cy - radius),
+        pdf_num(cx),
+        pdf_num(cy - radius),
+        pdf_num(cx + k),
+        pdf_num(cy - radius),
+        pdf_num(cx + radius),
+        pdf_num(cy - k),
+        pdf_num(cx + radius),
+        pdf_num(cy),
+        op
+    );
+}
+
+fn effective_font_size(
+    requested: f64,
+    text: &str,
+    width: f64,
+    height: f64,
+    multiline: bool,
+) -> f64 {
+    let mut size = if requested > 0.0 {
+        requested
+    } else {
+        (height * 0.55).clamp(4.0, 12.0)
+    };
+    size = size.min((height - 4.0).max(4.0));
+    if !multiline {
+        let available = (width - 6.0).max(1.0);
+        while approximate_text_width(text, size) > available && size > 4.0 {
+            size -= 0.5;
+        }
+    }
+    size.max(4.0)
+}
+
+fn text_x_for_alignment(text: &str, font_size: f64, width: f64, alignment: i64) -> f64 {
+    let padding = 3.0;
+    let text_width = approximate_text_width(text, font_size);
+    match alignment {
+        1 => ((width - text_width) * 0.5).max(padding),
+        2 => (width - text_width - padding).max(padding),
+        _ => padding,
+    }
+}
+
+fn approximate_text_width(text: &str, font_size: f64) -> f64 {
+    text.chars().count() as f64 * font_size * 0.52
+}
+
+fn button_is_selected(
+    kind: ButtonAppearanceKind,
+    annot: &PdfDictionary,
+    value: Option<&PdfObject>,
+) -> bool {
+    let appearance_state = annot
+        .get_name("AS")
+        .filter(|state| *state != "Off")
+        .map(str::to_string);
+    let value_state = value.and_then(object_state_name);
+    match kind {
+        ButtonAppearanceKind::PushButton => false,
+        ButtonAppearanceKind::Checkbox => {
+            appearance_state.is_some() || value_state_is_on(value_state)
+        }
+        ButtonAppearanceKind::Radio => match (appearance_state, value_state) {
+            (Some(appearance), Some(value)) => appearance == value,
+            (Some(_), None) => true,
+            (None, Some(value)) => value != "Off",
+            (None, None) => false,
+        },
+    }
+}
+
+fn checkbox_label_state(annot: &PdfDictionary, value: Option<&PdfObject>) -> Option<String> {
+    let state = annot
+        .get_name("AS")
+        .filter(|state| *state != "Off")
+        .map(str::to_string)
+        .or_else(|| value.and_then(object_state_name))?;
+    if is_label_like_button_state(&state) {
+        Some(state)
+    } else {
+        None
+    }
+}
+
+fn is_label_like_button_state(state: &str) -> bool {
+    let normalized = state.trim();
+    if matches!(normalized, "" | "Off" | "On" | "Yes" | "1") {
+        return false;
+    }
+    normalized.chars().count() > 1 && normalized.chars().any(|ch| ch.is_ascii_alphabetic())
+}
+
+fn value_state_is_on(value: Option<String>) -> bool {
+    value
+        .map(|value| !value.is_empty() && value != "Off")
+        .unwrap_or(false)
+}
+
+fn object_state_name(obj: &PdfObject) -> Option<String> {
+    match obj {
+        PdfObject::Name(name) => Some(name.clone()),
+        PdfObject::String(bytes) => Some(decode_pdf_text_string(bytes)),
+        _ => None,
+    }
+}
+
+fn display_text_from_object(obj: &PdfObject) -> Option<(String, Vec<u8>)> {
+    match obj {
+        PdfObject::String(bytes) => Some((decode_pdf_text_string(bytes), bytes.clone())),
+        PdfObject::Name(name) => {
+            if name == "Off" {
+                None
+            } else {
+                Some((name.clone(), name.as_bytes().to_vec()))
+            }
+        }
+        PdfObject::Integer(value) => {
+            let text = value.to_string();
+            Some((text.clone(), text.into_bytes()))
+        }
+        PdfObject::Real(value) => {
+            let text = pdf_num(*value);
+            Some((text.clone(), text.into_bytes()))
+        }
+        PdfObject::Array(items) => {
+            let values: Vec<(String, Vec<u8>)> =
+                items.iter().filter_map(display_text_from_object).collect();
+            if values.is_empty() {
+                None
+            } else {
+                let text = values
+                    .iter()
+                    .map(|(text, _)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some((text.clone(), text.into_bytes()))
+            }
+        }
+        _ => None,
+    }
+}
+
+fn choice_display_text(
+    value: Option<&PdfObject>,
+    options: Option<&PdfObject>,
+) -> Option<(String, Vec<u8>)> {
+    value
+        .and_then(display_text_from_object)
+        .or_else(|| first_option_display_text(options?))
+}
+
+fn first_option_display_text(options: &PdfObject) -> Option<(String, Vec<u8>)> {
+    let PdfObject::Array(items) = options else {
+        return None;
+    };
+    items.iter().find_map(option_display_text)
+}
+
+fn option_display_text(option: &PdfObject) -> Option<(String, Vec<u8>)> {
+    match option {
+        PdfObject::Array(items) => items
+            .get(1)
+            .or_else(|| items.first())
+            .and_then(display_text_from_object),
+        other => display_text_from_object(other),
+    }
+}
+
+fn mk_rgb(mk: Option<&PdfDictionary>, key: &str) -> Option<(f64, f64, f64)> {
+    let arr = mk?.get_array(key)?;
+    match arr.len() {
+        1 => {
+            let gray = clamp_unit(arr[0].as_number()?);
+            Some((gray, gray, gray))
+        }
+        3 => Some((
+            clamp_unit(arr[0].as_number()?),
+            clamp_unit(arr[1].as_number()?),
+            clamp_unit(arr[2].as_number()?),
+        )),
+        4 => Some(cmyk_to_rgb(
+            arr[0].as_number()?,
+            arr[1].as_number()?,
+            arr[2].as_number()?,
+            arr[3].as_number()?,
+        )),
+        _ => None,
+    }
+}
+
+fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> (f64, f64, f64) {
+    let c = clamp_unit(c);
+    let m = clamp_unit(m);
+    let y = clamp_unit(y);
+    let k = clamp_unit(k);
+    (
+        clamp_unit((1.0 - c) * (1.0 - k)),
+        clamp_unit((1.0 - m) * (1.0 - k)),
+        clamp_unit((1.0 - y) * (1.0 - k)),
+    )
+}
+
+fn clamp_unit(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn pdf_num(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let mut s = format!("{value:.3}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    if s == "-0" {
+        "0".to_string()
+    } else {
+        s
+    }
+}
+
+fn pdf_literal_bytes(bytes: &[u8]) -> String {
+    let mut out = String::from("(");
+    for &byte in bytes {
+        match byte {
+            b'(' | b')' | b'\\' => {
+                out.push('\\');
+                out.push(byte as char);
+            }
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => {
+                let _ = write!(out, "\\{byte:03o}");
+            }
+        }
+    }
+    out.push(')');
+    out
+}
+
+fn resolve_appearance_stream(
+    value: &PdfObject,
+    reader: &crate::reader::PdfReader,
+) -> Option<(PdfDictionary, Vec<u8>)> {
+    match reader.resolve(value.clone()).ok()? {
+        PdfObject::Stream { dict, raw } => Some((dict, raw)),
+        _ => None,
+    }
+}
+
+fn extract_rect(dict: &PdfDictionary) -> Option<[f64; 4]> {
+    let arr = dict.get("Rect")?.as_array()?;
+    if arr.len() < 4 {
+        return None;
+    }
+    let vals: Vec<f64> = arr
+        .iter()
+        .take(4)
+        .filter_map(PdfObject::as_number)
+        .collect();
+    if vals.len() < 4 {
+        return None;
+    }
+    Some([vals[0], vals[1], vals[2], vals[3]])
+}
+
+fn annotation_appearance_ctm(rect: [f64; 4], bbox: [f64; 4]) -> Option<Transform2D> {
+    let rect_x0 = rect[0].min(rect[2]);
+    let rect_y0 = rect[1].min(rect[3]);
+    let rect_w = (rect[2] - rect[0]).abs();
+    let rect_h = (rect[3] - rect[1]).abs();
+    let bbox_x0 = bbox[0].min(bbox[2]);
+    let bbox_y0 = bbox[1].min(bbox[3]);
+    let bbox_w = (bbox[2] - bbox[0]).abs();
+    let bbox_h = (bbox[3] - bbox[1]).abs();
+    if rect_w <= 0.0 || rect_h <= 0.0 || bbox_w <= 0.0 || bbox_h <= 0.0 {
+        return None;
+    }
+    let to_origin = Transform2D::translation(-bbox_x0, -bbox_y0);
+    let scale = Transform2D::scale(rect_w / bbox_w, rect_h / bbox_h);
+    let to_rect = Transform2D::translation(rect_x0, rect_y0);
+    Some(to_origin.concat(&scale).concat(&to_rect))
+}
+
 /// Extract a Form XObject's `/BBox` as `[x_min, y_min, x_max, y_max]`.
 /// Returns `None` when absent or not a 4-number array.
 fn extract_bbox(dict: &PdfDictionary) -> Option<[f64; 4]> {
@@ -2153,9 +3514,89 @@ mod tests {
         format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), path)
     }
 
+    fn simple_pdf_with_extgstate(
+        content: &str,
+        extgstates: &[&str],
+        extgstate_resources: &str,
+    ) -> Vec<u8> {
+        fn add_obj(objects: &mut Vec<Vec<u8>>, body: impl AsRef<[u8]>) -> usize {
+            objects.push(body.as_ref().to_vec());
+            objects.len()
+        }
+
+        let mut objects = Vec::new();
+        let font = add_obj(
+            &mut objects,
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        );
+        let ext_ids: Vec<usize> = extgstates
+            .iter()
+            .map(|body| add_obj(&mut objects, body.as_bytes()))
+            .collect();
+        let stream = format!(
+            "<< /Length {} >>\nstream\n{}\nendstream",
+            content.len(),
+            content
+        );
+        let contents = add_obj(&mut objects, stream.as_bytes());
+        let page = objects.len() + 1;
+        let pages = objects.len() + 2;
+        let root = objects.len() + 3;
+        let resources = extgstate_resources
+            .replace("{font}", &font.to_string())
+            .replace("{gs1}", &ext_ids[0].to_string())
+            .replace("{gs2}", &ext_ids[1].to_string());
+        add_obj(
+            &mut objects,
+            format!(
+                "<< /Type /Page /Parent {} 0 R /MediaBox [0 0 100 100] \
+                 /Resources {} /Contents {} 0 R >>",
+                pages, resources, contents
+            )
+            .as_bytes(),
+        );
+        add_obj(
+            &mut objects,
+            format!("<< /Type /Pages /Kids [{} 0 R] /Count 1 >>", page).as_bytes(),
+        );
+        add_obj(
+            &mut objects,
+            format!("<< /Type /Catalog /Pages {} 0 R >>", pages).as_bytes(),
+        );
+
+        let mut out = bytearray_pdf_header();
+        let mut offsets = vec![0usize];
+        for (idx, obj) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", idx + 1).as_bytes());
+            out.extend_from_slice(obj);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let startxref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            out.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root {} 0 R >>\nstartxref\n{}\n%%EOF\n",
+                objects.len() + 1,
+                root,
+                startxref
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    fn bytearray_pdf_header() -> Vec<u8> {
+        b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n".to_vec()
+    }
+
     #[test]
     fn type0_font_decodes_two_byte_strings() {
-        let bytes = vec![0x00u8, 0x48, 0x00, 0x69];
+        let bytes = [0x00u8, 0x48, 0x00, 0x69];
         let mut cmap = std::collections::HashMap::new();
         cmap.insert(72u32, 'H');
         cmap.insert(105u32, 'i');
@@ -2177,7 +3618,8 @@ mod tests {
     #[test]
     fn extract_glyph_path_by_gid_returns_positive_advance_for_gid_zero() {
         let font_bytes = get_fallback_font("Helvetica").expect("fallback font");
-        let (_path, advance) = RenderState::extract_glyph_path_by_gid(font_bytes, 0);
+        let (_path, advance) =
+            crate::render::glyph_outline::extract_glyph_path_by_gid(font_bytes, 0);
         assert!(advance > 0.0);
     }
 
@@ -2188,9 +3630,193 @@ mod tests {
         let gid_for_a = face.glyph_index('A').expect("glyph A").0;
 
         let (_path_by_char, adv_char) = RenderState::extract_glyph_path(font_bytes, 'A');
-        let (_path_by_gid, adv_gid) = RenderState::extract_glyph_path_by_gid(font_bytes, gid_for_a);
+        let (_path_by_gid, adv_gid) =
+            crate::render::glyph_outline::extract_glyph_path_by_gid(font_bytes, gid_for_a);
 
         assert!((adv_char - adv_gid).abs() < 1.0);
+    }
+
+    #[test]
+    fn top_level_page_group_flattens_after_blending() {
+        let pdf = simple_pdf_with_extgstate(
+            "q /GS1 gs 1 0 0 rg 10 10 50 40 re f Q\n\
+             q /GS2 gs 0 0 1 rg 35 30 50 40 re f Q",
+            &[
+                "<< /Type /ExtGState /ca 0.45 /CA 0.45 /BM /Multiply >>",
+                "<< /Type /ExtGState /ca 0.55 /CA 0.55 /BM /Screen >>",
+            ],
+            "<< /Font << /F1 {font} 0 R >> /ExtGState << /GS1 {gs1} 0 R /GS2 {gs2} 0 R >> >>",
+        );
+        let engine = ContentEngine::open_bytes(pdf).expect("open transparency PDF");
+        let buf = engine.render_page(1, 72).expect("render transparency PDF");
+
+        assert_eq!(buf.get_pixel(5, 5), WHITE, "empty page area is white paper");
+        let blue_only = buf.get_pixel(80, 40);
+        assert!(
+            blue_only[2] > 240 && blue_only[0] < 150 && blue_only[1] < 150,
+            "Screen over initial transparent backdrop must survive final white flatten: {:?}",
+            blue_only
+        );
+        let overlap = buf.get_pixel(45, 60);
+        assert!(
+            (overlap[0] as i32 - 178).abs() <= 2
+                && (overlap[1] as i32 - 63).abs() <= 2
+                && (overlap[2] as i32 - 203).abs() <= 2,
+            "Screen over partially transparent red backdrop should match PDF blend math: {:?}",
+            overlap
+        );
+    }
+
+    #[test]
+    fn annotation_appearance_stream_renders_selected_state_by_default() {
+        let pdf = pdf_with_annotation_appearance(0, true, false);
+        let engine = ContentEngine::open_bytes(pdf).expect("open annotation PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render annotation PDF");
+
+        assert!(
+            count_red_pixels(&buf) > 100,
+            "selected /AS appearance should paint the widget"
+        );
+        assert_eq!(
+            count_blue_pixels(&buf),
+            0,
+            "the /Off appearance must not be rendered when /AS selects /Yes"
+        );
+    }
+
+    #[test]
+    fn hidden_annotation_appearance_is_not_rendered() {
+        let pdf = pdf_with_annotation_appearance(2, false, false);
+        let engine = ContentEngine::open_bytes(pdf).expect("open hidden annotation PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render hidden annotation PDF");
+
+        assert_eq!(
+            count_red_pixels(&buf),
+            0,
+            "hidden annotations must not render their appearance streams"
+        );
+    }
+
+    #[test]
+    fn need_appearances_does_not_override_existing_widget_appearance() {
+        let pdf = pdf_with_annotation_appearance(0, true, true);
+        let engine = ContentEngine::open_bytes(pdf).expect("open NeedAppearances PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render NeedAppearances PDF");
+
+        assert!(
+            count_red_pixels(&buf) > 100,
+            "a usable author-provided /AP stream should still take precedence"
+        );
+    }
+
+    #[test]
+    fn text_widget_without_appearance_synthesizes_value_from_da() {
+        let widget = b"<< /Type /Annot /Subtype /Widget /Rect [20 35 90 60] \
+                       /FT /Tx /T (name) /V (Hi) /DA (/F1 14 Tf 0 0 1 rg) /Q 1 >>";
+        let pdf = pdf_with_form_objects(vec![widget.to_vec()], "5 0 R", "5 0 R", "");
+        let engine = ContentEngine::open_bytes(pdf).expect("open missing-AP text widget PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render text widget PDF");
+
+        assert!(
+            count_blue_pixels(&buf) > 5,
+            "text widget synthesis should honor blue fill color from /DA"
+        );
+    }
+
+    #[test]
+    fn checkbox_without_appearance_synthesizes_checked_and_unchecked_states() {
+        let checked = b"<< /Type /Annot /Subtype /Widget /Rect [25 25 55 55] \
+                         /FT /Btn /T (agree) /V /Yes /AS /Yes >>";
+        let unchecked = b"<< /Type /Annot /Subtype /Widget /Rect [25 25 55 55] \
+                           /FT /Btn /T (agree) /V /Off /AS /Off >>";
+        let checked_pdf = pdf_with_form_objects(
+            vec![checked.to_vec()],
+            "5 0 R",
+            "5 0 R",
+            "/NeedAppearances true",
+        );
+        let unchecked_pdf = pdf_with_form_objects(
+            vec![unchecked.to_vec()],
+            "5 0 R",
+            "5 0 R",
+            "/NeedAppearances true",
+        );
+        let checked_engine = ContentEngine::open_bytes(checked_pdf).expect("open checked PDF");
+        let unchecked_engine =
+            ContentEngine::open_bytes(unchecked_pdf).expect("open unchecked PDF");
+        let checked_buf =
+            PageRenderer::render_page(&checked_engine, 1, 72).expect("render checked PDF");
+        let unchecked_buf =
+            PageRenderer::render_page(&unchecked_engine, 1, 72).expect("render unchecked PDF");
+
+        assert!(
+            count_dark_pixels(&checked_buf) > count_dark_pixels(&unchecked_buf) + 10,
+            "checked checkbox synthesis should add a visible check mark"
+        );
+    }
+
+    #[test]
+    fn radio_widget_without_appearance_uses_parent_value() {
+        let parent = b"<< /FT /Btn /Ff 32768 /V /Choice /Kids [6 0 R] >>";
+        let widget = b"<< /Type /Annot /Subtype /Widget /Parent 5 0 R \
+                       /Rect [25 25 55 55] /AS /Choice >>";
+        let pdf = pdf_with_form_objects(
+            vec![parent.to_vec(), widget.to_vec()],
+            "6 0 R",
+            "5 0 R",
+            "/NeedAppearances true",
+        );
+        let engine = ContentEngine::open_bytes(pdf).expect("open missing-AP radio PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render radio PDF");
+
+        assert!(
+            count_dark_pixels(&buf) > 140,
+            "selected radio synthesis should draw both ring and inner marker"
+        );
+    }
+
+    #[test]
+    fn pushbutton_without_appearance_synthesizes_caption() {
+        let widget = b"<< /Type /Annot /Subtype /Widget /Rect [20 35 85 60] \
+                       /FT /Btn /Ff 65536 /MK << /CA (Go) /BG [0.8 0.8 0.8] >> >>";
+        let pdf = pdf_with_form_objects(vec![widget.to_vec()], "5 0 R", "5 0 R", "");
+        let engine = ContentEngine::open_bytes(pdf).expect("open missing-AP pushbutton PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render pushbutton PDF");
+
+        assert!(
+            count_gray_pixels(&buf) > 500 && count_dark_pixels(&buf) > 50,
+            "pushbutton synthesis should draw its background, border, and caption"
+        );
+    }
+
+    #[test]
+    fn choice_widget_without_appearance_synthesizes_selected_value() {
+        let widget = b"<< /Type /Annot /Subtype /Widget /Rect [15 35 95 60] \
+                       /FT /Ch /Ff 131072 /V (Banana) /Opt [(Apple) (Banana)] \
+                       /DA (/F1 12 Tf 0 g) >>";
+        let pdf = pdf_with_form_objects(vec![widget.to_vec()], "5 0 R", "5 0 R", "");
+        let engine = ContentEngine::open_bytes(pdf).expect("open missing-AP choice PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render choice PDF");
+
+        assert!(
+            count_dark_pixels(&buf) > 20,
+            "choice synthesis should render the selected option text"
+        );
+    }
+
+    #[test]
+    fn hidden_widget_without_appearance_is_not_synthesized() {
+        let widget = b"<< /Type /Annot /Subtype /Widget /Rect [20 35 90 60] /F 2 \
+                       /FT /Tx /T (hidden) /V (Hidden) /DA (/F1 14 Tf 0 g) >>";
+        let pdf = pdf_with_form_objects(vec![widget.to_vec()], "5 0 R", "5 0 R", "");
+        let engine = ContentEngine::open_bytes(pdf).expect("open hidden missing-AP PDF");
+        let buf = PageRenderer::render_page(&engine, 1, 72).expect("render hidden PDF");
+
+        assert_eq!(
+            count_dark_pixels(&buf),
+            0,
+            "hidden missing-appearance widgets must stay hidden"
+        );
     }
 
     #[test]
@@ -2205,6 +3831,186 @@ mod tests {
             .filter(|pixel| pixel[0] < 200 || pixel[1] < 200 || pixel[2] < 200)
             .count();
         assert!(non_white > 20);
+    }
+
+    fn pdf_with_annotation_appearance(
+        flags: i64,
+        stateful: bool,
+        need_appearances: bool,
+    ) -> Vec<u8> {
+        fn stream(body: &str, dict_extra: &str) -> Vec<u8> {
+            format!(
+                "<< {} /Length {} >>\nstream\n{}\nendstream",
+                dict_extra,
+                body.len(),
+                body
+            )
+            .into_bytes()
+        }
+
+        let content = stream("", "");
+        let red_appearance = stream(
+            "1 0 0 rg 0 0 50 50 re f\n",
+            "/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << >>",
+        );
+        let blue_appearance = stream(
+            "0 0 1 rg 0 0 50 50 re f\n",
+            "/Type /XObject /Subtype /Form /BBox [0 0 50 50] /Resources << >>",
+        );
+
+        let annot = if stateful {
+            format!(
+                "<< /Type /Annot /Subtype /Widget /Rect [20 20 70 70] /F {} \
+                 /AS /Yes /AP << /N << /Yes 6 0 R /Off 7 0 R >> >> >>",
+                flags
+            )
+        } else {
+            format!(
+                "<< /Type /Annot /Subtype /Widget /Rect [20 20 70 70] /F {} \
+                 /AP << /N 6 0 R >> >>",
+                flags
+            )
+        };
+
+        let catalog = if need_appearances {
+            b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /NeedAppearances true >> >>".to_vec()
+        } else {
+            b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()
+        };
+
+        let objects: Vec<Vec<u8>> = vec![
+            catalog,
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> /Contents 4 0 R /Annots [5 0 R] >>".to_vec(),
+            content,
+            annot.into_bytes(),
+            red_appearance,
+            blue_appearance,
+        ];
+
+        let mut out = bytearray_pdf_header();
+        let mut offsets = vec![0usize];
+        for (idx, obj) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", idx + 1).as_bytes());
+            out.extend_from_slice(obj);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let startxref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            out.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                objects.len() + 1,
+                startxref
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    fn pdf_with_form_objects(
+        form_objects: Vec<Vec<u8>>,
+        page_annots: &str,
+        acroform_fields: &str,
+        acroform_extra: &str,
+    ) -> Vec<u8> {
+        fn stream(body: &str, dict_extra: &str) -> Vec<u8> {
+            format!(
+                "<< {} /Length {} >>\nstream\n{}\nendstream",
+                dict_extra,
+                body.len(),
+                body
+            )
+            .into_bytes()
+        }
+
+        let font_number = 5 + form_objects.len();
+        let catalog = format!(
+            "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [{}] \
+             /DA (/F1 12 Tf 0 g) /DR << /Font << /F1 {} 0 R >> >> {} >> >>",
+            acroform_fields, font_number, acroform_extra
+        )
+        .into_bytes();
+        let content = stream("", "");
+        let mut objects: Vec<Vec<u8>> = vec![
+            catalog,
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+            format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+                 /Resources << >> /Contents 4 0 R /Annots [{}] >>",
+                page_annots
+            )
+            .into_bytes(),
+            content,
+        ];
+        objects.extend(form_objects);
+        objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec());
+
+        let mut out = bytearray_pdf_header();
+        let mut offsets = vec![0usize];
+        for (idx, obj) in objects.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", idx + 1).as_bytes());
+            out.extend_from_slice(obj);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let startxref = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n", objects.len() + 1).as_bytes());
+        out.extend_from_slice(b"0000000000 65535 f \n");
+        for offset in offsets.iter().skip(1) {
+            out.extend_from_slice(format!("{:010} 00000 n \n", offset).as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                objects.len() + 1,
+                startxref
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    fn count_red_pixels(buf: &PixelBuffer) -> usize {
+        count_pixels_matching(buf, |pixel| {
+            pixel[0] > 200 && pixel[1] < 80 && pixel[2] < 80
+        })
+    }
+
+    fn count_blue_pixels(buf: &PixelBuffer) -> usize {
+        count_pixels_matching(buf, |pixel| {
+            pixel[2] > 200 && pixel[0] < 80 && pixel[1] < 80
+        })
+    }
+
+    fn count_dark_pixels(buf: &PixelBuffer) -> usize {
+        count_pixels_matching(buf, |pixel| pixel[0] < 80 && pixel[1] < 80 && pixel[2] < 80)
+    }
+
+    fn count_gray_pixels(buf: &PixelBuffer) -> usize {
+        count_pixels_matching(buf, |pixel| {
+            (pixel[0] as i16 - pixel[1] as i16).abs() < 4
+                && (pixel[1] as i16 - pixel[2] as i16).abs() < 4
+                && pixel[0] > 150
+                && pixel[0] < 235
+        })
+    }
+
+    fn count_pixels_matching(buf: &PixelBuffer, pred: impl Fn(PixelColor) -> bool) -> usize {
+        let mut count = 0usize;
+        for y in 0..buf.height {
+            for x in 0..buf.width {
+                if pred(buf.get_pixel(x as i32, y as i32)) {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     #[test]
@@ -2537,25 +4343,30 @@ mod tests {
 
     #[test]
     fn porter_duff_pixel_blend_matches_half_red_over_white() {
+        // Half-red (rgb 128,0,0 at alpha 128/255≈0.502) over white, composited in
+        // sRGB space (matches Poppler/Splash). Each channel mixes directly:
+        // R = 0.502*128 + 0.498*255 ≈ 191; G = B = 0.502*0 + 0.498*255 ≈ 127.
         let mut buf = PixelBuffer::new_filled(1, 1, WHITE);
         buf.blend_pixel(0, 0, [128, 0, 0, 128], 1.0);
         let pixel = buf.get_pixel(0, 0);
         println!("porter-duff half-red pixel: {:?}", pixel);
-        assert!((pixel[0] as i32 - 191).abs() <= 3);
-        assert!((pixel[1] as i32 - 128).abs() <= 3);
-        assert!((pixel[2] as i32 - 128).abs() <= 3);
+        assert!((pixel[0] as i32 - 191).abs() <= 3, "R={}", pixel[0]);
+        assert!((pixel[1] as i32 - 127).abs() <= 3, "G={}", pixel[1]);
+        assert!((pixel[2] as i32 - 127).abs() <= 3, "B={}", pixel[2]);
     }
 
     #[test]
     fn alpha_composite_white_plus_half_red_is_pink() {
+        // sRGB-space source-over (matches Poppler/Splash): the G/B channels land
+        // at the sRGB midpoint 0.5, not the linear-light value ~0.735.
         let result = RenderColor::alpha_composite(
             RenderColor::white(),
             RenderColor::new(1.0, 0.0, 0.0, 0.5),
         );
         assert!((result.a - 1.0).abs() < 0.001);
         assert!((result.r - 1.0).abs() < 0.001);
-        assert!((result.g - 0.5).abs() < 0.001);
-        assert!((result.b - 0.5).abs() < 0.001);
+        assert!((result.g - 0.5).abs() < 0.01, "g={}", result.g);
+        assert!((result.b - 0.5).abs() < 0.01, "b={}", result.b);
     }
 
     #[test]

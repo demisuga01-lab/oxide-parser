@@ -1,5 +1,6 @@
 use crate::content::state::{Color as GsColor, ColorSpace as GsColorSpace};
 use crate::render::buffer::PixelColor;
+use crate::render::cmm::{self, CalGrayParams, CalRgbParams, LabParams};
 
 /// Final device-space RGBA color used for pixel blending.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -55,17 +56,21 @@ impl RenderColor {
         Self::new(self.r, self.g, self.b, alpha)
     }
 
-    /// Porter-Duff source-over compositing.
+    /// Porter-Duff source-over compositing, performed in **sRGB space** to match
+    /// the reference renderer (Poppler/Splash) and
+    /// [`crate::render::buffer::PixelBuffer::blend_pixel`]. The colour components
+    /// are mixed directly in their stored sRGB encoding.
     pub fn alpha_composite(dst: RenderColor, src: RenderColor) -> RenderColor {
         let out_a = src.a + dst.a * (1.0 - src.a);
         if out_a < 1e-6 {
             return RenderColor::transparent();
         }
         let inv_a = 1.0 / out_a;
+        let mix = |s: f32, d: f32| -> f32 { (s * src.a + d * dst.a * (1.0 - src.a)) * inv_a };
         RenderColor {
-            r: (src.r * src.a + dst.r * dst.a * (1.0 - src.a)) * inv_a,
-            g: (src.g * src.a + dst.g * dst.a * (1.0 - src.a)) * inv_a,
-            b: (src.b * src.a + dst.b * dst.a * (1.0 - src.a)) * inv_a,
+            r: mix(src.r, dst.r),
+            g: mix(src.g, dst.g),
+            b: mix(src.b, dst.b),
             a: out_a,
         }
     }
@@ -99,12 +104,8 @@ impl ColorSpaceHandler {
                 let m = comps.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                 let y = comps.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                 let k = comps.get(3).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-                RenderColor::new(
-                    ((1.0 - c) * (1.0 - k)) as f32,
-                    ((1.0 - m) * (1.0 - k)) as f32,
-                    ((1.0 - y) * (1.0 - k)) as f32,
-                    alpha,
-                )
+                let [r, g, b] = cmm::device_cmyk_to_srgb(c as f32, m as f32, y as f32, k as f32);
+                RenderColor::new(r, g, b, alpha)
             }
             GsColorSpace::Named(name) => {
                 log::warn!(
@@ -119,14 +120,28 @@ impl ColorSpaceHandler {
     /// Convert raw color-space components without requiring GraphicsState Color.
     pub fn from_components(space_name: &str, components: &[f64], alpha: f32) -> RenderColor {
         match space_name {
-            "DeviceGray" | "G" | "CalGray" => {
+            "DeviceGray" | "G" => {
                 let g = components.first().copied().unwrap_or(0.0) as f32;
                 RenderColor::new(g, g, g, alpha)
             }
-            "DeviceRGB" | "RGB" | "CalRGB" | "sRGB" => {
+            "CalGray" => {
+                let g = components.first().copied().unwrap_or(0.0) as f32;
+                let [r, g, b] = cmm::cal_gray_to_srgb(g, CalGrayParams::default());
+                RenderColor::new(r, g, b, alpha)
+            }
+            "DeviceRGB" | "RGB" | "sRGB" => {
                 let r = components.first().copied().unwrap_or(0.0) as f32;
                 let g = components.get(1).copied().unwrap_or(0.0) as f32;
                 let b = components.get(2).copied().unwrap_or(0.0) as f32;
+                RenderColor::new(r, g, b, alpha)
+            }
+            "CalRGB" => {
+                let comps = [
+                    components.first().copied().unwrap_or(0.0) as f32,
+                    components.get(1).copied().unwrap_or(0.0) as f32,
+                    components.get(2).copied().unwrap_or(0.0) as f32,
+                ];
+                let [r, g, b] = cmm::cal_rgb_to_srgb(comps, CalRgbParams::default());
                 RenderColor::new(r, g, b, alpha)
             }
             "DeviceCMYK" | "CMYK" => {
@@ -134,16 +149,15 @@ impl ColorSpaceHandler {
                 let m = components.get(1).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                 let y = components.get(2).copied().unwrap_or(0.0).clamp(0.0, 1.0);
                 let k = components.get(3).copied().unwrap_or(0.0).clamp(0.0, 1.0);
-                RenderColor::new(
-                    ((1.0 - c) * (1.0 - k)) as f32,
-                    ((1.0 - m) * (1.0 - k)) as f32,
-                    ((1.0 - y) * (1.0 - k)) as f32,
-                    alpha,
-                )
+                let [r, g, b] = cmm::device_cmyk_to_srgb(c as f32, m as f32, y as f32, k as f32);
+                RenderColor::new(r, g, b, alpha)
             }
             "Lab" => {
-                let l = (components.first().copied().unwrap_or(0.0) / 100.0) as f32;
-                RenderColor::new(l, l, l, alpha)
+                let l = components.first().copied().unwrap_or(0.0) as f32;
+                let a = components.get(1).copied().unwrap_or(0.0) as f32;
+                let b = components.get(2).copied().unwrap_or(0.0) as f32;
+                let [r, g, b] = cmm::lab_to_srgb(l, a, b, LabParams::default());
+                RenderColor::new(r, g, b, alpha)
             }
             other => {
                 log::warn!(
@@ -241,7 +255,9 @@ mod tests {
             components: vec![0.0, 0.0, 0.0, 1.0],
         };
         let rc = ColorSpaceHandler::to_render_color(&c, 1.0);
-        assert!(rc.r < 0.001);
+        assert!((rc.r - 35.0 / 255.0).abs() < 0.01);
+        assert!((rc.g - 31.0 / 255.0).abs() < 0.01);
+        assert!((rc.b - 32.0 / 255.0).abs() < 0.01);
     }
 
     #[test]
@@ -272,8 +288,15 @@ mod tests {
 
     #[test]
     fn blend_coverage_with_half_coverage() {
+        // 50% coverage of black over white, composited in sRGB space (matching
+        // Poppler/Splash and the pixel compositor), lands at the sRGB midpoint
+        // 0.5 — not the linear-light value ~0.737.
         let out = RenderColor::blend_coverage(RenderColor::white(), RenderColor::black(), 0.5);
-        assert!((out.r - 0.5).abs() < 0.05);
+        assert!(
+            (out.r - 0.5).abs() < 0.01,
+            "sRGB 50% black over white ~0.5, got {}",
+            out.r
+        );
         assert!(out.a > 0.9);
     }
 

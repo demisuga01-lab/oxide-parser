@@ -36,7 +36,7 @@ use crate::engine::{ContentEngine, PageResources};
 use crate::error::Result;
 use crate::render::color::{ColorSpaceHandler, RenderColor};
 use crate::render::glyph_outline::{
-    extract_glyph_path, extract_glyph_path_by_gid, font_size_scale, get_upem,
+    extract_glyph_path_by_gid, extract_glyph_path_for_simple, font_size_scale, get_upem,
 };
 use crate::render::path::{flatten_path, FillRule, FlatPath, Path};
 use crate::render::text_decode::{decode_text_bytes, get_font_bytes, DecodedGlyph};
@@ -62,9 +62,7 @@ fn needs_raster_fallback(ops: &[ContentOperation]) -> bool {
             "Do" | "sh" | "BI" | "ID" | "EI" | "inline_image_data" => return true,
             // Pattern colour space set as the fill/stroke colour (scn/SCN with a
             // pattern name) — shading/tiling patterns can't map to plain paths.
-            "scn" | "SCN"
-                if op.operands.iter().any(|o| matches!(o, Operand::Name(_))) =>
-            {
+            "scn" | "SCN" if op.operands.iter().any(|o| matches!(o, Operand::Name(_))) => {
                 return true;
             }
             _ => {}
@@ -297,7 +295,8 @@ impl SvgRenderState<'_> {
             "W" => self.pending_clip = Some(FillRule::NonZero),
             "W*" => self.pending_clip = Some(FillRule::EvenOdd),
             "q" => {
-                self.clip_stack.push(self.current_clip().map(str::to_string));
+                self.clip_stack
+                    .push(self.current_clip().map(str::to_string));
                 self.gs.process(op);
             }
             "Q" => {
@@ -433,11 +432,10 @@ impl SvgRenderState<'_> {
         if self.gs.dash.pattern.is_empty() {
             return String::new();
         }
-        let scale = self.viewport.scale
-            * {
-                let ctm = self.ctm();
-                ((ctm.a * ctm.a + ctm.b * ctm.b).sqrt()).max(1e-6)
-            };
+        let scale = self.viewport.scale * {
+            let ctm = self.ctm();
+            ((ctm.a * ctm.a + ctm.b * ctm.b).sqrt()).max(1e-6)
+        };
         let dashes: Vec<String> = self
             .gs
             .dash
@@ -530,17 +528,25 @@ impl SvgRenderState<'_> {
         let (outline, advance) = if glyph.is_gid {
             extract_glyph_path_by_gid(font_bytes, glyph.code)
         } else {
-            extract_glyph_path(font_bytes, glyph.unicode)
+            extract_glyph_path_for_simple(
+                font_bytes,
+                glyph.code,
+                glyph.unicode,
+                glyph.glyph_name.as_deref(),
+            )
         };
         let Some(glyph_path) = outline else {
             return Some(advance);
         };
 
         let scale = font_size_scale(self.gs.text.font_size, upem);
-        if scale <= 0.0 {
+        let th = self.gs.text.horizontal_scaling / 100.0;
+        let scale_x = scale * th;
+        if scale <= 0.0 || !scale_x.is_finite() {
             return Some(advance);
         }
-        let glyph_ctm = Transform2D::scale(scale, scale)
+        let glyph_ctm = Transform2D::scale(scale_x, scale)
+            .concat(&Transform2D::translation(0.0, self.gs.text.rise))
             .concat(&Transform2D::from(self.gs.text.tm))
             .concat(&self.ctm());
         let flat = flatten_path(&glyph_path, &glyph_ctm, &self.viewport, 0.3);
@@ -564,9 +570,8 @@ impl SvgRenderState<'_> {
             _ => {
                 let (rgb, a) = self.resolve_color(&self.gs.fill_color, self.gs.fill_alpha as f32);
                 let op = opacity_attr("fill-opacity", a);
-                self.sink.push_element(&format!(
-                    "<path d=\"{d}\" fill=\"{rgb}\"{op}{clip}/>"
-                ));
+                self.sink
+                    .push_element(&format!("<path d=\"{d}\" fill=\"{rgb}\"{op}{clip}/>"));
             }
         }
         Some(advance)
@@ -590,10 +595,10 @@ impl SvgRenderState<'_> {
     }
 
     fn translate_text_matrix(&mut self, tx: f64, ty: f64) {
-        // Tm := translate(tx,ty) * Tm, matching the raster renderer.
-        let t = Transform2D::new(1.0, 0.0, 0.0, 1.0, tx, ty);
-        let tm = t.concat(&Transform2D::from(self.gs.text.tm));
-        self.gs.text.tm = tm.to_array();
+        let mut tm = self.gs.text.tm;
+        tm[4] += tm[0] * tx + tm[2] * ty;
+        tm[5] += tm[1] * tx + tm[3] * ty;
+        self.gs.text.tm = tm;
     }
 
     fn next_text_line(&mut self) {
@@ -644,8 +649,7 @@ fn opacity_attr(attr: &str, alpha: f32) -> String {
 /// Minimal, dependency-free base64 (standard alphabet) for embedding raster
 /// page images as data URIs.
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;

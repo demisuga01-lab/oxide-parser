@@ -6,6 +6,9 @@ use crate::render::path::Path;
 pub struct GlyphCacheKey {
     /// Quick hash of the first 256 bytes of the font file.
     pub font_hash: u64,
+    /// Variable-font instance hash ([`VariationRequest::cache_hash`]); `0` for
+    /// static fonts / the default instance, so the key is unchanged for them.
+    pub variation_hash: u64,
     /// Unicode code point or glyph ID.
     pub code: u16,
     /// True when `code` is a glyph ID rather than a Unicode code point.
@@ -142,7 +145,6 @@ impl GlyphCache {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +161,7 @@ mod tests {
         let mut cache = GlyphCache::new(100);
         let key = GlyphCacheKey {
             font_hash: 12345,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
@@ -181,6 +184,7 @@ mod tests {
         for i in 0..3u16 {
             let key = GlyphCacheKey {
                 font_hash: 0,
+                variation_hash: 0,
                 code: i,
                 is_gid: false,
             };
@@ -194,6 +198,7 @@ mod tests {
 
         let key4 = GlyphCacheKey {
             font_hash: 0,
+            variation_hash: 0,
             code: 99,
             is_gid: false,
         };
@@ -236,6 +241,7 @@ mod tests {
         cache.insert(
             GlyphCacheKey {
                 font_hash: 0,
+                variation_hash: 0,
                 code: 0,
                 is_gid: false,
             },
@@ -259,6 +265,7 @@ mod tests {
         path.close();
         let key = GlyphCacheKey {
             font_hash: 99,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
@@ -287,6 +294,7 @@ mod tests {
         let mut cache = GlyphCache::new(100);
         let key = GlyphCacheKey {
             font_hash: 0,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
@@ -298,11 +306,13 @@ mod tests {
         let mut cache = GlyphCache::new(100);
         let key_a = GlyphCacheKey {
             font_hash: 1,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
         let key_b = GlyphCacheKey {
             font_hash: 1,
+            variation_hash: 0,
             code: 66,
             is_gid: false,
         };
@@ -329,11 +339,13 @@ mod tests {
         let mut cache = GlyphCache::new(100);
         let key_font1 = GlyphCacheKey {
             font_hash: 111,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
         let key_font2 = GlyphCacheKey {
             font_hash: 222,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
@@ -359,11 +371,13 @@ mod tests {
     fn gid_and_char_code_keys_do_not_collide() {
         let key_char = GlyphCacheKey {
             font_hash: 1,
+            variation_hash: 0,
             code: 65,
             is_gid: false,
         };
         let key_gid = GlyphCacheKey {
             font_hash: 1,
+            variation_hash: 0,
             code: 65,
             is_gid: true,
         };
@@ -378,6 +392,7 @@ mod tests {
             cache.insert(
                 GlyphCacheKey {
                     font_hash: 1,
+                    variation_hash: 0,
                     code: i,
                     is_gid: false,
                 },
@@ -411,6 +426,7 @@ mod tests {
     fn key(code: u16) -> GlyphCacheKey {
         GlyphCacheKey {
             font_hash: 7,
+            variation_hash: 0,
             code,
             is_gid: false,
         }

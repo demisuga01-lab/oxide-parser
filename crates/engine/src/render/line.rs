@@ -191,6 +191,11 @@ impl DashState {
         self.pattern.is_empty() || self.current_idx.is_multiple_of(2)
     }
 
+    /// True when this dash state represents an uninterrupted solid stroke.
+    pub fn is_solid(&self) -> bool {
+        self.pattern.is_empty()
+    }
+
     /// The normalized dash phase used to initialize the state.
     pub fn phase(&self) -> f64 {
         self.phase
@@ -378,8 +383,8 @@ mod tests {
         let segs = ds.advance(20.0);
         assert!(segs.iter().any(|(_, _, drawing)| *drawing));
         assert!(segs.iter().any(|(_, _, drawing)| !*drawing));
-        assert_eq!(segs[0].2, true);
-        assert_eq!(segs[1].2, false);
+        assert!(segs[0].2);
+        assert!(!segs[1].2);
     }
 
     #[test]
@@ -394,9 +399,9 @@ mod tests {
     fn dash_state_with_phase_skips_start() {
         let mut ds = DashState::new(vec![10.0, 10.0], 5.0);
         let segs = ds.advance(15.0);
-        assert_eq!(segs[0].2, true);
+        assert!(segs[0].2);
         assert!((segs[0].1 - segs[0].0 - 5.0).abs() < 0.001);
-        assert_eq!(segs[1].2, false);
+        assert!(!segs[1].2);
     }
 
     #[test]

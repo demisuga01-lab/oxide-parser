@@ -15,6 +15,7 @@
 
 use crate::object::PdfObject;
 use crate::reader::PdfReader;
+use crate::render::cmm;
 use crate::render::color::{ColorSpaceHandler, RenderColor};
 
 /// Outcome of resolving a named colour space to a paint colour.
@@ -56,8 +57,37 @@ pub fn resolve_named_color(
     match family {
         "Separation" => resolve_separation(arr, components, alpha, reader),
         "DeviceN" => resolve_device_n(arr, components, alpha, reader),
-        // ICCBased / CalRGB / CalGray / Lab / Indexed etc. are handled elsewhere
-        // (image decode path) or fall through to the component-count heuristic.
+        "ICCBased" => cmm::icc_components_to_srgb(space_obj, components, reader)
+            .map(|[r, g, b]| NamedColor::Color(RenderColor::new(r, g, b, alpha)))
+            .unwrap_or(NamedColor::Unhandled),
+        "Lab" => {
+            let params = cmm::lab_params_from_space(space_obj, Some(reader)).unwrap_or_default();
+            let l = components.first().copied().unwrap_or(0.0) as f32;
+            let a = components.get(1).copied().unwrap_or(0.0) as f32;
+            let b = components.get(2).copied().unwrap_or(0.0) as f32;
+            let [r, g, b] = cmm::lab_to_srgb(l, a, b, params);
+            NamedColor::Color(RenderColor::new(r, g, b, alpha))
+        }
+        "CalGray" => {
+            let params =
+                cmm::cal_gray_params_from_space(space_obj, Some(reader)).unwrap_or_default();
+            let gray = components.first().copied().unwrap_or(0.0) as f32;
+            let [r, g, b] = cmm::cal_gray_to_srgb(gray, params);
+            NamedColor::Color(RenderColor::new(r, g, b, alpha))
+        }
+        "CalRGB" => {
+            let params =
+                cmm::cal_rgb_params_from_space(space_obj, Some(reader)).unwrap_or_default();
+            let comps = [
+                components.first().copied().unwrap_or(0.0) as f32,
+                components.get(1).copied().unwrap_or(0.0) as f32,
+                components.get(2).copied().unwrap_or(0.0) as f32,
+            ];
+            let [r, g, b] = cmm::cal_rgb_to_srgb(comps, params);
+            NamedColor::Color(RenderColor::new(r, g, b, alpha))
+        }
+        // Indexed and other color spaces fall through to the component-count
+        // heuristic elsewhere.
         _ => NamedColor::Unhandled,
     }
 }
@@ -116,11 +146,7 @@ fn resolve_device_n(
         None => return NamedColor::Unhandled,
     };
     // If every colorant is /None, the space produces no marks.
-    if !names.is_empty()
-        && names
-            .iter()
-            .all(|n| n.as_name() == Some("None"))
-    {
+    if !names.is_empty() && names.iter().all(|n| n.as_name() == Some("None")) {
         return NamedColor::NoPaint;
     }
     let alt = match arr.get(2) {
@@ -152,7 +178,8 @@ fn resolve_device_n(
 
 /// Map an alternate colour-space object to the family name understood by
 /// [`ColorSpaceHandler::from_components`]. ICCBased is reduced to a device space
-/// by its component count (`/N`).
+/// by its component count (`/N`) when the full ICC stream is unavailable in this
+/// spot-color shortcut.
 fn alternate_space_name(alt: &PdfObject, reader: &PdfReader) -> String {
     let resolved = match alt {
         PdfObject::Reference { .. } => reader.resolve(alt.clone()).unwrap_or_else(|_| alt.clone()),
@@ -161,7 +188,10 @@ fn alternate_space_name(alt: &PdfObject, reader: &PdfReader) -> String {
     match &resolved {
         PdfObject::Name(name) => name.clone(),
         PdfObject::Array(arr) => {
-            let head = arr.first().and_then(PdfObject::as_name).unwrap_or("DeviceRGB");
+            let head = arr
+                .first()
+                .and_then(PdfObject::as_name)
+                .unwrap_or("DeviceRGB");
             if head == "ICCBased" {
                 // Resolve the stream's /N to pick the device space.
                 let n = arr
@@ -236,7 +266,8 @@ mod tests {
 
     #[test]
     fn separation_tint1_is_alt_cmyk_full() {
-        // tint 1 -> C1 = CMYK(1, 0.5, 0, 0.2). RGB = ((1-c)(1-k), (1-m)(1-k), (1-y)(1-k)).
+        // tint 1 -> C1 = CMYK(1, 0.5, 0, 0.2), resolved through the shared
+        // Poppler-like DeviceCMYK fallback.
         let space = PdfObject::Array(vec![
             name("Separation"),
             name("PANTONE 286 C"),
@@ -246,12 +277,21 @@ mod tests {
         let r = resolve_named_color(&space, &[1.0], 1.0, &reader());
         match r {
             NamedColor::Color(c) => {
-                // expected R = (1-1)*(1-0.2) = 0
-                assert!(c.r < 0.01, "R should be 0: {}", c.r);
-                // G = (1-0.5)*(0.8) = 0.4
-                assert!((c.g - 0.4).abs() < 0.02, "G ~0.4: {}", c.g);
-                // B = (1-0)*(0.8) = 0.8
-                assert!((c.b - 0.8).abs() < 0.02, "B ~0.8: {}", c.b);
+                assert!(
+                    (c.r - 0.10).abs() < 0.03,
+                    "R near process fallback: {}",
+                    c.r
+                );
+                assert!(
+                    (c.g - 0.37).abs() < 0.03,
+                    "G near process fallback: {}",
+                    c.g
+                );
+                assert!(
+                    (c.b - 0.63).abs() < 0.03,
+                    "B near process fallback: {}",
+                    c.b
+                );
             }
             other => panic!("expected Color, got {other:?}"),
         }

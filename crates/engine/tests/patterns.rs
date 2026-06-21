@@ -13,7 +13,9 @@ struct PdfBuilder {
 
 impl PdfBuilder {
     fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
     fn add(&mut self, body: &str) -> usize {
         self.objects.push(body.as_bytes().to_vec());
@@ -78,12 +80,12 @@ fn colored_tiling_pattern_fills_with_tile_content() {
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 50 50] /Contents 4 0 R \
          /Resources << /Pattern << /P1 5 0 R >> >> >>",
     ); // 3
-    // Page content: white background, then set Pattern fill color space and fill
-    // the whole page with the pattern.
+       // Page content: white background, then set Pattern fill color space and fill
+       // the whole page with the pattern.
     let content = b"1 1 1 rg 0 0 50 50 re f\n/Pattern cs /P1 scn 0 0 50 50 re f\n";
     b.add_stream("", content); // 4
-    // Tiling pattern (colored, PaintType 1): a 10x10 tile with a red bar in
-    // y=[0,5).
+                               // Tiling pattern (colored, PaintType 1): a 10x10 tile with a red bar in
+                               // y=[0,5).
     let tile_content = b"1 0 0 rg 0 0 10 5 re f\n";
     b.add_stream(
         "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
@@ -110,7 +112,10 @@ fn colored_tiling_pattern_fills_with_tile_content() {
         }
     }
     assert!(red > 0, "pattern should paint red bars; red={red}");
-    assert!(white > 0, "gaps between bars should stay white; white={white}");
+    assert!(
+        white > 0,
+        "gaps between bars should stay white; white={white}"
+    );
     // Neither should dominate completely (confirms genuine tiling, not a solid
     // fill of one color).
     let total = (buf.width * buf.height) as i32;
@@ -130,14 +135,14 @@ fn uncolored_pattern_uses_fill_color_at_point_of_use() {
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 40 20] /Contents 4 0 R \
          /Resources << /Pattern << /P1 5 0 R >> >> >>",
     ); // 3
-    // Left rect [0,0,20,20] in green pattern; right rect [20,0,20,20] in blue.
-    // Pattern color space is [/Pattern /DeviceRGB] so scn takes color + name.
+       // Left rect [0,0,20,20] in green pattern; right rect [20,0,20,20] in blue.
+       // Pattern color space is [/Pattern /DeviceRGB] so scn takes color + name.
     let content = b"1 1 1 rg 0 0 40 20 re f\n\
                     /Pattern cs\n\
                     0 1 0 /P1 scn 0 0 20 20 re f\n\
                     0 0 1 /P1 scn 20 0 20 20 re f\n";
     b.add_stream("", content); // 4
-    // Uncolored tile: fills its whole 10x10 BBox WITHOUT specifying a color.
+                               // Uncolored tile: fills its whole 10x10 BBox WITHOUT specifying a color.
     let tile_content = b"0 0 10 10 re f\n";
     b.add_stream(
         "/Type /Pattern /PatternType 1 /PaintType 2 /TilingType 1 \
@@ -175,7 +180,7 @@ fn pattern_step_larger_than_bbox_leaves_gaps() {
     ); // 3
     let content = b"1 1 1 rg 0 0 40 40 re f\n/Pattern cs /P1 scn 0 0 40 40 re f\n";
     b.add_stream("", content); // 4
-    // Tile fully fills its 10x10 BBox red, but step is 20 -> gaps.
+                               // Tile fully fills its 10x10 BBox red, but step is 20 -> gaps.
     let tile_content = b"1 0 0 rg 0 0 10 10 re f\n";
     b.add_stream(
         "/Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 \
@@ -201,5 +206,8 @@ fn pattern_step_larger_than_bbox_leaves_gaps() {
     }
     // With 10x10 tiles on a 20-grid, ~1/4 of the area is red, ~3/4 white.
     assert!(red > 0, "tiles should paint red: {red}");
-    assert!(white > red, "gaps (white) should exceed tile area (red): white={white} red={red}");
+    assert!(
+        white > red,
+        "gaps (white) should exceed tile area (red): white={white} red={red}"
+    );
 }

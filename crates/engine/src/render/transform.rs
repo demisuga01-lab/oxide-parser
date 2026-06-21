@@ -307,13 +307,22 @@ impl Viewport {
                 e: -x1 * s,
                 f: y2 * s,
             },
+            // /Rotate is a CLOCKWISE display rotation. The device transform is the
+            // page→device map (with the PDF y-up → device y-down flip) composed
+            // with that rotation. The flip is a reflection (det < 0), so a correct
+            // rotated transform must KEEP det < 0 — the previous 90/270 matrices
+            // had det > 0, i.e. they rotated WITHOUT the flip and rendered content
+            // mirror-imaged. Derivation: base device (X,Y) = (s(x-x1), s(y2-y)),
+            // image WxH = (s(x2-x1), s(y2-y1)); a clockwise 90° maps (X,Y)->(H-Y,X),
+            // 270° maps (X,Y)->(Y,W-X). Substituting gives:
             90 => Transform2D {
+                // px = s(y - y1), py = s(x - x1)
                 a: 0.0,
-                b: -s,
+                b: s,
                 c: s,
                 d: 0.0,
                 e: -y1 * s,
-                f: x2 * s,
+                f: -x1 * s,
             },
             180 => Transform2D {
                 a: -s,
@@ -324,12 +333,13 @@ impl Viewport {
                 f: -y1 * s,
             },
             270 => Transform2D {
+                // px = s(y2 - y), py = s(x2 - x)
                 a: 0.0,
-                b: s,
+                b: -s,
                 c: -s,
                 d: 0.0,
                 e: y2 * s,
-                f: -x1 * s,
+                f: x2 * s,
             },
             _ => Transform2D {
                 a: s,
@@ -681,5 +691,52 @@ mod tests {
         assert!(vp_90.width_px > vp_90.height_px);
         assert_eq!(vp_90.width_px, vp_0.height_px);
         assert_eq!(vp_90.height_px, vp_0.width_px);
+    }
+
+    // Regression (Benchmark Fix B): /Rotate 90 and 270 must rotate WITHOUT
+    // mirroring. The page→device transform includes the PDF y-up → device
+    // y-down flip (a reflection, det < 0); a correct rotated transform keeps
+    // det < 0. The previous 90/270 matrices had det > 0 (rotation without the
+    // flip) and rendered content mirror-imaged. We assert the determinant sign
+    // for every rotation, and that an asymmetric corner maps where a clockwise
+    // display rotation (not a mirror) places it.
+    #[test]
+    fn rotation_transforms_are_proper_not_mirrored() {
+        for rot in [0u32, 90, 180, 270] {
+            let vp = Viewport::new_rotated([0.0, 0.0, 100.0, 200.0], 72, rot);
+            let t = vp.to_transform();
+            let det = t.a * t.d - t.b * t.c;
+            assert!(
+                det < 0.0,
+                "rotation {rot} must keep the y-flip reflection (det<0), got det={det}"
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_270_corner_orientation_is_clockwise() {
+        // Page box 100x200. The PDF top-left corner (0, 200) under a clockwise
+        // 270° display rotation lands at device (top-left of the rotated 200x100
+        // buffer is the page's top-right). Concretely the page's bottom-left
+        // (0,0) maps to device top-left-ish; verify (0,0) and (100,0) are NOT
+        // mirror images of each other across the buffer.
+        let vp = Viewport::new_rotated([0.0, 0.0, 100.0, 200.0], 72, 270);
+        // bottom-left and bottom-right of the page (differ in x only)
+        let bl = vp.page_to_pixel(0.0, 0.0);
+        let br = vp.page_to_pixel(100.0, 0.0);
+        // Under 270°, the x-axis maps to the device y-axis; bl and br must differ
+        // in device-y (a real rotation), and the mapping must be orientation-
+        // preserving relative to the 90° case (opposite y-direction).
+        let vp90 = Viewport::new_rotated([0.0, 0.0, 100.0, 200.0], 72, 90);
+        let bl90 = vp90.page_to_pixel(0.0, 0.0);
+        let br90 = vp90.page_to_pixel(100.0, 0.0);
+        // 270° increasing page-x => increasing device-y; 90° increasing page-x
+        // => decreasing device-y. They must move in OPPOSITE directions.
+        let d270 = br.1 - bl.1;
+        let d90 = br90.1 - bl90.1;
+        assert!(
+            d270.signum() != d90.signum(),
+            "90° and 270° must rotate in opposite senses (no mirror): d90={d90}, d270={d270}"
+        );
     }
 }

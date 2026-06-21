@@ -8,12 +8,10 @@
 //! renderer uses.
 
 use crate::engine::PageResources;
-use crate::fonts::cmap::extract_to_unicode_map;
-use crate::fonts::resolver::{
-    detect_font_subtype, get_descendant_font, lookup_cid_width, FontSubtype,
-};
+use crate::fonts::cid::{cid_font_has_embedded_program, cid_to_gid};
+use crate::fonts::resolver::{detect_font_subtype, get_descendant_font, FontSubtype};
 use crate::fonts::FontResolver;
-use crate::object::{PdfDictionary, PdfObject};
+use crate::object::PdfDictionary;
 use crate::reader::PdfReader;
 use crate::render::font_rasterizer::{get_fallback_font, FontRasterizer};
 
@@ -24,6 +22,8 @@ pub struct DecodedGlyph {
     pub code: u16,
     /// Unicode character (for fallback/lookup).
     pub unicode: char,
+    /// PDF simple-font glyph name resolved from Encoding/Differences.
+    pub glyph_name: Option<String>,
     /// Whether this is a space code (affects word spacing).
     pub is_space: bool,
     /// Explicit advance width in 1/1000 text units, when known from the PDF.
@@ -65,6 +65,7 @@ pub fn decode_text_bytes(
         };
         let text = resolver.decode_char(code);
         let ch = text.chars().next().unwrap_or('\u{FFFD}');
+        let glyph_name = resolver.glyph_name(code).map(str::to_string);
         let width = if has_explicit_widths {
             let width = resolver.glyph_width(code).max(0.0);
             (width > 0.0).then_some(width)
@@ -74,6 +75,7 @@ pub fn decode_text_bytes(
         glyphs.push(DecodedGlyph {
             code,
             unicode: ch,
+            glyph_name,
             is_space: resolver.is_space_code(code) || ch == ' ',
             width,
             is_gid: false,
@@ -88,34 +90,44 @@ fn decode_type0_text(
     reader: &PdfReader,
 ) -> Vec<DecodedGlyph> {
     let descendant_font = get_descendant_font(font_dict, reader);
-    let unicode_map = extract_to_unicode_map(font_dict, reader);
+    let resolver = FontResolver::new(font_dict, reader);
+    let render_as_gid = cid_font_has_embedded_program(descendant_font.as_ref(), reader);
     let mut glyphs = Vec::new();
     let mut idx = 0usize;
+    let code_size = resolver.code_size().max(1);
 
-    while idx + 1 < bytes.len() {
-        let cid = (u16::from(bytes[idx]) << 8) | u16::from(bytes[idx + 1]);
-        idx += 2;
+    while idx < bytes.len() {
+        let cid = if code_size == 2 {
+            let high = bytes[idx];
+            let low = bytes.get(idx + 1).copied().unwrap_or(0);
+            idx = idx.saturating_add(2);
+            (u16::from(high) << 8) | u16::from(low)
+        } else {
+            let code = u16::from(bytes[idx]);
+            idx = idx.saturating_add(1);
+            code
+        };
 
-        let unicode = unicode_map
-            .as_ref()
-            .and_then(|map| map.get(&u32::from(cid)))
-            .copied()
-            .unwrap_or('\u{FFFD}');
-        let width = Some(
-            descendant_font
-                .as_ref()
-                .map(|dict| lookup_cid_width(u32::from(cid), dict))
-                .unwrap_or(1000.0),
-        )
-        .filter(|width| *width > 0.0);
-        let gid = cid_to_gid(cid, descendant_font.as_ref());
+        let text = resolver.decode_char(cid);
+        let unicode = text.chars().next().unwrap_or('\u{FFFD}');
+        let width = if render_as_gid {
+            Some(resolver.glyph_width(cid)).filter(|width| *width > 0.0)
+        } else {
+            None
+        };
+        let code = if render_as_gid {
+            cid_to_gid(cid, descendant_font.as_ref(), reader)
+        } else {
+            u16::try_from(unicode as u32).unwrap_or(cid)
+        };
 
         glyphs.push(DecodedGlyph {
-            code: gid,
+            code,
             unicode,
-            is_space: unicode == ' ' || cid == 0x0020,
+            glyph_name: None,
+            is_space: resolver.is_space_code(cid) || unicode == ' ',
             width,
-            is_gid: true,
+            is_gid: render_as_gid,
         });
     }
     glyphs
@@ -152,19 +164,12 @@ fn latin1_glyphs(bytes: &[u8]) -> Vec<DecodedGlyph> {
         .map(|byte| DecodedGlyph {
             code: u16::from(*byte),
             unicode: decode_win_ansi(*byte),
+            glyph_name: None,
             is_space: *byte == b' ',
             width: None,
             is_gid: false,
         })
         .collect()
-}
-
-fn cid_to_gid(cid: u16, desc_dict: Option<&PdfDictionary>) -> u16 {
-    match desc_dict.and_then(|dict| dict.get("CIDToGIDMap")) {
-        Some(PdfObject::Name(name)) if name == "Identity" => cid,
-        Some(PdfObject::Stream { .. }) | Some(PdfObject::Reference { .. }) => cid,
-        _ => cid,
-    }
 }
 
 /// WinAnsi high-byte decoding (matches the raster renderer's fallback table for

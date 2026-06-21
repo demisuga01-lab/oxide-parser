@@ -10,7 +10,9 @@ struct PdfBuilder {
 
 impl PdfBuilder {
     fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
     fn add(&mut self, body: &str) -> usize {
         self.objects.push(body.as_bytes().to_vec());
@@ -76,14 +78,12 @@ fn function_based_shading_type1_varies_with_x() {
          /Resources << /Shading << /Sh1 5 0 R >> >> >>",
     ); // 3
     b.add_stream("", b"/Sh1 sh\n"); // 4
-    // Shading dict: type 1, domain unit square, Matrix scales to 20x20.
+                                    // Shading dict: type 1, domain unit square, Matrix scales to 20x20.
     b.add(
         "<< /ShadingType 1 /ColorSpace /DeviceRGB /Domain [0 1 0 1] \
          /Matrix [20 0 0 20 0 0] /Function 6 0 R >>",
     ); // 5
-    b.add(
-        "<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 0 0] /N 1 >>",
-    ); // 6
+    b.add("<< /FunctionType 2 /Domain [0 1] /C0 [0 0 0] /C1 [1 0 0] /N 1 >>"); // 6
 
     let pdf = b.build();
     // Left edge (x small) -> near black; right edge (x large) -> near red.
@@ -175,7 +175,12 @@ fn gouraud_mesh_type4_interpolates_vertex_colors() {
             }
             // A blended pixel: at least two channels meaningfully present.
             let mid = |v: u8| v > 40 && v < 200;
-            if [mid(p[0]), mid(p[1]), mid(p[2])].iter().filter(|&&m| m).count() >= 2 {
+            if [mid(p[0]), mid(p[1]), mid(p[2])]
+                .iter()
+                .filter(|&&m| m)
+                .count()
+                >= 2
+            {
                 saw_blend = true;
             }
         }
@@ -183,7 +188,10 @@ fn gouraud_mesh_type4_interpolates_vertex_colors() {
     assert!(saw_red, "triangle should show red near v0");
     assert!(saw_green, "triangle should show green near v1");
     assert!(saw_blue, "triangle should show blue near v2");
-    assert!(saw_blend, "interior should show interpolated/blended colors");
+    assert!(
+        saw_blend,
+        "interior should show interpolated/blended colors"
+    );
 }
 
 #[test]
@@ -241,7 +249,10 @@ fn lattice_mesh_type5_renders_grid() {
     }
     // The two triangles should cover a substantial chunk of the 20x20-ish device
     // area (roughly the square between the four corners).
-    assert!(painted > 50, "lattice mesh should paint a filled region: {painted}");
+    assert!(
+        painted > 50,
+        "lattice mesh should paint a filled region: {painted}"
+    );
 }
 
 #[test]
@@ -255,28 +266,28 @@ fn coons_patch_type6_renders_smooth_fill() {
     let mut data: Vec<u8> = Vec::new();
     let vmax: u32 = 0xFFFF;
     let coord = |c: f64| -> u32 { ((c / 20.0) * vmax as f64).round() as u32 };
-    let mut pt = |buf: &mut Vec<u8>, x: f64, y: f64| {
+    let pt = |buf: &mut Vec<u8>, x: f64, y: f64| {
         push_be(buf, coord(x), 2);
         push_be(buf, coord(y), 2);
     };
     data.push(0); // flag 0 = new patch
-    // 12 boundary points of a 16x16 square from (2,2) to (18,18). The exact
-    // boundary path order matches the spec's p1..p12 traversal; for a square the
-    // control points lie on straight edges (thirds).
-    // Edge C1 (p1..p4): left edge bottom->top.
+                  // 12 boundary points of a 16x16 square from (2,2) to (18,18). The exact
+                  // boundary path order matches the spec's p1..p12 traversal; for a square the
+                  // control points lie on straight edges (thirds).
+                  // Edge C1 (p1..p4): left edge bottom->top.
     pt(&mut data, 2.0, 2.0); // p1 corner (u0,v0)
     pt(&mut data, 2.0, 7.33);
     pt(&mut data, 2.0, 12.66);
     pt(&mut data, 2.0, 18.0); // p4 corner (u0,v1)
-    // Edge D2 (p5..p6 then p7): top edge left->right.
+                              // Edge D2 (p5..p6 then p7): top edge left->right.
     pt(&mut data, 7.33, 18.0);
     pt(&mut data, 12.66, 18.0);
     pt(&mut data, 18.0, 18.0); // p7 corner (u1,v1)
-    // Edge C2 reversed (p8..p9 then p10): right edge top->bottom.
+                               // Edge C2 reversed (p8..p9 then p10): right edge top->bottom.
     pt(&mut data, 18.0, 12.66);
     pt(&mut data, 18.0, 7.33);
     pt(&mut data, 18.0, 2.0); // p10 corner (u1,v0)
-    // Edge D1 reversed (p11..p12): bottom edge right->left back toward p1.
+                              // Edge D1 reversed (p11..p12): bottom edge right->left back toward p1.
     pt(&mut data, 12.66, 2.0);
     pt(&mut data, 7.33, 2.0);
     // 4 corner colors: red, green, blue, yellow.
@@ -313,5 +324,8 @@ fn coons_patch_type6_renders_smooth_fill() {
         }
     }
     // The patch should fill a meaningful region without crashing.
-    assert!(painted > 50, "Coons patch should paint a filled region: {painted}");
+    assert!(
+        painted > 50,
+        "Coons patch should paint a filled region: {painted}"
+    );
 }

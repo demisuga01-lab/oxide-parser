@@ -31,7 +31,11 @@ fn rasterize_svg(svg: &str, width: u32, height: u32) -> Vec<u8> {
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).expect("alloc pixmap");
     // White background so the comparison matches Oxide's white page background.
     pixmap.fill(resvg::tiny_skia::Color::WHITE);
-    resvg::render(&tree, resvg::tiny_skia::Transform::identity(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
     pixmap.data().to_vec()
 }
 
@@ -117,7 +121,9 @@ fn svg_is_well_formed_and_sized() {
     assert!(page.svg.starts_with("<?xml"));
     assert!(page.svg.contains("<svg"));
     assert!(page.svg.contains(&format!("width=\"{}\"", vp.width_px)));
-    assert!(page.svg.contains(&format!("viewBox=\"0 0 {} {}\"", vp.width_px, vp.height_px)));
+    assert!(page
+        .svg
+        .contains(&format!("viewBox=\"0 0 {} {}\"", vp.width_px, vp.height_px)));
     assert!(page.svg.trim_end().ends_with("</svg>"));
 }
 
@@ -132,7 +138,10 @@ fn pure_vector_page_emits_true_vector_not_raster() {
     );
     // Text is emitted as glyph-outline <path> elements (no <image>).
     assert!(page.svg.contains("<path"), "expected vector path elements");
-    assert!(!page.svg.contains("<image"), "pure-vector page must not embed a raster");
+    assert!(
+        !page.svg.contains("<image"),
+        "pure-vector page must not embed a raster"
+    );
 }
 
 #[test]
