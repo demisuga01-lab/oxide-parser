@@ -67,7 +67,9 @@ fn poppler_pdftohtml() -> Option<PathBuf> {
         .join("target")
         .join("tools")
         .join("poppler");
-    base.is_dir().then(|| find_under(&base, "pdftohtml")).flatten()
+    base.is_dir()
+        .then(|| find_under(&base, "pdftohtml"))
+        .flatten()
 }
 
 fn find_under(dir: &std::path::Path, tool: &str) -> Option<PathBuf> {
@@ -122,7 +124,10 @@ fn complex_positions_are_plausible() {
     let left = parse_px(line, "left:");
     let top = parse_px(line, "top:");
     let size = parse_px(line, "font-size:");
-    assert!((60.0..75.0).contains(&left), "left {left} out of expected range");
+    assert!(
+        (60.0..75.0).contains(&left),
+        "left {left} out of expected range"
+    );
     assert!(top > 0.0 && top < 1056.0, "top {top} off page");
     assert!((10.0..25.0).contains(&size), "font-size {size} unexpected");
 }
@@ -205,13 +210,25 @@ fn rtl_text_is_present_and_marked() {
     // The Oxide text extraction yields Arabic; that text must appear in the HTML
     // and at least one fragment must be flagged dir="rtl".
     let plain = e.get_page_text(1).unwrap_or_default();
-    let arabic: String = plain.chars().filter(|c| {
-        let cp = *c as u32;
-        (0x0600..=0x06FF).contains(&cp) || (0xFB50..=0xFDFF).contains(&cp) || (0xFE70..=0xFEFF).contains(&cp)
-    }).take(3).collect();
+    let arabic: String = plain
+        .chars()
+        .filter(|c| {
+            let cp = *c as u32;
+            (0x0600..=0x06FF).contains(&cp)
+                || (0xFB50..=0xFDFF).contains(&cp)
+                || (0xFE70..=0xFEFF).contains(&cp)
+        })
+        .take(3)
+        .collect();
     if !arabic.is_empty() {
-        assert!(html.contains(&arabic), "Arabic text must appear in the HTML");
-        assert!(html.contains("dir=\"rtl\""), "an RTL line must be marked dir=rtl");
+        assert!(
+            html.contains(&arabic),
+            "Arabic text must appear in the HTML"
+        );
+        assert!(
+            html.contains("dir=\"rtl\""),
+            "an RTL line must be marked dir=rtl"
+        );
     }
 }
 

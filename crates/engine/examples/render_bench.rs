@@ -54,16 +54,11 @@ fn main() -> Result<()> {
         _ => {
             // FIXED behaviour: parse once, share via Arc across threads.
             let engine = Arc::new(probe);
-            pages
-                .par_iter()
-                .map(|&p| render_one(&engine, p, dpi))
-                .sum()
+            pages.par_iter().map(|&p| render_one(&engine, p, dpi)).sum()
         }
     };
 
-    println!(
-        "mode={mode} pages={page_count} dpi={dpi} total_encoded_bytes={total}"
-    );
+    println!("mode={mode} pages={page_count} dpi={dpi} total_encoded_bytes={total}");
     Ok(())
 }
 

@@ -8,9 +8,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use oxide_engine::{
-    ContentEngine, TextExtractOptions, TextExtractor, TextFormatter,
-};
+use oxide_engine::{ContentEngine, TextExtractOptions, TextExtractor, TextFormatter};
 
 const TRACEMONKEY: &str = "tests/fixtures/tracemonkey.pdf";
 const MULTI_PAGE_120: &str = "../../tests/corpus/pdfs/generated/generated_120_pages.pdf";
@@ -48,7 +46,9 @@ fn serial_reference(engine: &ContentEngine, opts: &TextExtractOptions) -> String
 
 #[test]
 fn parallel_extract_matches_serial_reference_tracemonkey() {
-    let Some(engine) = open(TRACEMONKEY) else { return };
+    let Some(engine) = open(TRACEMONKEY) else {
+        return;
+    };
     // tracemonkey is 14 pages — comfortably above the parallel threshold.
     assert!(
         engine.page_count().unwrap() >= 4,
@@ -65,16 +65,23 @@ fn parallel_extract_matches_serial_reference_tracemonkey() {
 
 #[test]
 fn parallel_extract_matches_serial_reference_120_pages() {
-    let Some(engine) = open(MULTI_PAGE_120) else { return };
+    let Some(engine) = open(MULTI_PAGE_120) else {
+        return;
+    };
     let opts = TextExtractOptions::default();
     let parallel = TextExtractor::new().extract(&engine, &opts).unwrap();
     let serial = serial_reference(&engine, &opts);
-    assert_eq!(parallel, serial, "120-page parallel output must match serial");
+    assert_eq!(
+        parallel, serial,
+        "120-page parallel output must match serial"
+    );
 }
 
 #[test]
 fn parallel_extract_is_deterministic_across_repeated_runs() {
-    let Some(engine) = open(TRACEMONKEY) else { return };
+    let Some(engine) = open(TRACEMONKEY) else {
+        return;
+    };
     let opts = TextExtractOptions::default();
     let first = TextExtractor::new().extract(&engine, &opts).unwrap();
     // Run many times: thread completion order varies, output must not.
@@ -86,7 +93,9 @@ fn parallel_extract_is_deterministic_across_repeated_runs() {
 
 #[test]
 fn page_order_is_preserved_with_shuffled_explicit_page_list() {
-    let Some(engine) = open(TRACEMONKEY) else { return };
+    let Some(engine) = open(TRACEMONKEY) else {
+        return;
+    };
     let total = engine.page_count().unwrap();
     if total < 6 {
         return;
@@ -121,7 +130,9 @@ fn page_order_is_preserved_with_shuffled_explicit_page_list() {
 
 #[test]
 fn arc_engine_renders_identically_across_threads() {
-    let Some(engine) = open(TRACEMONKEY) else { return };
+    let Some(engine) = open(TRACEMONKEY) else {
+        return;
+    };
     let engine = Arc::new(engine);
     let total = engine.page_count().unwrap();
     let pages: Vec<usize> = (1..=total.min(6)).collect();
@@ -167,7 +178,9 @@ fn concurrent_text_and_render_on_shared_engine_do_not_race() {
     // Mix text extraction and rendering against ONE shared engine from
     // multiple threads — both paths read the object-stream cache, so this
     // exercises concurrent readers + the first-write of the RwLock cache.
-    let Some(engine) = open(TRACEMONKEY) else { return };
+    let Some(engine) = open(TRACEMONKEY) else {
+        return;
+    };
     let engine = Arc::new(engine);
     let total = engine.page_count().unwrap().min(8);
 

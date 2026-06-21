@@ -16,6 +16,8 @@ pub enum OxideError {
     EncryptedPdf(String),
     #[error("operation cancelled: {0}")]
     Cancelled(String),
+    #[error("resource limit exceeded: {0}")]
+    ResourceLimit(String),
 }
 
 pub type OxideResult<T> = std::result::Result<T, OxideError>;

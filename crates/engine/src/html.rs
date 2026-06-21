@@ -289,8 +289,7 @@ fn escape_xml(s: &str) -> String {
 
 /// Standard base64 (shared shape with the SVG sink's encoder).
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -332,7 +331,10 @@ mod tests {
 
     #[test]
     fn unicode_passes_through_escaping() {
-        assert_eq!(escape_html("café — 中文 — العربية"), "café — 中文 — العربية");
+        assert_eq!(
+            escape_html("café — 中文 — العربية"),
+            "café — 中文 — العربية"
+        );
     }
 
     #[test]

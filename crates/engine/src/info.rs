@@ -252,9 +252,10 @@ fn aggregate_page_sizes(pages: &[crate::document::PdfPage]) -> Vec<PageSize> {
         let w = round2(page.media_box[2] - page.media_box[0]);
         let h = round2(page.media_box[3] - page.media_box[1]);
         let rotation = page.rotate;
-        if let Some(existing) = out.iter_mut().find(|s| {
-            s.width_pts == w && s.height_pts == h && s.rotation == rotation
-        }) {
+        if let Some(existing) = out
+            .iter_mut()
+            .find(|s| s.width_pts == w && s.height_pts == h && s.rotation == rotation)
+        {
             existing.page_count += 1;
         } else {
             out.push(PageSize {
@@ -364,7 +365,10 @@ pub fn format_pdf_date(raw: &str) -> String {
 
     // Helper to read N digits starting at index i, defaulting if absent.
     let read = |start: usize, len: usize, default: &str| -> String {
-        if start + len <= digits.len() && digits[start..start + len].iter().all(|c| c.is_ascii_digit())
+        if start + len <= digits.len()
+            && digits[start..start + len]
+                .iter()
+                .all(|c| c.is_ascii_digit())
         {
             digits[start..start + len].iter().collect()
         } else {
@@ -509,7 +513,11 @@ mod tests {
             u: vec![0; 32],
             p: -4,
             encrypt_metadata: true,
-            cf_method: cf,
+            cf_method: cf.clone(),
+            stream_method: cf.clone(),
+            string_method: cf.clone(),
+            embedded_file_method: cf,
+            crypt_filters: std::collections::HashMap::new(),
             v5: None,
         }
     }

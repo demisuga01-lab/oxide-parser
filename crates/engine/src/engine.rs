@@ -9,7 +9,7 @@ use crate::images::encoder::{ImageEncoder, ImageOutputFormat};
 use crate::images::locator::{ImageLocateOptions, ImageLocator, ImageReference};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
-use crate::render::{PageRenderer, PixelBuffer, Viewport, WHITE};
+use crate::render::{PageRenderer, PixelBuffer, RenderMode, Viewport, WHITE};
 use crate::text::{TextExtractOptions, TextExtractor, TextFormatOptions};
 
 #[derive(Debug, Clone, Default)]
@@ -27,7 +27,11 @@ pub struct PageResources {
 /// (notably pdf.js-generated files) often store these sub-dictionaries as
 /// indirect objects, e.g. `/ColorSpace 12 0 R`, so a direct `get_dict` lookup
 /// would miss them and leave the corresponding resources empty.
-fn resolve_subdict(resources: &PdfDictionary, key: &str, reader: &PdfReader) -> Option<PdfDictionary> {
+fn resolve_subdict(
+    resources: &PdfDictionary,
+    key: &str,
+    reader: &PdfReader,
+) -> Option<PdfDictionary> {
     match resources.get(key) {
         Some(PdfObject::Dictionary(d)) => Some(d.clone()),
         Some(obj @ PdfObject::Reference { .. }) => match reader.resolve(obj.clone()) {
@@ -231,6 +235,197 @@ impl ContentEngine {
         extractor.extract(self, &options)
     }
 
+    /// Run geometric layout analysis (XY-cut segmentation + reading order) on a
+    /// page, returning the structured [`PageLayout`](crate::analysis::layout::PageLayout)
+    /// (blocks → lines, in reading order). This is **additive** — it does not
+    /// affect [`get_page_text`](Self::get_page_text) or the default extraction
+    /// path. See [`crate::analysis::layout`].
+    pub fn analyze_page_layout(
+        &self,
+        page_number: usize,
+    ) -> Result<crate::analysis::layout::PageLayout> {
+        self.analyze_page_layout_with(
+            page_number,
+            &crate::analysis::layout::LayoutConfig::default(),
+        )
+    }
+
+    /// Layout analysis with an explicit [`LayoutConfig`](crate::analysis::layout::LayoutConfig).
+    pub fn analyze_page_layout_with(
+        &self,
+        page_number: usize,
+        config: &crate::analysis::layout::LayoutConfig,
+    ) -> Result<crate::analysis::layout::PageLayout> {
+        let ops = self.get_page_content(page_number)?;
+        let resources = self.get_page_resources(page_number)?;
+        let mut collector = crate::text::TextCollector::new(resources, self.doc.reader());
+        let chunks = collector.collect(&ops);
+        Ok(crate::analysis::layout::analyze_page(&chunks, config))
+    }
+
+    /// Structured (layout-aware) text for a page: the page's text in
+    /// reading order recovered by XY-cut segmentation, with blocks separated by
+    /// a blank line. Correct for multi-column pages where the default
+    /// top-to-bottom dump (and plain `pdftotext`) interleaves columns. Additive;
+    /// the default [`get_page_text`](Self::get_page_text) is unchanged.
+    pub fn get_page_text_structured(&self, page_number: usize) -> Result<String> {
+        Ok(self.analyze_page_layout(page_number)?.text())
+    }
+
+    /// Extract semantic structure for selected pages. Tagged PDFs use the
+    /// authored `/StructTreeRoot` and MCID links; untagged PDFs fall back to the
+    /// geometric layout analyzer. Additive; the default text path is unchanged.
+    pub fn extract_semantic_document(
+        &self,
+        pages: &[usize],
+    ) -> Result<crate::semantic::SemanticDocument> {
+        crate::semantic::extract_semantic_document(self, pages)
+    }
+
+    /// Readable text view of [`extract_semantic_document`](Self::extract_semantic_document).
+    pub fn extract_semantic_text(&self, pages: &[usize]) -> Result<String> {
+        Ok(self.extract_semantic_document(pages)?.to_text())
+    }
+
+    /// Detect and extract tables on a page (the `extract-tables` tool — a
+    /// capability Poppler's CLIs lack). Tries ruled-grid detection from drawn
+    /// lines first, then falls back to borderless inference from text alignment.
+    /// See [`crate::analysis::tables`].
+    pub fn extract_tables(
+        &self,
+        page_number: usize,
+    ) -> Result<Vec<crate::analysis::tables::Table>> {
+        let semantic = self.extract_semantic_document(&[page_number])?;
+        if semantic.tagged && !semantic.tables.is_empty() {
+            return Ok(semantic.tables);
+        }
+
+        let ops = self.get_page_content(page_number)?;
+        let resources = self.get_page_resources(page_number)?;
+        let mut collector = crate::text::TextCollector::new(resources, self.doc.reader());
+        let chunks = collector.collect(&ops);
+        let graphics = crate::analysis::graphics::collect_graphics(&ops);
+        Ok(crate::analysis::tables::detect_tables(&chunks, &graphics))
+    }
+
+    /// Build a typed, ordered **document model** for the selected pages: each
+    /// recovered block is classified (heading/paragraph/list/figure/caption/
+    /// table/header/footer/page-number) and placed in a robust reading order
+    /// (tagged-PDF authored order when present, else a geometric precedence
+    /// graph). A capability beyond Poppler's CLIs. See [`crate::docmodel`].
+    pub fn build_document_model(
+        &self,
+        pages: &[usize],
+    ) -> Result<crate::docmodel::DocumentModel> {
+        crate::docmodel::build_document_model(self, pages)
+    }
+
+    /// Parse this PDF into the canonical [`crate::parse::Document`] model — the
+    /// single structured representation every output format (Markdown / JSON /
+    /// HTML) is serialized from. Wraps [`Self::build_document_model`] with
+    /// metadata, a per-page view, provenance, and inline-styled text.
+    pub fn parse_document(
+        &self,
+        options: &crate::parse::ParseOptions,
+    ) -> Result<crate::parse::Document> {
+        crate::parse::parse(self, options)
+    }
+
+    /// Extract structured **key-value / form fields** (invoice number, date,
+    /// total, line items; receipt merchant/amount; form label→value pairs).
+    ///
+    /// Combines exact AcroForm fields with a pure-Rust spatial label→value
+    /// engine and document-type profiles. Operates on the canonical model, so it
+    /// works identically on digital-born and OCR'd pages. See [`crate::extract`].
+    pub fn extract_fields(
+        &self,
+        options: &crate::extract::ExtractOptions,
+    ) -> Result<crate::extract::ExtractedFields> {
+        crate::extract::extract_fields(self, options)
+    }
+
+    /// Visible page size `(width, height)` in user-space units, from the page's
+    /// `/CropBox` (falling back to `/MediaBox`). Used by the document-model
+    /// layer for margin-band (header/footer) detection and page-area thresholds.
+    pub(crate) fn page_dimensions(&self, page_number: usize) -> Result<(f64, f64)> {
+        self.validate_page(page_number)?;
+        let pages = self.doc.get_pages()?;
+        let page = pages.get(page_number - 1).ok_or_else(|| {
+            OxideError::MalformedPdf(format!("page {page_number} out of range"))
+        })?;
+        let b = page.crop_box;
+        Ok(((b[2] - b[0]).abs(), (b[3] - b[1]).abs()))
+    }
+
+    /// The page's `/Rotate` value, normalized to one of `0`, `90`, `180`, `270`
+    /// (clockwise). Used by the document-model layer to normalize text/graphics
+    /// coordinates into upright reading orientation before layout analysis.
+    pub(crate) fn page_rotation(&self, page_number: usize) -> Result<i32> {
+        self.validate_page(page_number)?;
+        let pages = self.doc.get_pages()?;
+        let page = pages.get(page_number - 1).ok_or_else(|| {
+            OxideError::MalformedPdf(format!("page {page_number} out of range"))
+        })?;
+        Ok(page.rotate.rem_euclid(360))
+    }
+
+    /// The page's crop box `[x0, y0, x1, y1]` in user space (falls back to the
+    /// media box). The origin needed to rotate coordinates about the page.
+    pub(crate) fn page_crop_box(&self, page_number: usize) -> Result<[f64; 4]> {
+        self.validate_page(page_number)?;
+        let pages = self.doc.get_pages()?;
+        let page = pages.get(page_number - 1).ok_or_else(|| {
+            OxideError::MalformedPdf(format!("page {page_number} out of range"))
+        })?;
+        Ok(page.crop_box)
+    }
+
+    /// External hyperlinks on a page: each `/Link` annotation with a URI action
+    /// (`/A << /S /URI /URI (…) >>`, or a direct `/URI`), as `(rect, uri)` where
+    /// `rect` is the annotation's `/Rect` `[x0,y0,x1,y1]` in user space (y-up).
+    /// Used by the digital-born pass to attach `[text](href)` links to the blocks
+    /// the link rectangles overlap. Best-effort: a malformed annotation is
+    /// skipped, never an error. Never resolves remote targets.
+    pub(crate) fn page_links(&self, page_number: usize) -> Result<Vec<([f64; 4], String)>> {
+        self.validate_page(page_number)?;
+        let pages = self.doc.get_pages()?;
+        let page = pages.get(page_number - 1).ok_or_else(|| {
+            OxideError::MalformedPdf(format!("page {page_number} out of range"))
+        })?;
+        let reader = self.doc.reader();
+        let page_obj = reader.get_and_resolve(page.object_number, page.generation_number)?;
+        let Some(page_dict) = page_obj.as_dict() else {
+            return Ok(Vec::new());
+        };
+        let Some(annots_obj) = page_dict.get("Annots") else {
+            return Ok(Vec::new());
+        };
+        let annots = reader.resolve(annots_obj.clone())?;
+        let Some(items) = annots.as_array() else {
+            return Ok(Vec::new());
+        };
+
+        let mut out = Vec::new();
+        for item in items {
+            let Ok(resolved) = reader.resolve(item.clone()) else {
+                continue;
+            };
+            let Some(adict) = resolved.as_dict() else {
+                continue;
+            };
+            if adict.get_name("Subtype") != Some("Link") {
+                continue;
+            }
+            let Some(rect) = rect_from_obj(adict.get("Rect"), reader) else {
+                continue;
+            };
+            if let Some(uri) = link_uri(adict, reader) {
+                out.push((rect, uri));
+            }
+        }
+        Ok(out)
+    }
+
     pub fn get_text_range(
         &self,
         start_page: usize,
@@ -335,28 +530,69 @@ impl ContentEngine {
 
     /// Create a PixelBuffer sized to render the given page at the given DPI.
     pub fn create_page_buffer(&self, page_number: usize, dpi: u32) -> Result<PixelBuffer> {
+        self.create_page_buffer_with_mode(page_number, dpi, RenderMode::Compat)
+    }
+
+    /// Create a PixelBuffer sized to render the given page with an explicit render mode.
+    pub fn create_page_buffer_with_mode(
+        &self,
+        page_number: usize,
+        dpi: u32,
+        render_mode: RenderMode,
+    ) -> Result<PixelBuffer> {
         let viewport = self.page_viewport(page_number, dpi)?;
-        Ok(PixelBuffer::new_filled(
+        Ok(PixelBuffer::new_filled_with_mode(
             viewport.width_px,
             viewport.height_px,
             WHITE,
+            render_mode,
         ))
     }
 
     /// Create a Viewport for the given page at the given DPI.
+    ///
+    /// Rejects a page whose final pixel count (post-DPI, post-rotation) would
+    /// exceed [`max_render_pixels`] BEFORE any buffer is allocated, so a hostile
+    /// PDF declaring a giant `/MediaBox` (e.g. `[0 0 200000 200000]`) returns a
+    /// clean [`OxideError::ResourceLimit`] instead of attempting a multi-hundred-
+    /// gigabyte allocation that aborts the process.
     pub fn page_viewport(&self, page_number: usize, dpi: u32) -> Result<Viewport> {
         self.validate_page(page_number)?;
         let page = self.get_page(page_number)?;
-        Ok(Viewport::new_rotated(
+        let viewport = Viewport::new_rotated(
             effective_page_box(&page),
             dpi,
             page_rotation_u32(page.rotate),
-        ))
+        );
+        let pixels = viewport.width_px as u64 * viewport.height_px as u64;
+        let cap = max_render_pixels();
+        if pixels > cap {
+            return Err(OxideError::ResourceLimit(format!(
+                "page {} would render {} pixels ({}x{}) at {} DPI, exceeding the limit of {} \
+                 pixels; lower the DPI or the page is abusively large",
+                page_number, pixels, viewport.width_px, viewport.height_px, dpi, cap
+            )));
+        }
+        Ok(viewport)
     }
 
     /// Render a page to a PixelBuffer at the given DPI.
     pub fn render_page(&self, page_number: usize, dpi: u32) -> Result<PixelBuffer> {
         PageRenderer::render_page(self, page_number, dpi)
+    }
+
+    /// Render a page with an explicit render mode.
+    ///
+    /// [`RenderMode::Compat`] is byte-for-byte the default Poppler-compatible
+    /// path used by [`render_page`](Self::render_page). [`RenderMode::HighQuality`]
+    /// keeps the same geometry/AA coverage but composites RGB in linear light.
+    pub fn render_page_with_mode(
+        &self,
+        page_number: usize,
+        dpi: u32,
+        render_mode: RenderMode,
+    ) -> Result<PixelBuffer> {
+        PageRenderer::render_page_with_mode(self, page_number, dpi, render_mode)
     }
 
     /// Render a page with a cancellation token threaded into the hot loops.
@@ -373,6 +609,17 @@ impl ContentEngine {
         cancel: &crate::cancel::CancelToken,
     ) -> Result<PixelBuffer> {
         PageRenderer::render_page_cancellable(self, page_number, dpi, cancel)
+    }
+
+    /// Render a page with cancellation and an explicit render mode.
+    pub fn render_page_cancellable_with_mode(
+        &self,
+        page_number: usize,
+        dpi: u32,
+        cancel: &crate::cancel::CancelToken,
+        render_mode: RenderMode,
+    ) -> Result<PixelBuffer> {
+        PageRenderer::render_page_cancellable_with_mode(self, page_number, dpi, cancel, render_mode)
     }
 
     /// Verify every digital signature field in the document (the `verify-sig`
@@ -404,18 +651,61 @@ impl ContentEngine {
     /// images, shadings, patterns, Form XObjects, or soft masks fall back to a
     /// single embedded rasterized page image (see [`crate::render::svg`]). The
     /// returned [`crate::render::SvgPage`] reports which path was taken.
-    pub fn render_page_svg(
-        &self,
-        page_number: usize,
-        dpi: u32,
-    ) -> Result<crate::render::SvgPage> {
+    pub fn render_page_svg(&self, page_number: usize, dpi: u32) -> Result<crate::render::SvgPage> {
         crate::render::render_page_svg(self, page_number, dpi)
+    }
+
+    /// Render a single page to a PostScript page body (the building block of the
+    /// `render --format ps` / `pdftops` equivalent). See
+    /// [`crate::render::postscript`]. Pages using only path/text/solid-fill/clip
+    /// operations become true vector PostScript (text as glyph outlines); pages
+    /// using images, shadings, patterns, Form XObjects, or soft masks fall back
+    /// to a single embedded rasterised page image.
+    pub fn render_page_ps(&self, page_number: usize, dpi: u32) -> Result<crate::render::PsPage> {
+        crate::render::render_page_ps(self, page_number, dpi)
+    }
+
+    /// Render the given 1-based pages to a complete, DSC-conformant multi-page
+    /// PostScript document (`%!PS-Adobe-3.0`). The `is_rasterized` count is the
+    /// number of pages that took the rasterize-embed fallback.
+    pub fn render_document_ps(&self, pages: &[usize], dpi: u32) -> Result<(String, usize)> {
+        let mut ps_pages = Vec::with_capacity(pages.len());
+        let mut rasterized = 0usize;
+        for &p in pages {
+            let page = self.render_page_ps(p, dpi)?;
+            if page.is_rasterized {
+                rasterized += 1;
+            }
+            ps_pages.push(page);
+        }
+        Ok((crate::render::assemble_ps_document(&ps_pages), rasterized))
+    }
+
+    /// Render a single page to a conforming EPS document (`%!PS-Adobe-3.0
+    /// EPSF-3.0`) with a precise `%%BoundingBox` and no `showpage`/
+    /// `setpagedevice` (the `render --format eps` / `pdftops -eps` /
+    /// `pdftocairo -eps` equivalent). Returns `(eps, is_rasterized)`.
+    pub fn render_page_eps(&self, page_number: usize, dpi: u32) -> Result<(String, bool)> {
+        let page = self.render_page_ps(page_number, dpi)?;
+        let rasterized = page.is_rasterized;
+        Ok((crate::render::assemble_eps_document(&page), rasterized))
     }
 
     /// Render a page and encode it as PNG using fast compression.
     pub fn render_page_png_fast(&self, page_number: usize, dpi: u32) -> Result<Vec<u8>> {
         // NOTE: line width 0 renders as 1px (PDF hairline spec). Verified in tests.
         let buf = self.render_page(page_number, dpi)?;
+        ImageEncoder::encode_png_fast(&buf.to_raw_image())
+    }
+
+    /// Render a page with an explicit render mode and encode it as PNG.
+    pub fn render_page_png_fast_with_mode(
+        &self,
+        page_number: usize,
+        dpi: u32,
+        render_mode: RenderMode,
+    ) -> Result<Vec<u8>> {
+        let buf = self.render_page_with_mode(page_number, dpi, render_mode)?;
         ImageEncoder::encode_png_fast(&buf.to_raw_image())
     }
 
@@ -482,8 +772,67 @@ impl ContentEngine {
     }
 }
 
+/// Default ceiling on the pixel count of a single rendered page (width * height
+/// after DPI and rotation). 100 megapixels admits normal high-DPI pages while
+/// keeping the 4-byte-per-pixel buffer around 400 MB before renderer overhead.
+/// The cap exists to turn a hostile giant `/MediaBox` into a clean error rather
+/// than a process abort from a failed multi-hundred-gigabyte allocation.
+pub const DEFAULT_MAX_RENDER_PIXELS: u64 = 100_000_000;
+
+/// The active per-page render pixel cap. Overridable at runtime via the
+/// `OXIDE_MAX_RENDER_PIXELS` environment variable (a positive integer); falls
+/// back to [`DEFAULT_MAX_RENDER_PIXELS`] when unset, empty, zero, or unparsable.
+/// Keeping this an env-var keeps the engine API free of a config object while
+/// still letting the CLI/server/benchmark tune the bound.
+pub fn max_render_pixels() -> u64 {
+    std::env::var("OXIDE_MAX_RENDER_PIXELS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_RENDER_PIXELS)
+}
+
 fn page_rotation_u32(rotation: i32) -> u32 {
     rotation.rem_euclid(360) as u32
+}
+
+/// Parse an annotation `/Rect` `[x0 y0 x1 y1]` (resolving indirect refs and
+/// normalizing so `x0<=x1, y0<=y1`). `None` if it is not a 4-number array.
+fn rect_from_obj(
+    obj: Option<&crate::object::PdfObject>,
+    reader: &PdfReader,
+) -> Option<[f64; 4]> {
+    let resolved = reader.resolve(obj?.clone()).ok()?;
+    let arr = resolved.as_array()?;
+    if arr.len() != 4 {
+        return None;
+    }
+    let mut v = [0.0f64; 4];
+    for (i, item) in arr.iter().enumerate() {
+        let n = reader.resolve(item.clone()).ok()?;
+        v[i] = n.as_number()?;
+    }
+    Some([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])])
+}
+
+/// Extract the URI from a `/Link` annotation: either its `/A << /S /URI /URI … >>`
+/// action or a direct `/URI`. Returns `None` for GoTo/internal links.
+fn link_uri(adict: &crate::object::PdfDictionary, reader: &PdfReader) -> Option<String> {
+    use crate::info::decode_pdf_text_string;
+    // Direct /URI on the annotation (older style).
+    if let Some(crate::object::PdfObject::String(bytes)) = adict.get("URI") {
+        return Some(decode_pdf_text_string(bytes));
+    }
+    // /A action dictionary (may be indirect).
+    let action = reader.resolve(adict.get("A")?.clone()).ok()?;
+    let act_dict = action.as_dict()?;
+    if act_dict.get_name("S") != Some("URI") {
+        return None;
+    }
+    match reader.resolve(act_dict.get("URI")?.clone()).ok()? {
+        crate::object::PdfObject::String(bytes) => Some(decode_pdf_text_string(&bytes)),
+        _ => None,
+    }
 }
 
 fn effective_page_box(page: &PdfPage) -> [f64; 4] {

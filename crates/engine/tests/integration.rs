@@ -1,3 +1,11 @@
+#![allow(
+    clippy::field_reassign_with_default,
+    clippy::len_zero,
+    clippy::manual_contains,
+    clippy::needless_range_loop,
+    clippy::useless_vec
+)]
+
 use oxide_engine::content::{tokenize_all, ContentToken};
 use oxide_engine::content::{ContentParser, GraphicsState, IDENTITY_MATRIX};
 use oxide_engine::fonts::FontResolver;
@@ -6,9 +14,9 @@ use oxide_engine::{
     DashState, FillRule, ImageEncoder, ImageLocateOptions, ImageLocator, ImageOutputFormat,
     ImagePainter, LinePainter, OxideError, PageResources, Path, PathPainter, PdfAnalyzer,
     PdfDocument, PdfObject, PdfReader, PixelBuffer, RawImage, ReadingOrderReconstructor,
-    RenderColor, RenderQuality, SmaskLoader, TextChunk, TextCollector, TextExtractOptions,
-    TextExtractor, TextLayerRecommendation, TextLine, Transform2D, Viewport, BLACK, BLUE, GREEN,
-    RED, WHITE,
+    RenderColor, RenderMode, RenderQuality, SmaskLoader, TextChunk, TextCollector,
+    TextExtractOptions, TextExtractor, TextLayerRecommendation, TextLine, Transform2D, Viewport,
+    BLACK, BLUE, GREEN, RED, WHITE,
 };
 
 const CONTENT_TEXT: &[u8] = b"BT\n/F1 12 Tf\n72 720 Td\n(Hi) Tj\nET\n";
@@ -974,13 +982,11 @@ fn build_pdf_with_content(content: &[u8], media_box: &str) -> Vec<u8> {
     push!(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
 
     offsets.push(pdf.len());
-    push!(
-        format!(
-            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [{media_box}] /Contents 4 0 R \
+    push!(format!(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [{media_box}] /Contents 4 0 R \
              /Resources << >> >>\nendobj\n"
-        )
-        .as_bytes()
-    );
+    )
+    .as_bytes());
 
     offsets.push(pdf.len());
     push!(format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len()).as_bytes());
@@ -993,14 +999,12 @@ fn build_pdf_with_content(content: &[u8], media_box: &str) -> Vec<u8> {
     for off in &offsets {
         push!(format!("{:010} 00000 n \n", off).as_bytes());
     }
-    push!(
-        format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
-            offsets.len() + 1,
-            xref_start
-        )
-        .as_bytes()
-    );
+    push!(format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF",
+        offsets.len() + 1,
+        xref_start
+    )
+    .as_bytes());
 
     pdf
 }
@@ -1037,7 +1041,11 @@ fn locator_captures_inline_image_data() {
     assert_eq!(raw.channels, 3);
     assert_eq!(raw.width, 2);
     assert_eq!(raw.height, 2);
-    assert_eq!(&raw.pixels[..], &pixels[..], "decoded pixels must round-trip");
+    assert_eq!(
+        &raw.pixels[..],
+        &pixels[..],
+        "decoded pixels must round-trip"
+    );
 }
 
 #[test]
@@ -1845,6 +1853,19 @@ fn render_page_is_deterministic() {
 }
 
 #[test]
+fn render_page_default_matches_explicit_compat_mode_byte_for_byte() {
+    let engine = ContentEngine::open_path("tests/fixtures/flate.pdf").unwrap();
+    let default = engine.render_page(1, 72).unwrap();
+    let compat = engine
+        .render_page_with_mode(1, 72, RenderMode::Compat)
+        .unwrap();
+
+    assert_eq!(default.width, compat.width);
+    assert_eq!(default.height, compat.height);
+    assert_eq!(default.to_rgba_bytes(), compat.to_rgba_bytes());
+}
+
+#[test]
 fn render_page_with_clip_fill_optimized() {
     let engine = ContentEngine::open_path("tests/fixtures/image_only.pdf").unwrap();
     let buf = engine.render_page(1, 72).unwrap();
@@ -2136,6 +2157,10 @@ fn build_rc4_128_encrypted_pdf() -> Vec<u8> {
         p: -3904,
         encrypt_metadata: true,
         cf_method: CryptMethod::V2,
+        stream_method: CryptMethod::V2,
+        string_method: CryptMethod::V2,
+        embedded_file_method: CryptMethod::V2,
+        crypt_filters: std::collections::HashMap::new(),
         v5: None,
     };
     let file_key = compute_encryption_key(b"", &info, &file_id);
@@ -2288,6 +2313,51 @@ fn rc4_128_encrypted_pdf_unaffected_by_a_supplied_password_when_user_pw_empty() 
     let pdf = build_rc4_128_encrypted_pdf();
     let engine = ContentEngine::open_bytes_with_password(pdf, b"some-guess").unwrap();
     assert!(engine.is_encrypted());
+}
+
+#[test]
+fn encrypted_attachment_fixture_renders_without_document_password() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/pdfs/pdfjs/encrypted-attachment.pdf");
+    if !path.exists() {
+        println!("SKIP: encrypted-attachment.pdf fixture not present");
+        return;
+    }
+
+    let engine = ContentEngine::open_path(&path).unwrap();
+    assert!(
+        !engine.is_encrypted(),
+        "ordinary streams/strings use Identity crypt filters"
+    );
+    assert_eq!(engine.page_count().unwrap(), 1);
+    let buf = engine.render_page(1, 72).unwrap();
+    assert!(buf.width > 0 && buf.height > 0);
+}
+
+#[test]
+fn encrypted_attachment_fixture_extracts_with_password() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/corpus/pdfs/pdfjs/encrypted-attachment.pdf");
+    if !path.exists() {
+        println!("SKIP: encrypted-attachment.pdf fixture not present");
+        return;
+    }
+
+    let engine = ContentEngine::open_path_with_password(&path, b"000000").unwrap();
+    assert!(engine.is_encrypted());
+    let attachments = engine.list_attachments().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].name, "attachment.pdf");
+    let bytes = engine.extract_attachment(&attachments[0]).unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.3"));
+
+    let no_password = ContentEngine::open_path(&path).unwrap();
+    let attachments = no_password.list_attachments().unwrap();
+    let err = no_password.extract_attachment(&attachments[0]).unwrap_err();
+    assert!(
+        err.to_string().contains("/Crypt filter"),
+        "expected clean crypt-filter error, got {err}"
+    );
 }
 
 #[test]
@@ -3173,10 +3243,9 @@ fn build_aes256_encrypted_pdf(password: &[u8], plaintext: &[u8]) -> Vec<u8> {
     let o_k_salt: [u8; 8] = [0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8];
 
     let file_key: [u8; 32] = [
-        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-        0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
-        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-        0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32,
+        0x10, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+        0xFF, 0x00,
     ];
 
     let zero_iv = [0u8; 16];
@@ -3239,8 +3308,8 @@ fn build_aes256_encrypted_pdf(password: &[u8], plaintext: &[u8]) -> Vec<u8> {
 
     // Encrypt page content stream: IV prepended to PKCS7-padded AES-256-CBC ciphertext.
     let content_iv: [u8; 16] = [
-        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
-        0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        0x1F,
     ];
     let encrypted_content = {
         let padded_len = (plaintext.len() / 16 + 1) * 16;
@@ -3275,7 +3344,11 @@ fn build_aes256_encrypted_pdf(password: &[u8], plaintext: &[u8]) -> Vec<u8> {
 
     offsets[4] = bytes.len();
     bytes.extend_from_slice(
-        format!("4 0 obj\n<< /Length {} >>\nstream\n", encrypted_content.len()).as_bytes(),
+        format!(
+            "4 0 obj\n<< /Length {} >>\nstream\n",
+            encrypted_content.len()
+        )
+        .as_bytes(),
     );
     bytes.extend_from_slice(&encrypted_content);
     bytes.extend_from_slice(b"\nendstream\nendobj\n");
@@ -3313,8 +3386,8 @@ fn build_aes256_encrypted_pdf(password: &[u8], plaintext: &[u8]) -> Vec<u8> {
 fn aes256_r6_encrypted_pdf_opens_with_empty_password() {
     let plaintext = b"BT\n/F1 12 Tf\n72 720 Td\n(AES256) Tj\nET\n";
     let pdf = build_aes256_encrypted_pdf(b"", plaintext);
-    let engine = ContentEngine::open_bytes(pdf)
-        .expect("AES-256 PDF should open with empty password");
+    let engine =
+        ContentEngine::open_bytes(pdf).expect("AES-256 PDF should open with empty password");
     assert!(engine.is_encrypted(), "document should report as encrypted");
     let content = engine.document().get_page_content_bytes(1).unwrap();
     assert!(

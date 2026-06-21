@@ -15,12 +15,15 @@ use oxide_engine::{build_subset, ContentEngine, HtmlOptions, PdfDocument};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Pick the input: a CLI arg, else a bundled fixture.
-    let path = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("fixtures")
-            .join("tracemonkey.pdf")
-    });
+    let path = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("tracemonkey.pdf")
+        });
     println!("Opening {}", path.display());
 
     // 1. Open the document.
@@ -44,7 +47,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Text extraction (pdftotext equivalent).
     if info.page_count >= 1 {
         let text = engine.get_page_text(1)?;
-        let preview: String = text.split_whitespace().take(12).collect::<Vec<_>>().join(" ");
+        let preview: String = text
+            .split_whitespace()
+            .take(12)
+            .collect::<Vec<_>>()
+            .join(" ");
         println!("Page 1 text preview: {preview}");
     }
 

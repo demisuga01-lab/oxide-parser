@@ -4,9 +4,9 @@ use std::path::Path;
 use std::sync::RwLock;
 
 use crate::crypto::{
-    compute_encryption_key, decrypt_stream, decrypt_string, derive_v5_file_key_from_owner,
-    derive_v5_file_key_from_user, verify_user_password, verify_v5_owner_password,
-    verify_v5_perms, verify_v5_user_password, EncryptionInfo,
+    compute_encryption_key, decrypt_string, derive_v5_file_key_from_owner,
+    derive_v5_file_key_from_user, verify_user_password, verify_v5_owner_password, verify_v5_perms,
+    verify_v5_user_password, CryptMethod, EncryptionInfo,
 };
 use crate::error::{OxideError, Result};
 use crate::filters::decode_stream_from_dict;
@@ -35,6 +35,15 @@ pub struct EncryptionContext {
     /// True when this is a V5 (AES-256) document. For V5 the file key is used
     /// directly for every object — no per-object key derivation.
     pub is_v5: bool,
+    /// Crypt filter method for ordinary streams (`/StmF`).
+    pub stream_method: CryptMethod,
+    /// Crypt filter method for strings (`/StrF`).
+    pub string_method: CryptMethod,
+    /// Crypt filter method for embedded-file streams (`/EFF`).
+    pub embedded_file_method: CryptMethod,
+    /// Named crypt filters from `/CF`, used by explicit `/Filter /Crypt`
+    /// stream filters.
+    pub crypt_filters: HashMap<String, CryptMethod>,
     /// Mirrors `/EncryptMetadata`; when false, `/Type /Metadata` streams are
     /// left as plaintext.
     pub encrypt_metadata: bool,
@@ -88,6 +97,7 @@ impl PdfReader {
         let mut visited = HashSet::new();
 
         read_xref_chain(&data, startxref, &mut xref, &mut trailer, &mut visited)?;
+        repair_uncompressed_xref_offsets(&data, &mut xref);
 
         let trailer = trailer.ok_or_else(|| {
             OxideError::MalformedPdf("PDF did not contain a trailer dictionary".to_string())
@@ -145,7 +155,9 @@ impl PdfReader {
     /// documents and on any parse failure.
     pub fn encrypt_dictionary(&self) -> Option<PdfDictionary> {
         let encrypt = self.trailer.get("Encrypt")?;
-        resolve_encrypt_dict(&self.data, &self.xref, encrypt).ok().flatten()
+        resolve_encrypt_dict(&self.data, &self.xref, encrypt)
+            .ok()
+            .flatten()
     }
 
     pub fn trailer(&self) -> &PdfDictionary {
@@ -268,13 +280,12 @@ impl PdfReader {
         ctx: &EncryptionContext,
     ) -> PdfObject {
         match obj {
-            PdfObject::String(bytes) => PdfObject::String(decrypt_string(
+            PdfObject::String(bytes) => PdfObject::String(decrypt_bytes_by_method(
                 &bytes,
-                &ctx.file_key,
+                ctx,
                 obj_num,
                 gen_num,
-                ctx.is_aes,
-                ctx.is_v5,
+                &ctx.string_method,
             )),
             PdfObject::Stream { dict, raw } => {
                 match dict.get_name("Type") {
@@ -283,8 +294,9 @@ impl PdfReader {
                     // Metadata streams stay plaintext when /EncryptMetadata is false.
                     Some("Metadata") if !ctx.encrypt_metadata => PdfObject::Stream { dict, raw },
                     _ => {
+                        let method = stream_crypt_method(&dict, ctx);
                         let decrypted =
-                            decrypt_stream(&raw, &ctx.file_key, obj_num, gen_num, ctx.is_aes, ctx.is_v5);
+                            decrypt_bytes_by_method(&raw, ctx, obj_num, gen_num, &method);
                         // String values inside the stream dictionary are also
                         // encrypted; decrypt them too.
                         let dict = match self.decrypt_object_inner(
@@ -446,9 +458,17 @@ fn setup_encryption(
                 file_key,
                 is_aes: info.is_aes(),
                 is_v5: false,
+                stream_method: info.stream_method.clone(),
+                string_method: info.string_method.clone(),
+                embedded_file_method: info.embedded_file_method.clone(),
+                crypt_filters: info.crypt_filters.clone(),
                 encrypt_metadata: info.encrypt_metadata,
             }));
         }
+    }
+
+    if info.stream_method == CryptMethod::None && info.string_method == CryptMethod::None {
+        return Ok(None);
     }
 
     Err(OxideError::EncryptedPdf(
@@ -472,12 +492,24 @@ fn setup_encryption_v5(
 
     let mut candidates: Vec<Candidate> = Vec::new();
     if !password.is_empty() {
-        candidates.push(Candidate { pwd: password, is_owner: false });
-        candidates.push(Candidate { pwd: password, is_owner: true });
+        candidates.push(Candidate {
+            pwd: password,
+            is_owner: false,
+        });
+        candidates.push(Candidate {
+            pwd: password,
+            is_owner: true,
+        });
     }
     // Always try empty password as fallback (permission-only encryption).
-    candidates.push(Candidate { pwd: b"", is_owner: false });
-    candidates.push(Candidate { pwd: b"", is_owner: true });
+    candidates.push(Candidate {
+        pwd: b"",
+        is_owner: false,
+    });
+    candidates.push(Candidate {
+        pwd: b"",
+        is_owner: true,
+    });
 
     for c in &candidates {
         let verified = if c.is_owner {
@@ -513,8 +545,16 @@ fn setup_encryption_v5(
             file_key,
             is_aes: false, // V5 uses AES-256 directly, not the is_aes (AES-128) flag
             is_v5: true,
+            stream_method: info.stream_method.clone(),
+            string_method: info.string_method.clone(),
+            embedded_file_method: info.embedded_file_method.clone(),
+            crypt_filters: info.crypt_filters.clone(),
             encrypt_metadata: info.encrypt_metadata,
         }));
+    }
+
+    if info.stream_method == CryptMethod::None && info.string_method == CryptMethod::None {
+        return Ok(None);
     }
 
     Err(OxideError::EncryptedPdf(
@@ -562,6 +602,92 @@ impl ParserResolver for PdfReader {
     }
 }
 
+fn stream_crypt_method(dict: &PdfDictionary, ctx: &EncryptionContext) -> CryptMethod {
+    if let Some(name) = explicit_crypt_filter_name(dict) {
+        return if name == "Identity" {
+            CryptMethod::None
+        } else {
+            ctx.crypt_filters.get(name).cloned().unwrap_or_else(|| {
+                if dict.get_name("Type") == Some("EmbeddedFile") {
+                    ctx.embedded_file_method.clone()
+                } else {
+                    ctx.stream_method.clone()
+                }
+            })
+        };
+    }
+    if dict.get_name("Type") == Some("EmbeddedFile") {
+        ctx.embedded_file_method.clone()
+    } else {
+        ctx.stream_method.clone()
+    }
+}
+
+fn explicit_crypt_filter_name(dict: &PdfDictionary) -> Option<&str> {
+    let filter_obj = dict.get("Filter").or_else(|| dict.get("F"))?;
+    let has_crypt = match filter_obj {
+        PdfObject::Name(name) => name == "Crypt",
+        PdfObject::Array(items) => items
+            .iter()
+            .any(|item| matches!(item, PdfObject::Name(name) if name == "Crypt")),
+        _ => false,
+    };
+    if !has_crypt {
+        return None;
+    }
+
+    let params_obj = dict.get("DecodeParms").or_else(|| dict.get("DP"));
+    match params_obj {
+        Some(PdfObject::Dictionary(params)) => params.get_name("Name"),
+        Some(PdfObject::Array(items)) => {
+            let idx = crypt_filter_index(filter_obj)?;
+            items
+                .get(idx)
+                .and_then(PdfObject::as_dict)?
+                .get_name("Name")
+        }
+        _ => None,
+    }
+}
+
+fn crypt_filter_index(filter_obj: &PdfObject) -> Option<usize> {
+    match filter_obj {
+        PdfObject::Name(name) if name == "Crypt" => Some(0),
+        PdfObject::Array(items) => items
+            .iter()
+            .position(|item| matches!(item, PdfObject::Name(name) if name == "Crypt")),
+        _ => None,
+    }
+}
+
+fn method_is_aes128(method: &CryptMethod) -> bool {
+    matches!(method, CryptMethod::AesV2)
+}
+
+fn method_is_aes256(method: &CryptMethod) -> bool {
+    matches!(method, CryptMethod::AesV3)
+}
+
+fn decrypt_bytes_by_method(
+    data: &[u8],
+    ctx: &EncryptionContext,
+    obj_num: u32,
+    gen_num: u16,
+    method: &CryptMethod,
+) -> Vec<u8> {
+    match method {
+        CryptMethod::None => data.to_vec(),
+        CryptMethod::V2 | CryptMethod::AesV2 | CryptMethod::AesV3 => decrypt_string(
+            data,
+            &ctx.file_key,
+            obj_num,
+            gen_num,
+            method_is_aes128(method),
+            method_is_aes256(method),
+        ),
+    }
+}
+
 fn read_xref_chain(
     data: &[u8],
     startxref: usize,
@@ -592,6 +718,68 @@ fn read_xref_chain(
     Ok(())
 }
 
+fn repair_uncompressed_xref_offsets(data: &[u8], xref: &mut HashMap<(u32, u16), XrefEntry>) {
+    let needs_repair = xref.iter().any(|(&(number, generation), entry)| {
+        matches!(
+            entry,
+            XrefEntry::Uncompressed { offset }
+                if !indirect_object_header_at_matches(data, *offset, number, generation)
+        )
+    });
+    if !needs_repair {
+        return;
+    }
+
+    let scanned = scan_indirect_object_headers(data);
+    for (&(number, generation), entry) in xref.iter_mut() {
+        let XrefEntry::Uncompressed { offset } = entry else {
+            continue;
+        };
+        if indirect_object_header_at_matches(data, *offset, number, generation) {
+            continue;
+        }
+        if let Some(repaired) = scanned.get(&(number, generation)) {
+            *offset = *repaired;
+        }
+    }
+}
+
+fn scan_indirect_object_headers(data: &[u8]) -> HashMap<(u32, u16), usize> {
+    let mut offsets = HashMap::new();
+    for (rel, window) in data.windows(b" obj".len()).enumerate() {
+        if window != b" obj" {
+            continue;
+        }
+        let line_start = data[..rel]
+            .iter()
+            .rposition(|byte| *byte == b'\r' || *byte == b'\n')
+            .map_or(0, |pos| pos + 1);
+        let object_start = skip_ws_and_comments(data, line_start);
+        let Some((number, generation)) = parse_indirect_object_header(data, object_start) else {
+            continue;
+        };
+        offsets.insert((number, generation), object_start);
+    }
+    offsets
+}
+
+fn indirect_object_header_at_matches(
+    data: &[u8],
+    offset: usize,
+    number: u32,
+    generation: u16,
+) -> bool {
+    parse_indirect_object_header(data, offset) == Some((number, generation))
+}
+
+fn parse_indirect_object_header(data: &[u8], offset: usize) -> Option<(u32, u16)> {
+    let mut pos = offset;
+    let number = u32::try_from(read_u64_token(data, &mut pos).ok()?).ok()?;
+    let generation = u16::try_from(read_u64_token(data, &mut pos).ok()?).ok()?;
+    let token = read_token(data, &mut pos).ok()?;
+    (token == b"obj").then_some((number, generation))
+}
+
 #[derive(Clone, Debug)]
 struct XrefSection {
     trailer: PdfDictionary,
@@ -607,9 +795,34 @@ fn read_xref_section(
     let offset = skip_ws_and_comments(data, offset);
     if bytes_at(data, offset, b"xref") {
         read_classic_xref(data, offset, xref)
+    } else if let Some(repaired) = nearby_classic_xref_offset(data, offset) {
+        read_classic_xref(data, repaired, xref)
     } else {
         read_xref_stream(data, offset, xref)
     }
+}
+
+fn nearby_classic_xref_offset(data: &[u8], offset: usize) -> Option<usize> {
+    let start = offset.saturating_sub(64);
+    let end = offset.saturating_add(1024).min(data.len());
+    data.get(start..end).and_then(|slice| {
+        slice
+            .windows(b"xref".len())
+            .enumerate()
+            .filter_map(|(rel, window)| {
+                if window != b"xref" {
+                    return None;
+                }
+                let pos = start + rel;
+                let is_word = pos == 0
+                    || data
+                        .get(pos - 1)
+                        .copied()
+                        .is_none_or(|b| !b.is_ascii_alphabetic());
+                is_word.then_some(pos)
+            })
+            .min_by_key(|candidate| candidate.abs_diff(offset))
+    })
 }
 
 fn read_classic_xref(
@@ -640,9 +853,6 @@ fn read_classic_xref(
             let byte_offset = read_u64_token(data, &mut pos)?;
             let generation = read_u64_token(data, &mut pos)?;
             let status = read_token(data, &mut pos)?;
-            let generation = u16::try_from(generation).map_err(|_| {
-                OxideError::MalformedPdf("xref generation does not fit in u16".to_string())
-            })?;
             let entry = match status.as_slice() {
                 b"n" => XrefEntry::Uncompressed {
                     offset: usize::try_from(byte_offset).map_err(|_| {
@@ -658,6 +868,12 @@ fn read_classic_xref(
                         String::from_utf8_lossy(other)
                     )));
                 }
+            };
+            let generation = match status.as_slice() {
+                b"f" => u16::try_from(generation).unwrap_or(u16::MAX),
+                _ => u16::try_from(generation).map_err(|_| {
+                    OxideError::MalformedPdf("xref generation does not fit in u16".to_string())
+                })?,
             };
             xref.entry((object_number, generation)).or_insert(entry);
         }
@@ -770,11 +986,7 @@ pub(crate) fn parse_xref_stream_entries(
             })?;
             match field0 {
                 0 => {
-                    let generation = u16::try_from(field2).map_err(|_| {
-                        OxideError::MalformedPdf(
-                            "free xref generation does not fit in u16".to_string(),
-                        )
-                    })?;
+                    let generation = u16::try_from(field2).unwrap_or(u16::MAX);
                     entries.push((object_number, generation, XrefEntry::Free));
                 }
                 1 => {
@@ -1092,7 +1304,7 @@ fn is_delimiter(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
 
     use super::*;
 
@@ -1137,6 +1349,96 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn classic_xref_tolerates_overlarge_free_generation() {
+        let data = b"xref
+0 2
+0000000000 65536 f
+0000000015 00000 n
+trailer
+<< /Size 2 /Root 1 0 R >>
+";
+        let mut xref = HashMap::new();
+
+        read_classic_xref(data, 0, &mut xref).unwrap();
+
+        assert!(matches!(xref.get(&(0, u16::MAX)), Some(XrefEntry::Free)));
+        assert!(matches!(
+            xref.get(&(1, 0)),
+            Some(XrefEntry::Uncompressed { offset: 15 })
+        ));
+    }
+
+    #[test]
+    fn xref_section_repairs_forward_classic_xref_offset() {
+        let mut data = vec![b' '; 192];
+        let xref_offset = 64usize;
+        let xref = b"xref
+0 2
+0000000000 65535 f
+0000000015 00000 n
+trailer
+<< /Size 2 /Root 1 0 R >>
+";
+        data[xref_offset..xref_offset + xref.len()].copy_from_slice(xref);
+        let mut xref_map = HashMap::new();
+
+        read_xref_section(&data, xref_offset - 40, &mut xref_map).unwrap();
+
+        assert!(matches!(
+            xref_map.get(&(1, 0)),
+            Some(XrefEntry::Uncompressed { offset: 15 })
+        ));
+    }
+
+    #[test]
+    fn reader_repairs_bad_uncompressed_xref_offsets() {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.7\n\n");
+        let obj1 = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n\n");
+        let obj2 = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj\n\n");
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!(
+                "xref\n0 3\n0000000000 65535 f\n{obj1:010} 00000 n\n{:010} 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+                obj2 - 1
+            )
+            .as_bytes(),
+        );
+
+        let reader = PdfReader::from_bytes(pdf).unwrap();
+
+        assert!(matches!(
+            reader.get_object(2, 0).unwrap(),
+            PdfObject::Dictionary(_)
+        ));
+    }
+
+    #[test]
+    fn xref_stream_tolerates_overlarge_free_generation() {
+        let dict = dict(&[
+            (
+                "W",
+                PdfObject::Array(vec![
+                    PdfObject::Integer(1),
+                    PdfObject::Integer(1),
+                    PdfObject::Integer(3),
+                ]),
+            ),
+            (
+                "Index",
+                PdfObject::Array(vec![PdfObject::Integer(0), PdfObject::Integer(1)]),
+            ),
+        ]);
+        let raw = [0, 0, 1, 0, 0];
+
+        let entries = parse_xref_stream_entries(&dict, &raw).unwrap();
+
+        assert_eq!(entries, vec![(0, u16::MAX, XrefEntry::Free)]);
     }
 
     #[test]
