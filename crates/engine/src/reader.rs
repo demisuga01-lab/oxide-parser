@@ -451,19 +451,31 @@ fn setup_encryption(
         vec![password, b""]
     };
 
-    for pwd in candidates {
+    let make_ctx = |file_key: Vec<u8>| EncryptionContext {
+        file_key,
+        is_aes: info.is_aes(),
+        is_v5: false,
+        stream_method: info.stream_method.clone(),
+        string_method: info.string_method.clone(),
+        embedded_file_method: info.embedded_file_method.clone(),
+        crypt_filters: info.crypt_filters.clone(),
+        encrypt_metadata: info.encrypt_metadata,
+    };
+
+    for pwd in &candidates {
         if verify_user_password(pwd, &info, &file_id) {
             let file_key = compute_encryption_key(pwd, &info, &file_id);
-            return Ok(Some(EncryptionContext {
-                file_key,
-                is_aes: info.is_aes(),
-                is_v5: false,
-                stream_method: info.stream_method.clone(),
-                string_method: info.string_method.clone(),
-                embedded_file_method: info.embedded_file_method.clone(),
-                crypt_filters: info.crypt_filters.clone(),
-                encrypt_metadata: info.encrypt_metadata,
-            }));
+            return Ok(Some(make_ctx(file_key)));
+        }
+    }
+
+    // Try the supplied password as an OWNER password: recover the user-password
+    // equivalent from /O (Algorithm 3 reverse), then derive the file key from it.
+    if !password.is_empty() {
+        let recovered = crate::crypto::recover_user_password_from_owner(password, &info);
+        if verify_user_password(&recovered, &info, &file_id) {
+            let file_key = compute_encryption_key(&recovered, &info, &file_id);
+            return Ok(Some(make_ctx(file_key)));
         }
     }
 

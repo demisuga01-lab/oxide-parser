@@ -306,7 +306,7 @@ pub fn md5(data: &[u8]) -> [u8; 16] {
 // 2.5  SHA-2 helpers (V5/R5/R6)
 // ---------------------------------------------------------------------------
 
-fn sha256(data: &[u8]) -> [u8; 32] {
+pub(crate) fn sha256(data: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(data);
@@ -758,6 +758,34 @@ pub fn compute_encryption_key(password: &[u8], info: &EncryptionInfo, file_id: &
     hash[..key_len].to_vec()
 }
 
+/// Recover the user password (or its equivalent) from an owner password for
+/// V1/V2/V4 (Algorithm 3, reverse): derive the owner RC4 key, then RC4-decrypt
+/// the `/O` entry. For R>=3 the decryption is the 20-round iterated form. The
+/// result is the padded user password, which can then be used as a user
+/// password to derive the file key. Returns the 32-byte recovered value.
+pub fn recover_user_password_from_owner(owner_pw: &[u8], info: &EncryptionInfo) -> Vec<u8> {
+    let key_len = (info.key_length / 8).clamp(1, 16);
+    let mut rc4_key = md5(&pad_password(owner_pw)).to_vec();
+    if info.r >= 3 {
+        for _ in 0..50 {
+            rc4_key = md5(&rc4_key[..16]).to_vec();
+        }
+    }
+    let rc4_key = rc4_key[..key_len].to_vec();
+
+    if info.r >= 3 {
+        // Reverse the 20 RC4 rounds: applied i=1..=19 forward, so undo i=19..=0.
+        let mut result = info.o.clone();
+        for i in (0u8..=19).rev() {
+            let xor_key: Vec<u8> = rc4_key.iter().map(|&b| b ^ i).collect();
+            result = Rc4::apply(&xor_key, &result);
+        }
+        result
+    } else {
+        Rc4::apply(&rc4_key, &info.o)
+    }
+}
+
 /// Verify that `password` matches the `/U` user-password verifier (V1/V2/V4).
 ///
 /// For `R >= 3` (Algorithm 5): RC4-encrypt `MD5(PADDING + file_id)` with the
@@ -992,6 +1020,397 @@ pub fn decrypt_stream(
     is_v5: bool,
 ) -> Vec<u8> {
     decrypt_string(data, file_key, obj_num, gen_num, is_aes, is_v5)
+}
+
+// ===========================================================================
+// WRITE SIDE — Standard Security Handler encryption (Bucket 2)
+//
+// Mirrors the decrypt paths above. All key-derivation math (compute_encryption_
+// key, object_key, r6_hash, pad_password, the SHA/MD5/RC4 primitives) is reused
+// verbatim; the new code is the cipher ENCRYPT direction, the /O//U//UE//OE//
+// Perms write-side builders, and a CSPRNG for IVs/salts/file keys.
+// ===========================================================================
+
+/// Fill `buf` with cryptographically-secure random bytes (IVs, salts, the V5
+/// file key). Panics only if the OS RNG is unavailable, which is unrecoverable
+/// for an encryption request.
+pub fn random_bytes(len: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; len];
+    getrandom::getrandom(&mut buf).expect("OS CSPRNG unavailable");
+    buf
+}
+
+/// Encrypt a single 16-byte block with AES-256-ECB. Inverse of
+/// [`aes256_ecb_decrypt_block`]; used to build the V5 `/Perms` entry.
+fn aes256_ecb_encrypt_block(key: &[u8], block: &[u8]) -> Result<[u8; 16]> {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    if key.len() != 32 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-256-ECB: key must be 32 bytes, got {}",
+            key.len()
+        )));
+    }
+    if block.len() != 16 {
+        return Err(OxideError::MalformedPdf(format!(
+            "AES-256-ECB: block must be 16 bytes, got {}",
+            block.len()
+        )));
+    }
+    let cipher = aes::Aes256::new_from_slice(key)
+        .map_err(|_| OxideError::MalformedPdf("AES-256-ECB: invalid key".to_string()))?;
+    let mut out = aes::Block::clone_from_slice(block);
+    cipher.encrypt_block(&mut out);
+    Ok(out.into())
+}
+
+/// AES-256-CBC encrypt without padding (data must be a multiple of 16 bytes),
+/// the inverse of [`aes256_cbc_no_pad`]. Used for the V5 /UE//OE wrap.
+fn aes256_cbc_encrypt_no_pad(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
+    use aes::cipher::{BlockEncrypt, KeyInit};
+    if key.len() != 32 {
+        return Err(OxideError::MalformedPdf("AES-256: key must be 32 bytes".to_string()));
+    }
+    let cipher = aes::Aes256::new_from_slice(key)
+        .map_err(|_| OxideError::MalformedPdf("AES-256: invalid key".to_string()))?;
+    let mut out = Vec::with_capacity(data.len());
+    let mut prev = [0u8; 16];
+    prev.copy_from_slice(&iv[..16]);
+    for chunk in data.chunks(16) {
+        let mut block = [0u8; 16];
+        block[..chunk.len()].copy_from_slice(chunk);
+        for i in 0..16 {
+            block[i] ^= prev[i];
+        }
+        let mut b = aes::Block::clone_from_slice(&block);
+        cipher.encrypt_block(&mut b);
+        let enc: [u8; 16] = b.into();
+        out.extend_from_slice(&enc);
+        prev = enc;
+    }
+    Ok(out)
+}
+
+/// AES-128-CBC encrypt with PKCS#7 padding and a fresh random 16-byte IV
+/// PREPENDED to the ciphertext — the exact wire format
+/// [`aes128_cbc_decrypt`] expects (it does `split_at(16)`).
+fn aes128_cbc_encrypt_pkcs7(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let iv = random_bytes(16);
+    let padded = pkcs7_pad(plaintext, 16);
+    let body = {
+        // Manual CBC over the padded data, reusing the ECB block primitive.
+        let mut out = Vec::with_capacity(padded.len());
+        let mut prev = [0u8; 16];
+        prev.copy_from_slice(&iv);
+        for chunk in padded.chunks(16) {
+            let mut block = [0u8; 16];
+            block.copy_from_slice(chunk);
+            for i in 0..16 {
+                block[i] ^= prev[i];
+            }
+            let enc = aes128_ecb_encrypt_block(key, &block)?;
+            out.extend_from_slice(&enc);
+            prev = enc;
+        }
+        out
+    };
+    let mut result = iv;
+    result.extend_from_slice(&body);
+    Ok(result)
+}
+
+/// AES-256-CBC encrypt with PKCS#7 padding + prepended random IV, matching
+/// [`aes256_cbc_decrypt`]. Used for V5 string/stream encryption.
+fn aes256_cbc_encrypt_pkcs7(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let iv = random_bytes(16);
+    let padded = pkcs7_pad(plaintext, 16);
+    let body = aes256_cbc_encrypt_no_pad(key, &iv, &padded)?;
+    let mut result = iv;
+    result.extend_from_slice(&body);
+    Ok(result)
+}
+
+/// Apply PKCS#7 padding to `data` for the given block size (always adds 1..=block bytes).
+fn pkcs7_pad(data: &[u8], block: usize) -> Vec<u8> {
+    let pad = block - (data.len() % block);
+    let mut out = Vec::with_capacity(data.len() + pad);
+    out.extend_from_slice(data);
+    out.extend(std::iter::repeat_n(pad as u8, pad));
+    out
+}
+
+/// Encrypt a PDF string/stream value belonging to object `obj_num`/`gen_num`,
+/// the inverse of [`decrypt_string`]. `is_v5` selects AES-256 with the file key
+/// used directly; otherwise a per-object key is derived (AES-128 when `is_aes`,
+/// else RC4). Empty input stays empty (PDF convention; matches decrypt).
+pub fn encrypt_bytes(
+    data: &[u8],
+    file_key: &[u8],
+    obj_num: u32,
+    gen_num: u16,
+    is_aes: bool,
+    is_v5: bool,
+) -> Result<Vec<u8>> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+    if is_v5 {
+        aes256_cbc_encrypt_pkcs7(file_key, data)
+    } else {
+        let key = object_key(file_key, obj_num, gen_num, is_aes);
+        if is_aes {
+            aes128_cbc_encrypt_pkcs7(&key, data)
+        } else {
+            Ok(Rc4::apply(&key, data))
+        }
+    }
+}
+
+/// Parameters for building an encrypted document (the write-side request).
+#[derive(Debug, Clone)]
+pub struct EncryptParams {
+    /// User password (open password). Empty = no password needed to open.
+    pub user_password: Vec<u8>,
+    /// Owner password (full-permissions password). Empty defaults to the user
+    /// password (a common convention).
+    pub owner_password: Vec<u8>,
+    /// Permission bits (`/P`, a signed 32-bit bitmask per ISO 32000 Table 22).
+    /// Default `-1` (all bits set) grants every permission.
+    pub permissions: i32,
+    /// Algorithm/strength to use.
+    pub algorithm: EncryptAlgorithm,
+    /// Whether document metadata is encrypted (default true).
+    pub encrypt_metadata: bool,
+}
+
+impl Default for EncryptParams {
+    fn default() -> Self {
+        EncryptParams {
+            user_password: Vec::new(),
+            owner_password: Vec::new(),
+            permissions: -1, // all bits set = grant everything
+            algorithm: EncryptAlgorithm::Aes256,
+            encrypt_metadata: true,
+        }
+    }
+}
+
+/// Supported encryption strengths (Standard Security Handler).
+///
+/// **AES-256 is the recommended default and the only algorithm verified for
+/// cross-reader interop** (qpdf + Poppler decrypt Oxide's AES-256 output with
+/// both the user and owner password, and Oxide reads theirs). The legacy
+/// `Rc4_128` / `Aes128` paths (V2/V4 standard security handler) round-trip
+/// correctly through Oxide's own reader but have a known V4 crypt-filter
+/// deviation that other readers do not accept — use them only when a consumer
+/// specifically requires legacy encryption and can read Oxide's output. See
+/// `docs/manipulation.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EncryptAlgorithm {
+    /// RC4 128-bit (V=2, R=3) — legacy/compat; weak; Oxide-read-only interop.
+    Rc4_128,
+    /// AES-128 (V=4, R=4) — legacy/compat; Oxide-read-only interop (see note).
+    Aes128,
+    /// AES-256 (V=5, R=6) — the secure, cross-reader-verified default.
+    Aes256,
+}
+
+impl EncryptAlgorithm {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+            "rc4" | "rc4128" => Some(Self::Rc4_128),
+            "aes128" => Some(Self::Aes128),
+            "aes256" | "aes" => Some(Self::Aes256),
+            _ => None,
+        }
+    }
+}
+
+/// The fully-derived encryption state for a write: the file key + the
+/// [`EncryptionInfo`] to serialize as the `/Encrypt` dict.
+pub struct EncryptState {
+    pub file_key: Vec<u8>,
+    pub info: EncryptionInfo,
+}
+
+impl EncryptState {
+    pub fn is_aes(&self) -> bool {
+        self.info.is_aes()
+    }
+    pub fn is_v5(&self) -> bool {
+        self.info.v == 5
+    }
+}
+
+/// Build the encryption state (file key + `/Encrypt` dictionary parameters) for
+/// the chosen algorithm + passwords + permissions. `file_id` is the document's
+/// first `/ID` element (V1-V4 mix it into the key; V5 ignores it).
+pub fn build_encryption(params: &EncryptParams, file_id: &[u8]) -> Result<EncryptState> {
+    let owner_pw = if params.owner_password.is_empty() {
+        params.user_password.clone()
+    } else {
+        params.owner_password.clone()
+    };
+    match params.algorithm {
+        EncryptAlgorithm::Rc4_128 => {
+            build_legacy(params, &owner_pw, file_id, 2, 3, 128, CryptMethod::V2)
+        }
+        EncryptAlgorithm::Aes128 => {
+            build_legacy(params, &owner_pw, file_id, 4, 4, 128, CryptMethod::AesV2)
+        }
+        EncryptAlgorithm::Aes256 => build_v5(params, &owner_pw),
+    }
+}
+
+/// V1/V2/V4 (RC4-128 / AES-128) write-side derivation: Algorithms 3 (/O),
+/// 2 (file key), 4/5 (/U).
+fn build_legacy(
+    params: &EncryptParams,
+    owner_pw: &[u8],
+    file_id: &[u8],
+    v: u8,
+    r: u8,
+    key_length: usize,
+    method: CryptMethod,
+) -> Result<EncryptState> {
+    // Algorithm 3: compute /O from owner + user passwords.
+    let o = compute_owner_entry(owner_pw, &params.user_password, r, key_length);
+
+    // The file key (Algorithm 2) needs /O in `info`, so assemble a partial info.
+    let mut info = EncryptionInfo {
+        v,
+        r,
+        key_length,
+        o: o.clone(),
+        u: Vec::new(),
+        p: params.permissions,
+        encrypt_metadata: params.encrypt_metadata,
+        cf_method: method.clone(),
+        stream_method: method.clone(),
+        string_method: method.clone(),
+        embedded_file_method: method.clone(),
+        crypt_filters: HashMap::new(),
+        v5: None,
+    };
+    let file_key = compute_encryption_key(&params.user_password, &info, file_id);
+
+    // Algorithm 4/5: compute /U from the file key.
+    let u = compute_user_entry(&file_key, file_id, r);
+    info.u = u;
+
+    Ok(EncryptState { file_key, info })
+}
+
+/// Algorithm 3: the `/O` entry. RC4 (iterated for R>=3) of the padded user
+/// password under a key derived from the owner password.
+fn compute_owner_entry(owner_pw: &[u8], user_pw: &[u8], r: u8, key_length: usize) -> Vec<u8> {
+    let key_len = (key_length / 8).clamp(1, 16);
+    let mut rc4_key = md5(&pad_password(owner_pw)).to_vec();
+    if r >= 3 {
+        for _ in 0..50 {
+            rc4_key = md5(&rc4_key[..16]).to_vec();
+        }
+    }
+    let rc4_key = rc4_key[..key_len].to_vec();
+    let mut result = Rc4::apply(&rc4_key, &pad_password(user_pw));
+    if r >= 3 {
+        for i in 1u8..=19 {
+            let xor_key: Vec<u8> = rc4_key.iter().map(|&b| b ^ i).collect();
+            result = Rc4::apply(&xor_key, &result);
+        }
+    }
+    result // 32 bytes
+}
+
+/// Algorithm 4 (R2) / 5 (R>=3): the `/U` entry from the file key.
+fn compute_user_entry(file_key: &[u8], file_id: &[u8], r: u8) -> Vec<u8> {
+    if r >= 3 {
+        let mut hash_input = Vec::with_capacity(32 + file_id.len());
+        hash_input.extend_from_slice(&PADDING);
+        hash_input.extend_from_slice(file_id);
+        let hash = md5(&hash_input);
+        let mut result = Rc4::apply(file_key, &hash);
+        for i in 1u8..=19 {
+            let xor_key: Vec<u8> = file_key.iter().map(|&b| b ^ i).collect();
+            result = Rc4::apply(&xor_key, &result);
+        }
+        // Pad to 32 bytes (the spec leaves the upper 16 arbitrary).
+        result.resize(32, 0);
+        result
+    } else {
+        Rc4::apply(file_key, &PADDING)
+    }
+}
+
+/// V5 (AES-256, R6) write-side derivation: random file key, /U + /O (each a
+/// 32-byte hash + 8-byte validation salt + 8-byte key salt), /UE + /OE (the
+/// file key wrapped under the key-salt intermediate key), and /Perms.
+fn build_v5(params: &EncryptParams, owner_pw: &[u8]) -> Result<EncryptState> {
+    let r = 6u8;
+    let file_key = random_bytes(32);
+    let user_pw = truncate_v5_password(&params.user_password);
+    let owner_pw = truncate_v5_password(owner_pw);
+
+    // /U = hash(pwd || valSalt) [32] || valSalt [8] || keySalt [8]
+    let u_val_salt = random_bytes(8);
+    let u_key_salt = random_bytes(8);
+    let u_hash = r6_hash(user_pw, &u_val_salt, None);
+    let mut u = Vec::with_capacity(48);
+    u.extend_from_slice(&u_hash);
+    u.extend_from_slice(&u_val_salt);
+    u.extend_from_slice(&u_key_salt);
+
+    // /UE = AES-256-CBC(no pad, zero IV) of file_key under hash(pwd || U_keySalt)
+    let u_inter = r6_hash(user_pw, &u_key_salt, None);
+    let ue = aes256_cbc_encrypt_no_pad(&u_inter, &[0u8; 16], &file_key)?;
+
+    // /O = hash(ownerPwd || valSalt || U48) [32] || valSalt [8] || keySalt [8]
+    let o_val_salt = random_bytes(8);
+    let o_key_salt = random_bytes(8);
+    let o_hash = r6_hash(owner_pw, &o_val_salt, Some(&u));
+    let mut o = Vec::with_capacity(48);
+    o.extend_from_slice(&o_hash);
+    o.extend_from_slice(&o_val_salt);
+    o.extend_from_slice(&o_key_salt);
+
+    // /OE = AES-256-CBC(no pad, zero IV) of file_key under hash(ownerPwd || O_keySalt || U48)
+    let o_inter = r6_hash(owner_pw, &o_key_salt, Some(&u));
+    let oe = aes256_cbc_encrypt_no_pad(&o_inter, &[0u8; 16], &file_key)?;
+
+    // /Perms = AES-256-ECB(file_key) of the 16-byte permissions block.
+    let perms = build_v5_perms(&file_key, params.permissions, params.encrypt_metadata)?;
+
+    let info = EncryptionInfo {
+        v: 5,
+        r,
+        key_length: 256,
+        o,
+        u,
+        p: params.permissions,
+        encrypt_metadata: params.encrypt_metadata,
+        cf_method: CryptMethod::AesV3,
+        stream_method: CryptMethod::AesV3,
+        string_method: CryptMethod::AesV3,
+        embedded_file_method: CryptMethod::AesV3,
+        crypt_filters: HashMap::new(),
+        v5: Some(V5Fields { oe, ue, perms }),
+    };
+    Ok(EncryptState { file_key, info })
+}
+
+/// Build the 16-byte /Perms plaintext and AES-256-ECB encrypt it under the file
+/// key. Layout: [0..4]=P (LE) | [4..8]=0xFF | [8]='T'/'F' | [9..12]="adb" |
+/// [12..16]=random.
+fn build_v5_perms(file_key: &[u8], p: i32, encrypt_metadata: bool) -> Result<Vec<u8>> {
+    let mut block = [0u8; 16];
+    block[0..4].copy_from_slice(&(p as u32).to_le_bytes());
+    block[4..8].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+    block[8] = if encrypt_metadata { b'T' } else { b'F' };
+    block[9] = b'a';
+    block[10] = b'd';
+    block[11] = b'b';
+    let rand4 = random_bytes(4);
+    block[12..16].copy_from_slice(&rand4);
+    Ok(aes256_ecb_encrypt_block(file_key, &block)?.to_vec())
 }
 
 // ---------------------------------------------------------------------------
