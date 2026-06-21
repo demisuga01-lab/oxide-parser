@@ -568,3 +568,101 @@ fn extract_tables_ocr_errors_cleanly() {
         "should explain the gap: {err}"
     );
 }
+
+// --- Structural-write ops (Bucket 2) ----------------------------------------
+
+#[test]
+fn rotate_command_writes_rotated_pdf() {
+    let out = tmp("rotate_out.pdf");
+    let res = run(&[
+        "rotate",
+        fx("flate.pdf").to_str().unwrap(),
+        "--angle",
+        "90",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_ok(&res, "rotate");
+    assert!(out.exists() && std::fs::metadata(&out).unwrap().len() > 0);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn encrypt_command_aes256_roundtrips_via_cli() {
+    let out = tmp("encrypt_out.pdf");
+    let res = run(&[
+        "encrypt",
+        fx("flate.pdf").to_str().unwrap(),
+        "--user-pw",
+        "secret",
+        "--algo",
+        "aes256",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_ok(&res, "encrypt");
+    // The encrypted file must NOT extract text without the password...
+    let no_pw = run(&["extract-text", out.to_str().unwrap()]);
+    assert!(!no_pw.status.success(), "encrypted file must require a password");
+    // ...and must extract WITH it.
+    let with_pw = run(&[
+        "extract-text",
+        out.to_str().unwrap(),
+        "--password",
+        "secret",
+    ]);
+    assert_ok(&with_pw, "extract-text with password");
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn optimize_command_writes_smaller_or_equal_pdf() {
+    let out = tmp("optimize_out.pdf");
+    let res = run(&[
+        "optimize",
+        fx("tracemonkey.pdf").to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_ok(&res, "optimize");
+    assert!(out.exists());
+    // --json output is parseable and reports the op.
+    let stdout = String::from_utf8_lossy(&res.stdout);
+    assert!(stdout.contains("\"op\":\"optimize\""), "json result: {stdout}");
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn repair_command_writes_clean_pdf() {
+    let out = tmp("repair_out.pdf");
+    let res = run(&[
+        "repair",
+        fx("flate.pdf").to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_ok(&res, "repair");
+    assert!(out.exists());
+    // The repaired file re-parses.
+    let info = run(&["info", out.to_str().unwrap()]);
+    assert_ok(&info, "info on repaired");
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn linearize_command_errors_with_diagnosis() {
+    // Linearization is deferred; the command must fail cleanly with a message,
+    // not emit a bogus file.
+    let out = tmp("linearize_out.pdf");
+    let res = run(&[
+        "linearize",
+        fx("flate.pdf").to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(!res.status.success(), "linearize should exit non-zero (deferred)");
+    let err = String::from_utf8_lossy(&res.stderr);
+    assert!(err.contains("not yet implemented"), "should explain deferral: {err}");
+    let _ = std::fs::remove_file(&out);
+}

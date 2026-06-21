@@ -96,6 +96,109 @@ enum Commands {
     ToHtml(ToHtmlArgs),
     /// Verify digital signatures in a PDF (pdfsig-equivalent)
     VerifySig(VerifySigArgs),
+    /// Encrypt a PDF with a password (RC4-128 / AES-128 / AES-256). AES-256 default.
+    Encrypt(EncryptArgs),
+    /// Set page rotation (/Rotate) and write a new PDF (absolute or relative)
+    Rotate(RotateArgs),
+    /// Shrink a PDF (garbage-collect + recompress) without changing content
+    Optimize(OptimizeArgs),
+    /// Write a clean, normalized copy of a damaged PDF (qpdf --check passes)
+    Repair(RepairArgs),
+    /// Produce a linearized (fast-web-view) PDF — NOT yet implemented (deferred)
+    Linearize(LinearizeArgs),
+}
+
+#[derive(Parser)]
+struct EncryptArgs {
+    /// Path to the input PDF
+    pdf: PathBuf,
+    /// Output file
+    #[arg(short, long, default_value = "encrypted.pdf")]
+    output: PathBuf,
+    /// User (open) password
+    #[arg(long, default_value = "")]
+    user_pw: String,
+    /// Owner (full-permissions) password; defaults to the user password
+    #[arg(long, default_value = "")]
+    owner_pw: String,
+    /// Algorithm: aes256 (default), aes128, or rc4
+    #[arg(long, default_value = "aes256")]
+    algo: String,
+    /// Permission bitmask (/P), signed 32-bit; default -1 grants everything
+    #[arg(long, default_value = "-1", allow_negative_numbers = true)]
+    permissions: i32,
+    /// Password to open the input, if it is already encrypted
+    #[arg(long)]
+    password: Option<String>,
+    /// Emit a JSON result summary instead of a human line
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct RotateArgs {
+    /// Path to the input PDF
+    pdf: PathBuf,
+    /// Output file
+    #[arg(short, long, default_value = "rotated.pdf")]
+    output: PathBuf,
+    /// Rotation angle in degrees (0/90/180/270, normalized)
+    #[arg(short, long)]
+    angle: i32,
+    /// Apply the angle RELATIVE to each page's current rotation (default: absolute)
+    #[arg(long)]
+    relative: bool,
+    /// Page range: all (default), 1, 2-5, or 1,3,7
+    #[arg(short, long, default_value = "all")]
+    pages: String,
+    /// Password for encrypted PDFs
+    #[arg(long)]
+    password: Option<String>,
+    /// Emit a JSON result summary
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct OptimizeArgs {
+    /// Path to the input PDF
+    pdf: PathBuf,
+    /// Output file
+    #[arg(short, long, default_value = "optimized.pdf")]
+    output: PathBuf,
+    /// Password for encrypted PDFs
+    #[arg(long)]
+    password: Option<String>,
+    /// Emit a JSON result summary (sizes + streams recompressed)
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct RepairArgs {
+    /// Path to the (possibly damaged) input PDF
+    pdf: PathBuf,
+    /// Output file
+    #[arg(short, long, default_value = "repaired.pdf")]
+    output: PathBuf,
+    /// Password if the input is encrypted (repaired copy is written unencrypted)
+    #[arg(long)]
+    password: Option<String>,
+    /// Emit a JSON result summary
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
+struct LinearizeArgs {
+    /// Path to the input PDF
+    pdf: PathBuf,
+    /// Output file (not written — linearization is deferred)
+    #[arg(short, long, default_value = "linearized.pdf")]
+    output: PathBuf,
+    /// Password for encrypted PDFs
+    #[arg(long)]
+    password: Option<String>,
 }
 
 #[derive(Parser)]
@@ -584,6 +687,11 @@ fn main() {
         Commands::Detach(args) => run_detach(args),
         Commands::ToHtml(args) => run_to_html(args),
         Commands::VerifySig(args) => run_verify_sig(args),
+        Commands::Encrypt(args) => run_encrypt(args),
+        Commands::Rotate(args) => run_rotate(args),
+        Commands::Optimize(args) => run_optimize(args),
+        Commands::Repair(args) => run_repair(args),
+        Commands::Linearize(args) => run_linearize(args),
     };
 
     if let Err(err) = result {
@@ -2043,6 +2151,155 @@ fn run_extract_pages(args: ExtractPagesArgs) -> Result<(), Box<dyn Error>> {
         args.output.display()
     );
     Ok(())
+}
+
+// --- Structural-write ops (Bucket 2): encrypt / rotate / optimize / repair ---
+
+fn run_encrypt(args: EncryptArgs) -> Result<(), Box<dyn Error>> {
+    use oxide_engine::crypto::{EncryptAlgorithm, EncryptParams};
+
+    let algo = EncryptAlgorithm::parse(&args.algo)
+        .ok_or_else(|| format!("unknown --algo '{}'; use aes256, aes128, or rc4", args.algo))?;
+    let engine = open_engine(&args.pdf, &args.password)?;
+    let owner = if args.owner_pw.is_empty() {
+        args.user_pw.clone()
+    } else {
+        args.owner_pw.clone()
+    };
+    let params = EncryptParams {
+        user_password: args.user_pw.into_bytes(),
+        owner_password: owner.into_bytes(),
+        permissions: args.permissions,
+        algorithm: algo,
+        encrypt_metadata: true,
+    };
+    if !matches!(algo, EncryptAlgorithm::Aes256) {
+        eprintln!(
+            "Warning: {} is a legacy algorithm. Oxide reads its own output, but \
+             cross-reader interop is only verified for AES-256 (the default). \
+             Prefer --algo aes256 unless a consumer requires legacy encryption.",
+            args.algo
+        );
+    }
+    let bytes = oxide_engine::encrypt(&engine, &params)?;
+    std::fs::write(&args.output, &bytes)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "op": "encrypt",
+                "output": args.output.display().to_string(),
+                "algorithm": args.algo,
+                "bytes": bytes.len(),
+            })
+        );
+    } else {
+        eprintln!(
+            "Encrypted with {} -> {} ({} bytes)",
+            args.algo,
+            args.output.display(),
+            bytes.len()
+        );
+    }
+    Ok(())
+}
+
+fn run_rotate(args: RotateArgs) -> Result<(), Box<dyn Error>> {
+    use oxide_engine::Rotation;
+
+    let engine = open_engine(&args.pdf, &args.password)?;
+    let total = engine.page_count()?;
+    let pages = parse_page_range_cli(&args.pages, total)?;
+    let rotation = if args.relative {
+        Rotation::Relative(args.angle)
+    } else {
+        Rotation::Absolute(args.angle)
+    };
+    let bytes = oxide_engine::rotate_pages(&engine, &pages, rotation)?;
+    std::fs::write(&args.output, &bytes)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "op": "rotate",
+                "output": args.output.display().to_string(),
+                "angle": args.angle,
+                "relative": args.relative,
+                "pages": pages.len(),
+            })
+        );
+    } else {
+        eprintln!(
+            "Rotated {} page(s) by {}{} -> {}",
+            pages.len(),
+            if args.relative { "+" } else { "" },
+            args.angle,
+            args.output.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_optimize(args: OptimizeArgs) -> Result<(), Box<dyn Error>> {
+    let input_size = std::fs::metadata(&args.pdf).map(|m| m.len() as usize).unwrap_or(0);
+    let engine = open_engine(&args.pdf, &args.password)?;
+    let (bytes, report) = oxide_engine::optimize(&engine)?;
+    std::fs::write(&args.output, &bytes)?;
+    let saved = input_size.saturating_sub(bytes.len());
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "op": "optimize",
+                "output": args.output.display().to_string(),
+                "input_bytes": input_size,
+                "output_bytes": bytes.len(),
+                "saved_bytes": saved,
+                "streams_recompressed": report.streams_recompressed,
+            })
+        );
+    } else {
+        eprintln!(
+            "Optimized {} -> {} bytes ({} saved, {} stream(s) recompressed) -> {}",
+            input_size,
+            bytes.len(),
+            saved,
+            report.streams_recompressed,
+            args.output.display()
+        );
+    }
+    Ok(())
+}
+
+fn run_repair(args: RepairArgs) -> Result<(), Box<dyn Error>> {
+    let input = std::fs::read(&args.pdf)?;
+    let password = args.password.clone().unwrap_or_default();
+    let bytes = oxide_engine::repair(input, password.as_bytes())?;
+    std::fs::write(&args.output, &bytes)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "op": "repair",
+                "output": args.output.display().to_string(),
+                "bytes": bytes.len(),
+            })
+        );
+    } else {
+        eprintln!(
+            "Repaired -> {} ({} bytes)",
+            args.output.display(),
+            bytes.len()
+        );
+    }
+    Ok(())
+}
+
+fn run_linearize(args: LinearizeArgs) -> Result<(), Box<dyn Error>> {
+    // Linearization is deferred; surface the actionable diagnosis and exit
+    // non-zero rather than emitting a non-linearized file.
+    let _ = open_engine(&args.pdf, &args.password)?; // validate the input opens
+    Err(oxide_engine::structural::linearize::LINEARIZE_DEFERRED_REASON.into())
 }
 
 /// Expand a split output pattern. Supports `%d` and `%0Nd` (zero-padded width
