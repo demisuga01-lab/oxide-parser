@@ -176,8 +176,9 @@ pub use text::{
     TextExtractOptions, TextExtractor, TextFormatOptions, TextFormatter, TextLine,
 };
 pub use writer::{
-    build_merged, build_subset, rewrite_document, rewrite_document_objects, rewrite_references,
-    serialize_object, write_document_roundtrip, OutputObject, PdfWriter,
+    build_merged, build_subset, rewrite_document, rewrite_document_objects,
+    rewrite_document_with_mode, rewrite_references, serialize_object, write_document_roundtrip,
+    OutputObject, PdfWriter, WriterMode,
 };
 
 /// The curated high-level embedding surface.

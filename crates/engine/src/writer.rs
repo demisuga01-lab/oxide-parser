@@ -77,6 +77,27 @@ pub struct PdfWriter {
     /// dictionary object is added (its number recorded so it is itself NOT
     /// encrypted). See [`PdfWriter::with_encryption`].
     encryption: Option<WriterEncryption>,
+    /// Cross-reference structure to emit. See [`WriterMode`].
+    mode: WriterMode,
+}
+
+/// The cross-reference structure the writer emits.
+///
+/// `ClassicXref` (the default) writes a PDF 1.x classic `xref` table + trailer
+/// — maximum reader compatibility. `XrefStream` writes a PDF 1.5+ cross-
+/// reference stream (`/Type /XRef`) instead, which is smaller and is the
+/// prerequisite for object streams and linearization. `XrefStreamWithObjStm`
+/// additionally packs eligible non-stream objects into compressed object
+/// streams (`/Type /ObjStm`) — the main file-size win for object-heavy PDFs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WriterMode {
+    /// Classic `xref` table + `trailer` (PDF 1.x). Maximum compatibility.
+    #[default]
+    ClassicXref,
+    /// A `/Type /XRef` cross-reference stream (PDF 1.5+).
+    XrefStream,
+    /// Cross-reference stream + object-stream packing (smallest output).
+    XrefStreamWithObjStm,
 }
 
 /// Encryption configuration for [`PdfWriter`]: the derived key/params plus the
@@ -98,7 +119,19 @@ impl PdfWriter {
             info: None,
             id: None,
             encryption: None,
+            mode: WriterMode::ClassicXref,
         }
+    }
+
+    /// Select the cross-reference structure to emit (see [`WriterMode`]).
+    /// Defaults to [`WriterMode::ClassicXref`]. The modern modes bump the header
+    /// version to 1.5 when it would otherwise be lower.
+    pub fn with_mode(mut self, mode: WriterMode) -> Self {
+        self.mode = mode;
+        if mode != WriterMode::ClassicXref && version_lt_1_5(&self.version) {
+            self.version = "1.5".to_string();
+        }
+        self
     }
 
     /// Encrypt the output with the standard security handler. `state` carries the
@@ -149,22 +182,31 @@ impl PdfWriter {
         self
     }
 
-    /// Serialize the whole document to PDF bytes.
+    /// Serialize the whole document to PDF bytes, using the configured
+    /// [`WriterMode`].
     pub fn write(&self) -> Result<Vec<u8>> {
-        // When encrypting, build an owned, encrypted object set (every string +
-        // stream encrypted per-object) plus the appended /Encrypt dict object.
-        // The /Encrypt dict itself is never encrypted.
+        let pack = self.mode == WriterMode::XrefStreamWithObjStm;
+
+        // Encryption interaction with object streams: objects packed INTO an
+        // /ObjStm are NOT individually encrypted (only the ObjStm stream is, as
+        // a whole). So when packing, we must work from PLAINTEXT objects and let
+        // the modern writer encrypt the right granularity. For the classic and
+        // plain-xref-stream paths, every object is a top-level indirect object,
+        // so the existing per-object pre-encryption is correct.
         let owned: Vec<OutputObject>;
         let objects_src: Vec<&OutputObject> = if let Some(enc) = &self.encryption {
-            owned = self.build_encrypted_objects(enc)?;
-            owned.iter().collect()
+            if pack {
+                // Plaintext + the /Encrypt dict; write_modern applies encryption.
+                owned = self.objects_with_encrypt_dict(enc);
+                owned.iter().collect()
+            } else {
+                owned = self.build_encrypted_objects(enc)?;
+                owned.iter().collect()
+            }
         } else {
             self.objects.iter().collect()
         };
 
-        // Sort by object number so the body is written in ascending order and
-        // the xref table (which is offset-indexed by object number) is simple
-        // to build. The highest object number determines /Size.
         let mut objects: Vec<&OutputObject> = objects_src;
         objects.sort_by_key(|o| o.number);
 
@@ -175,9 +217,6 @@ impl PdfWriter {
                 ));
             }
         }
-        // Reject duplicate object numbers — the renumbering layer must hand us a
-        // bijective numbering, so a duplicate is a bug we want surfaced rather
-        // than silently emitting a corrupt xref.
         for pair in objects.windows(2) {
             if pair[0].number == pair[1].number {
                 return Err(OxideError::MalformedPdf(format!(
@@ -187,19 +226,37 @@ impl PdfWriter {
             }
         }
 
+        match self.mode {
+            WriterMode::ClassicXref => self.write_classic(&objects),
+            WriterMode::XrefStream => self.write_modern(&objects, false),
+            WriterMode::XrefStreamWithObjStm => self.write_modern(&objects, true),
+        }
+    }
+
+    /// The plaintext object set plus the (unencrypted) `/Encrypt` dict object —
+    /// used by the packing path, which encrypts at write time so ObjStm inner
+    /// objects are not individually encrypted.
+    fn objects_with_encrypt_dict(&self, enc: &WriterEncryption) -> Vec<OutputObject> {
+        let mut out: Vec<OutputObject> = self.objects.clone();
+        out.push(OutputObject {
+            number: enc.encrypt_obj_number,
+            object: PdfObject::Dictionary(encryption_info_to_dict(&enc.state.info)),
+        });
+        out
+    }
+
+    /// Classic `xref` table + `trailer` output (PDF 1.x).
+    fn write_classic(&self, objects: &[&OutputObject]) -> Result<Vec<u8>> {
         let max_number = objects.last().map(|o| o.number).unwrap_or(0);
         let size = max_number as usize + 1;
 
         let mut out = Vec::new();
-        // Header: version line plus a binary-marker comment so naive
-        // "is this a binary file" heuristics treat the output as binary.
         out.extend_from_slice(format!("%PDF-{}\n", self.version).as_bytes());
         out.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
 
         // Body. Track the byte offset of each object number for the xref table.
-        // A free entry maps to offset 0; in-use entries to their real offset.
         let mut offsets: Vec<Option<usize>> = vec![None; size];
-        for obj in &objects {
+        for obj in objects {
             let offset = out.len();
             offsets[obj.number as usize] = Some(offset);
             out.extend_from_slice(format!("{} 0 obj\n", obj.number).as_bytes());
@@ -211,21 +268,13 @@ impl PdfWriter {
         let xref_offset = out.len();
         out.extend_from_slice(b"xref\n");
         out.extend_from_slice(format!("0 {}\n", size).as_bytes());
-        // Object 0 is the head of the free list.
         out.extend_from_slice(b"0000000000 65535 f \n");
-        // Entries for object numbers 1..size, in order (index 0 handled above).
         for slot in &offsets[1..] {
             match slot {
                 Some(offset) => {
-                    // Each entry is exactly 20 bytes: 10-digit offset, space,
-                    // 5-digit generation, space, 'n', and a 2-byte EOL.
                     out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
                 }
                 None => {
-                    // A gap in the numbering (object number with no object).
-                    // Emit it as a free entry so the table stays well-formed
-                    // and /Size-consistent. In practice the renumbering layer
-                    // produces contiguous numbers so this is rare.
                     out.extend_from_slice(b"0000000000 65535 f \n");
                 }
             }
@@ -233,7 +282,25 @@ impl PdfWriter {
 
         // Trailer.
         out.extend_from_slice(b"trailer\n");
-        let mut trailer = PdfDictionary::empty();
+        let trailer = self.build_trailer_dict(size, None);
+        serialize_dictionary(&trailer, &mut out);
+        out.extend_from_slice(b"\nstartxref\n");
+        out.extend_from_slice(format!("{xref_offset}\n").as_bytes());
+        out.extend_from_slice(b"%%EOF\n");
+
+        Ok(out)
+    }
+
+    /// Build the trailer key set shared by the classic trailer and the xref
+    /// stream dictionary (`/Size /Root /Info /ID /Encrypt`). For the xref stream
+    /// `/Size` is the object count INCLUDING the xref stream object itself, so
+    /// it is passed in explicitly.
+    fn build_trailer_dict(&self, size: usize, extra: Option<&PdfDictionary>) -> PdfDictionary {
+        let mut trailer = if let Some(d) = extra {
+            d.clone()
+        } else {
+            PdfDictionary::empty()
+        };
         trailer.insert("Size", PdfObject::Integer(size as i64));
         trailer.insert(
             "Root",
@@ -269,7 +336,179 @@ impl PdfWriter {
                 },
             );
         }
-        serialize_dictionary(&trailer, &mut out);
+        trailer
+    }
+
+    /// Modern PDF 1.5+ output: a `/Type /XRef` cross-reference stream, with
+    /// optional object-stream (`/Type /ObjStm`) packing when `pack` is set.
+    ///
+    /// `objects` are the sorted output objects. When encrypting + packing they
+    /// are PLAINTEXT (this function applies encryption at the right
+    /// granularity); otherwise they are already in their final (possibly
+    /// encrypted) form.
+    fn write_modern(&self, objects: &[&OutputObject], pack: bool) -> Result<Vec<u8>> {
+        let encrypting = self.encryption.is_some();
+        let encrypt_obj_number = self.encryption.as_ref().map(|e| e.encrypt_obj_number);
+
+        // Decide which objects go into object streams. Eligible: non-stream,
+        // not the /Encrypt dict, not the document /ID-bearing trailer (n/a here),
+        // and (for safety) not /Type /XRef (none present yet). Streams and the
+        // /Encrypt dict stay as direct (type-1) objects.
+        let mut direct: Vec<&OutputObject> = Vec::new();
+        let mut packable: Vec<&OutputObject> = Vec::new();
+        for obj in objects {
+            let is_stream = matches!(obj.object, PdfObject::Stream { .. });
+            let is_encrypt_dict = Some(obj.number) == encrypt_obj_number;
+            if pack && !is_stream && !is_encrypt_dict {
+                packable.push(obj);
+            } else {
+                direct.push(obj);
+            }
+        }
+
+        // The xref stream object and any ObjStm objects need fresh numbers
+        // beyond the current max.
+        let max_number = objects.iter().map(|o| o.number).max().unwrap_or(0);
+        let mut next_free = max_number + 1;
+
+        // Group packable objects into object streams (cap per stream so a huge
+        // doc doesn't make one enormous ObjStm). Deterministic: objects are
+        // already sorted by number, and we chunk in that order.
+        const OBJSTM_MAX_OBJECTS: usize = 200;
+        struct ObjStmPlan {
+            number: u32,
+            members: Vec<u32>, // object numbers, in pack order
+        }
+        let mut objstms: Vec<ObjStmPlan> = Vec::new();
+        if pack && !packable.is_empty() {
+            for chunk in packable.chunks(OBJSTM_MAX_OBJECTS) {
+                let number = next_free;
+                next_free += 1;
+                objstms.push(ObjStmPlan {
+                    number,
+                    members: chunk.iter().map(|o| o.number).collect(),
+                });
+            }
+        }
+        let xref_stream_number = next_free;
+        // /Size is one past the highest object number actually used.
+        let size = xref_stream_number as usize + 1;
+
+        // Map object number -> its xref entry (computed as we lay out the file).
+        let mut entries: Vec<(u32, XrefEntryOut)> = Vec::new();
+
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("%PDF-{}\n", self.version).as_bytes());
+        out.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
+
+        // Helper to fetch an object body, applying per-object encryption for the
+        // DIRECT path (packed objects are handled separately, unencrypted-inner).
+        let enc_state = self.encryption.as_ref().map(|e| &e.state);
+        let emit_direct = |out: &mut Vec<u8>, obj: &OutputObject| -> Result<usize> {
+            let offset = out.len();
+            let mut object = obj.object.clone();
+            if let Some(state) = enc_state {
+                if Some(obj.number) != encrypt_obj_number {
+                    encrypt_object_in_place(
+                        &mut object,
+                        obj.number,
+                        0,
+                        &state.file_key,
+                        state.is_aes(),
+                        state.is_v5(),
+                    )?;
+                }
+            }
+            out.extend_from_slice(format!("{} 0 obj\n", obj.number).as_bytes());
+            serialize_object(&object, out);
+            out.extend_from_slice(b"\nendobj\n");
+            Ok(offset)
+        };
+
+        // 1. Emit direct (type-1) objects.
+        for obj in &direct {
+            // When NOT packing and NOT encrypting-at-write, `objects` may already
+            // be encrypted by the caller; emit verbatim in that case.
+            let offset = if pack || !encrypting {
+                emit_direct(&mut out, obj)?
+            } else {
+                // Caller already encrypted; emit as-is.
+                let off = out.len();
+                out.extend_from_slice(format!("{} 0 obj\n", obj.number).as_bytes());
+                serialize_object(&obj.object, &mut out);
+                out.extend_from_slice(b"\nendobj\n");
+                off
+            };
+            entries.push((obj.number, XrefEntryOut::Uncompressed { offset }));
+        }
+
+        // 2. Build + emit each object stream; record type-2 entries for members.
+        let obj_by_number: std::collections::HashMap<u32, &OutputObject> =
+            objects.iter().map(|o| (o.number, *o)).collect();
+        for plan in &objstms {
+            let (objstm_bytes, member_indices) =
+                build_objstm_body(&plan.members, &obj_by_number)?;
+            // Filter order matters: the data is FIRST FlateDecode-compressed,
+            // THEN (if encrypting) encrypted as a WHOLE stream — encryption is
+            // the outermost layer, undone first on read, exactly mirroring how
+            // the reader decrypts the raw stream bytes before FlateDecode. The
+            // inner objects are NOT individually encrypted.
+            let compressed = crate::filters::flate_encode(&objstm_bytes, 9);
+            let payload = if let Some(state) = enc_state {
+                crate::crypto::encrypt_bytes(
+                    &compressed,
+                    &state.file_key,
+                    plan.number,
+                    0,
+                    state.is_aes(),
+                    state.is_v5(),
+                )?
+            } else {
+                compressed
+            };
+            let offset = out.len();
+            let mut dict = PdfDictionary::empty();
+            dict.insert("Type", PdfObject::Name("ObjStm".to_string()));
+            dict.insert("N", PdfObject::Integer(plan.members.len() as i64));
+            dict.insert("First", PdfObject::Integer(member_indices.first_offset as i64));
+            dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
+            dict.insert("Length", PdfObject::Integer(payload.len() as i64));
+            out.extend_from_slice(format!("{} 0 obj\n", plan.number).as_bytes());
+            serialize_dictionary(&dict, &mut out);
+            out.extend_from_slice(b"\nstream\n");
+            out.extend_from_slice(&payload);
+            out.extend_from_slice(b"\nendstream\nendobj\n");
+            entries.push((plan.number, XrefEntryOut::Uncompressed { offset }));
+            // Type-2 entries for the members.
+            for (idx, &member) in plan.members.iter().enumerate() {
+                entries.push((
+                    member,
+                    XrefEntryOut::Compressed {
+                        objstm: plan.number,
+                        index: idx as u32,
+                    },
+                ));
+            }
+        }
+
+        // 3. The xref stream object itself (type-1, at its own offset).
+        let xref_offset = out.len();
+        entries.push((
+            xref_stream_number,
+            XrefEntryOut::Uncompressed { offset: xref_offset },
+        ));
+        // Object 0 is the free-list head (type 0).
+        entries.push((0, XrefEntryOut::Free));
+
+        let xref_dict_extra = self.build_trailer_dict(size, None);
+        let xref_bytes = build_xref_stream(
+            xref_stream_number,
+            size,
+            &mut entries,
+            &xref_dict_extra,
+        )?;
+        out.extend_from_slice(&xref_bytes);
+
         out.extend_from_slice(b"\nstartxref\n");
         out.extend_from_slice(format!("{xref_offset}\n").as_bytes());
         out.extend_from_slice(b"%%EOF\n");
@@ -396,6 +635,189 @@ fn encryption_info_to_dict(info: &crate::crypto::EncryptionInfo) -> PdfDictionar
         d.insert("StrF", PdfObject::Name("StdCF".to_string()));
     }
     d
+}
+
+// ===========================================================================
+// Modern PDF 1.5+ output: cross-reference streams + object streams
+// ===========================================================================
+
+/// An xref entry as the writer computes it before encoding into the binary
+/// cross-reference-stream payload.
+#[derive(Debug, Clone, Copy)]
+enum XrefEntryOut {
+    /// Type 0: free object (only object 0, the free-list head).
+    Free,
+    /// Type 1: uncompressed object at a byte offset.
+    Uncompressed { offset: usize },
+    /// Type 2: object inside an object stream, at the given index.
+    Compressed { objstm: u32, index: u32 },
+}
+
+/// Byte offsets recorded while building an object stream's header.
+struct ObjStmOffsets {
+    /// The `/First` value: the byte offset where the first packed object body
+    /// begins (i.e. the header length).
+    first_offset: usize,
+}
+
+/// Build the (decoded) body of an object stream: a header of `objnum offset`
+/// integer-token pairs, then the concatenated object bodies. Offsets in the
+/// header are relative to `/First` (the header length). Returns the decoded
+/// bytes plus the `/First` offset. Mirrors exactly what
+/// `reader::parse_object_stream_data` expects.
+fn build_objstm_body(
+    members: &[u32],
+    obj_by_number: &std::collections::HashMap<u32, &OutputObject>,
+) -> Result<(Vec<u8>, ObjStmOffsets)> {
+    // First serialize each member body so we know its length, then build the
+    // header (which needs the relative offsets), then concatenate.
+    let mut bodies: Vec<Vec<u8>> = Vec::with_capacity(members.len());
+    for &num in members {
+        let obj = obj_by_number.get(&num).ok_or_else(|| {
+            OxideError::MalformedPdf(format!("objstm member {num} missing from object set"))
+        })?;
+        let mut body = Vec::new();
+        serialize_object(&obj.object, &mut body);
+        // Object bodies in an ObjStm are whitespace-separated.
+        body.push(b' ');
+        bodies.push(body);
+    }
+
+    // Build the header: "objnum reloffset " pairs. The relative offsets depend
+    // on the header length, so compute body offsets first (relative to 0), then
+    // the header, then the /First offset is the header length.
+    let mut rel_offsets = Vec::with_capacity(members.len());
+    let mut acc = 0usize;
+    for body in &bodies {
+        rel_offsets.push(acc);
+        acc += body.len();
+    }
+    let mut header = Vec::new();
+    for (i, &num) in members.iter().enumerate() {
+        header.extend_from_slice(format!("{} {} ", num, rel_offsets[i]).as_bytes());
+    }
+    let first_offset = header.len();
+
+    let mut decoded = header;
+    for body in &bodies {
+        decoded.extend_from_slice(body);
+    }
+    Ok((decoded, ObjStmOffsets { first_offset }))
+}
+
+/// Build the `/Type /XRef` cross-reference stream object (its full
+/// `N 0 obj … endobj` text). `entries` is the complete entry set (object 0 +
+/// all objects + the xref stream itself); it is sorted here. `dict_keys`
+/// carries the trailer keys (/Root /Info /ID /Size /Encrypt). The payload is
+/// FlateDecode'd. Field widths `/W` are chosen to fit the largest values.
+fn build_xref_stream(
+    xref_number: u32,
+    size: usize,
+    entries: &mut [(u32, XrefEntryOut)],
+    dict_keys: &PdfDictionary,
+) -> Result<Vec<u8>> {
+    entries.sort_by_key(|(n, _)| *n);
+
+    // Choose field widths. W[0] = type (1 byte is plenty: types 0/1/2).
+    // W[1] = max(offset, objstm number). W[2] = max(generation=0, objstm index).
+    let mut max_f1: u64 = 0;
+    let mut max_f2: u64 = 0;
+    for (_, e) in entries.iter() {
+        match e {
+            XrefEntryOut::Free => {}
+            XrefEntryOut::Uncompressed { offset } => {
+                max_f1 = max_f1.max(*offset as u64);
+            }
+            XrefEntryOut::Compressed { objstm, index } => {
+                max_f1 = max_f1.max(*objstm as u64);
+                max_f2 = max_f2.max(*index as u64);
+            }
+        }
+    }
+    let w0 = 1usize;
+    let w1 = byte_width(max_f1).max(1);
+    let w2 = byte_width(max_f2).max(1);
+
+    // Build the binary payload: every object number 0..size, in order. The
+    // entries cover a contiguous 0..size range (the renumbering layer produces
+    // contiguous numbers and we added object 0 + the xref object), so a single
+    // /Index [0 size] range is correct. Any gap is emitted as a free entry.
+    let mut by_number: std::collections::HashMap<u32, XrefEntryOut> =
+        std::collections::HashMap::with_capacity(entries.len());
+    for (n, e) in entries.iter() {
+        by_number.insert(*n, *e);
+    }
+    let mut payload = Vec::with_capacity(size * (w0 + w1 + w2));
+    for n in 0..size as u32 {
+        let entry = by_number.get(&n).copied().unwrap_or(XrefEntryOut::Free);
+        let (t, f1, f2): (u64, u64, u64) = match entry {
+            XrefEntryOut::Free => (0, 0, 0),
+            XrefEntryOut::Uncompressed { offset } => (1, offset as u64, 0),
+            XrefEntryOut::Compressed { objstm, index } => (2, objstm as u64, index as u64),
+        };
+        write_be_field(&mut payload, t, w0);
+        write_be_field(&mut payload, f1, w1);
+        write_be_field(&mut payload, f2, w2);
+    }
+
+    let compressed = crate::filters::flate_encode(&payload, 9);
+
+    let mut dict = dict_keys.clone();
+    dict.insert("Type", PdfObject::Name("XRef".to_string()));
+    dict.insert(
+        "W",
+        PdfObject::Array(vec![
+            PdfObject::Integer(w0 as i64),
+            PdfObject::Integer(w1 as i64),
+            PdfObject::Integer(w2 as i64),
+        ]),
+    );
+    dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
+    dict.insert("Length", PdfObject::Integer(compressed.len() as i64));
+    // /Index defaults to [0 Size] which matches our contiguous coverage; emit
+    // it explicitly for clarity and to satisfy strict readers.
+    dict.insert(
+        "Index",
+        PdfObject::Array(vec![
+            PdfObject::Integer(0),
+            PdfObject::Integer(size as i64),
+        ]),
+    );
+
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("{xref_number} 0 obj\n").as_bytes());
+    serialize_dictionary(&dict, &mut out);
+    out.extend_from_slice(b"\nstream\n");
+    out.extend_from_slice(&compressed);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    Ok(out)
+}
+
+/// Minimum number of bytes needed to hold `value` big-endian (0 -> 1).
+fn byte_width(value: u64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    let bits = 64 - value.leading_zeros() as usize;
+    bits.div_ceil(8)
+}
+
+/// Append `value` as a big-endian field of exactly `width` bytes.
+fn write_be_field(out: &mut Vec<u8>, value: u64, width: usize) {
+    let bytes = value.to_be_bytes();
+    out.extend_from_slice(&bytes[8 - width..]);
+}
+
+/// True if a PDF version string is below 1.5 (so the modern modes must bump it).
+fn version_lt_1_5(version: &str) -> bool {
+    // Versions are like "1.4", "1.7", "2.0". Compare (major, minor) numerically.
+    let parse = |v: &str| -> (u32, u32) {
+        let mut it = v.split('.');
+        let major = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let minor = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        (major, minor)
+    };
+    parse(version) < (1, 5)
 }
 
 /// Serialize a single [`PdfObject`] to PDF syntax, appending to `out`.
@@ -987,12 +1409,24 @@ pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
 /// /XRef` streams are dropped (the writer emits its own classic xref).
 pub fn rewrite_document(
     reader: &PdfReader,
+    mutate: impl FnMut(u32, &mut PdfObject),
+) -> Result<Vec<u8>> {
+    rewrite_document_with_mode(reader, WriterMode::ClassicXref, mutate)
+}
+
+/// [`rewrite_document`] with a selectable [`WriterMode`] (classic xref, xref
+/// stream, or xref stream + object streams). The content-preserving copy is
+/// identical; only the cross-reference structure of the output differs.
+pub fn rewrite_document_with_mode(
+    reader: &PdfReader,
+    mode: WriterMode,
     mut mutate: impl FnMut(u32, &mut PdfObject),
 ) -> Result<Vec<u8>> {
     let (objects, new_root, info_number) = rewrite_document_objects(reader, &mut mutate)?;
     let writer = PdfWriter::new(objects, new_root)
         .with_info(info_number)
-        .with_id(reader.first_file_id());
+        .with_id(reader.first_file_id())
+        .with_mode(mode);
     writer.write()
 }
 
@@ -1076,6 +1510,103 @@ mod tests {
         let mut out = Vec::new();
         serialize_object(object, &mut out);
         out
+    }
+
+    // --- Modern writer unit tests (xref streams + object streams) ---
+
+    #[test]
+    fn byte_width_fits_values() {
+        assert_eq!(byte_width(0), 1);
+        assert_eq!(byte_width(255), 1);
+        assert_eq!(byte_width(256), 2);
+        assert_eq!(byte_width(65535), 2);
+        assert_eq!(byte_width(65536), 3);
+        assert_eq!(byte_width(0x00FF_FFFF), 3);
+        assert_eq!(byte_width(0x0100_0000), 4);
+    }
+
+    #[test]
+    fn write_be_field_is_big_endian_fixed_width() {
+        let mut v = Vec::new();
+        write_be_field(&mut v, 0x0102, 3);
+        assert_eq!(v, vec![0x00, 0x01, 0x02]);
+        let mut v2 = Vec::new();
+        write_be_field(&mut v2, 1, 1);
+        assert_eq!(v2, vec![0x01]);
+    }
+
+    #[test]
+    fn objstm_header_offsets_match_reader_format() {
+        // Two tiny objects packed: the header must be "num reloffset" pairs and
+        // /First must equal the header length; the reader's parser must recover
+        // both objects with their numbers.
+        let o5 = OutputObject {
+            number: 5,
+            object: PdfObject::Integer(42),
+        };
+        let o7 = OutputObject {
+            number: 7,
+            object: PdfObject::Boolean(true),
+        };
+        let map: std::collections::HashMap<u32, &OutputObject> =
+            [(5u32, &o5), (7u32, &o7)].into_iter().collect();
+        let (decoded, off) = build_objstm_body(&[5, 7], &map).unwrap();
+        let parsed =
+            crate::reader::parse_object_stream_data(&decoded, 2, off.first_offset, None).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed.get(&5), Some((0, PdfObject::Integer(42)))));
+        assert!(matches!(parsed.get(&7), Some((1, PdfObject::Boolean(true)))));
+    }
+
+    #[test]
+    fn xref_stream_entries_parse_back() {
+        // Build an xref stream for a known entry set and confirm the reader
+        // decodes the right types/fields. We construct the payload directly via
+        // the same path build_xref_stream uses, then round-trip through the
+        // reader's entry parser.
+        let w1 = byte_width(17);
+        let w2 = byte_width(3);
+        let mut payload = Vec::new();
+        // obj 0: free (0,0,0)
+        write_be_field(&mut payload, 0, 1);
+        write_be_field(&mut payload, 0, w1);
+        write_be_field(&mut payload, 0, w2);
+        // obj 1: uncompressed at offset 17 (1,17,0)
+        write_be_field(&mut payload, 1, 1);
+        write_be_field(&mut payload, 17, w1);
+        write_be_field(&mut payload, 0, w2);
+        // obj 2: in objstm 1 at index 3 (2,1,3)
+        write_be_field(&mut payload, 2, 1);
+        write_be_field(&mut payload, 1, w1);
+        write_be_field(&mut payload, 3, w2);
+
+        let mut d = PdfDictionary::empty();
+        d.insert(
+            "W",
+            PdfObject::Array(vec![
+                PdfObject::Integer(1),
+                PdfObject::Integer(w1 as i64),
+                PdfObject::Integer(w2 as i64),
+            ]),
+        );
+        d.insert("Size", PdfObject::Integer(3));
+        let parsed = crate::reader::parse_xref_stream_entries(&d, &payload).unwrap();
+        assert!(parsed.iter().any(|(n, _, e)| *n == 1
+            && matches!(e, crate::reader::XrefEntry::Uncompressed { offset } if *offset == 17)));
+        assert!(parsed.iter().any(|(n, _, e)| *n == 2
+            && matches!(e, crate::reader::XrefEntry::Compressed { stream_obj, index } if *stream_obj == 1 && *index == 3)));
+
+        // And the full build_xref_stream emits a parseable /Type /XRef object.
+        let mut entries = vec![
+            (0u32, XrefEntryOut::Free),
+            (1u32, XrefEntryOut::Uncompressed { offset: 17 }),
+            (2u32, XrefEntryOut::Compressed { objstm: 1, index: 3 }),
+        ];
+        let obj_text = build_xref_stream(3, 3, &mut entries, &PdfDictionary::empty()).unwrap();
+        let s = String::from_utf8_lossy(&obj_text);
+        assert!(s.contains("/Type /XRef") || s.contains("/Type/XRef"));
+        assert!(s.contains("/W ["));
+        assert!(s.contains("/Index ["));
     }
 
     fn ser_str(object: &PdfObject) -> String {
