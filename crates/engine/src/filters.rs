@@ -45,6 +45,18 @@ pub fn decode_stream(stream: &PdfObject, reader: &PdfReader) -> Result<Vec<u8>> 
     }
 }
 
+/// Compress `data` with zlib/DEFLATE (the PDF `FlateDecode` filter format) at
+/// the given level (0..=9; 9 = best). The inverse of [`flate_decode`]. Used by
+/// the `optimize` op to recompress uncompressed content streams.
+pub fn flate_encode(data: &[u8], level: u32) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level.min(9)));
+    // Writing to a Vec is infallible; finish() returns the compressed buffer.
+    let _ = enc.write_all(data);
+    enc.finish().unwrap_or_default()
+}
+
 /// Decodes implemented lossless filters in order and stops before an image
 /// codec filter, returning the current bytes plus a status.
 pub fn decode_stream_lossless(stream: &PdfObject, reader: &PdfReader) -> Result<DecodedStream> {
