@@ -16,7 +16,9 @@ use crate::crypto::{build_encryption, EncryptParams};
 use crate::engine::ContentEngine;
 use crate::error::{OxideError, Result};
 use crate::object::PdfObject;
-use crate::writer::{rewrite_document, rewrite_document_objects, PdfWriter};
+use crate::writer::{
+    rewrite_document, rewrite_document_objects, rewrite_document_with_mode, PdfWriter, WriterMode,
+};
 
 /// Normalize a rotation angle to one of {0, 90, 180, 270} (degrees clockwise).
 /// Mirrors the read-side `normalize_rotate` so a written /Rotate round-trips to
@@ -128,13 +130,15 @@ pub struct OptimizeReport {
 ///   happens.
 ///
 /// Object-stream / cross-reference-stream packing (the largest size win for
-/// object-heavy PDFs) is NOT yet implemented — it needs writer support that
-/// does not exist (see [`linearize`]); recorded as future work.
+/// object-heavy PDFs) packs eligible objects into compressed object streams via
+/// the modern writer ([`WriterMode::XrefStreamWithObjStm`]) — so optimize now
+/// genuinely shrinks even files that were already cross-reference/object-stream
+/// based, instead of growing them (the Bucket-2 regression, now fixed).
 ///
-/// Visually safe by construction: only the stream *container* compression
-/// changes, never decoded content. The 0B render-equivalence harness
-/// (`renderer-benchmark/scripts/run_0b_compression_safety.py`) is the
-/// belt-and-braces check.
+/// Visually safe by construction: only the stream *container* compression and
+/// the cross-reference structure change, never decoded content. The 0B render-
+/// equivalence harness (`renderer-benchmark/scripts/run_0b_compression_safety.py`)
+/// is the belt-and-braces check.
 pub fn optimize(engine: &ContentEngine) -> Result<(Vec<u8>, OptimizeReport)> {
     let reader = engine.document().reader();
     let mut report = OptimizeReport::default();
@@ -143,26 +147,29 @@ pub fn optimize(engine: &ContentEngine) -> Result<(Vec<u8>, OptimizeReport)> {
     // rewrite. We can only safely recompress a stream we can re-encode such that
     // the declared /Filter still decodes it: the unambiguous case is a stream
     // with NO existing filter — wrap it in FlateDecode. Filtered/streams that
-    // decode only partially (image codecs) are left verbatim.
+    // decode only partially (image codecs) are left verbatim. The modern writer
+    // then packs non-stream objects into object streams + a cross-reference
+    // stream for the structural size win.
     let mut recompressed = 0usize;
-    let result = rewrite_document(reader, |_orig, obj| {
-        if let PdfObject::Stream { dict, raw } = obj {
-            let has_filter = dict.contains_key("Filter");
-            // Never touch streams that already carry a filter (incl. image
-            // codecs) — re-deriving their decode chain is out of scope here.
-            if has_filter || raw.is_empty() {
-                return;
+    let result =
+        rewrite_document_with_mode(reader, WriterMode::XrefStreamWithObjStm, |_orig, obj| {
+            if let PdfObject::Stream { dict, raw } = obj {
+                let has_filter = dict.contains_key("Filter");
+                // Never touch streams that already carry a filter (incl. image
+                // codecs) — re-deriving their decode chain is out of scope here.
+                if has_filter || raw.is_empty() {
+                    return;
+                }
+                let compressed = crate::filters::flate_encode(raw, 9);
+                // Only adopt it if it actually shrinks the stream (plus the small
+                // /Filter entry overhead).
+                if compressed.len() + 16 < raw.len() {
+                    *raw = compressed;
+                    dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
+                    recompressed += 1;
+                }
             }
-            let compressed = crate::filters::flate_encode(raw, 9);
-            // Only adopt it if it actually shrinks the stream (plus the small
-            // /Filter entry overhead).
-            if compressed.len() + 16 < raw.len() {
-                *raw = compressed;
-                dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
-                recompressed += 1;
-            }
-        }
-    })?;
+        })?;
     report.streams_recompressed = recompressed;
     report.output_bytes = result.len();
     Ok((result, report))
