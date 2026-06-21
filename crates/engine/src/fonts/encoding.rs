@@ -1776,7 +1776,6 @@ pub fn zapf_dingbats_name_to_unicode(name: &str) -> Option<char> {
         .map(|i| ZAPF_DINGBATS_TO_UNICODE[i].1)
 }
 
-
 pub struct Encoding;
 
 impl Encoding {

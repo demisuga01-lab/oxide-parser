@@ -148,6 +148,14 @@ impl FontResolver {
         self.decode_string(&bytes)
     }
 
+    pub fn glyph_name(&self, code: u16) -> Option<&str> {
+        self.encoding_table
+            .as_ref()
+            .and_then(|table| table.get(code as usize))
+            .map(String::as_str)
+            .filter(|name| *name != ".notdef")
+    }
+
     pub fn code_size(&self) -> u8 {
         self.code_size
     }
@@ -440,11 +448,7 @@ pub fn lookup_cid_vertical(cid: u32, w0: f64, desc_dict: &PdfDictionary) -> (f64
 
     let mut idx = 0usize;
     while idx < w2.len() {
-        let Some(c1) = w2[idx]
-            .as_number()
-            .filter(|v| *v >= 0.0)
-            .map(|v| v as u32)
-        else {
+        let Some(c1) = w2[idx].as_number().filter(|v| *v >= 0.0).map(|v| v as u32) else {
             break;
         };
         idx += 1;
@@ -468,11 +472,7 @@ pub fn lookup_cid_vertical(cid: u32, w0: f64, desc_dict: &PdfDictionary) -> (f64
             }
             _ => {
                 // c_first c_last w1y vx vy
-                let Some(c2) = w2[idx]
-                    .as_number()
-                    .filter(|v| *v >= 0.0)
-                    .map(|v| v as u32)
-                else {
+                let Some(c2) = w2[idx].as_number().filter(|v| *v >= 0.0).map(|v| v as u32) else {
                     break;
                 };
                 idx += 1;
@@ -828,9 +828,18 @@ mod cid_font_tests {
                 ]),
             ]),
         );
-        assert_eq!(lookup_cid_vertical(10, 1000.0, &dict), (-900.0, 450.0, 800.0));
-        assert_eq!(lookup_cid_vertical(11, 1000.0, &dict), (-950.0, 460.0, 810.0));
-        assert_eq!(lookup_cid_vertical(12, 1000.0, &dict), (-1000.0, 500.0, 880.0));
+        assert_eq!(
+            lookup_cid_vertical(10, 1000.0, &dict),
+            (-900.0, 450.0, 800.0)
+        );
+        assert_eq!(
+            lookup_cid_vertical(11, 1000.0, &dict),
+            (-950.0, 460.0, 810.0)
+        );
+        assert_eq!(
+            lookup_cid_vertical(12, 1000.0, &dict),
+            (-1000.0, 500.0, 880.0)
+        );
     }
 
     #[test]
@@ -846,8 +855,14 @@ mod cid_font_tests {
                 PdfObject::Integer(880),
             ]),
         );
-        assert_eq!(lookup_cid_vertical(150, 1000.0, &dict), (-880.0, 500.0, 880.0));
-        assert_eq!(lookup_cid_vertical(50, 1000.0, &dict), (-1000.0, 500.0, 880.0));
+        assert_eq!(
+            lookup_cid_vertical(150, 1000.0, &dict),
+            (-880.0, 500.0, 880.0)
+        );
+        assert_eq!(
+            lookup_cid_vertical(50, 1000.0, &dict),
+            (-1000.0, 500.0, 880.0)
+        );
     }
 
     #[test]

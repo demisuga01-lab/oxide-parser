@@ -147,7 +147,12 @@ fn walk_resources(
                     if scope_ok {
                         if let Some(t3_res) = resolve_dict(fd.get("Resources"), reader) {
                             walk_resources(
-                                &t3_res, reader, seen, font_refs, visited_scopes, depth + 1,
+                                &t3_res,
+                                reader,
+                                seen,
+                                font_refs,
+                                visited_scopes,
+                                depth + 1,
                             );
                         }
                     }
@@ -169,7 +174,12 @@ fn walk_resources(
                 if dict.get_name("Subtype") == Some("Form") {
                     if let Some(form_res) = resolve_dict(dict.get("Resources"), reader) {
                         walk_resources(
-                            &form_res, reader, seen, font_refs, visited_scopes, depth + 1,
+                            &form_res,
+                            reader,
+                            seen,
+                            font_refs,
+                            visited_scopes,
+                            depth + 1,
                         );
                     }
                 }
@@ -280,12 +290,7 @@ fn collect_appearance_resources(
 }
 
 /// Build a [`FontInfo`] from a resolved font dictionary.
-fn describe_font(
-    font_dict: &PdfDictionary,
-    reader: &PdfReader,
-    num: u32,
-    gen: u16,
-) -> FontInfo {
+fn describe_font(font_dict: &PdfDictionary, reader: &PdfReader, num: u32, gen: u16) -> FontInfo {
     let base_font = font_dict.get_name("BaseFont").unwrap_or("");
     let name = if base_font.is_empty() {
         font_dict
@@ -372,7 +377,9 @@ fn encoding_label(font_dict: &PdfDictionary, reader: &PdfReader, subtype: &str) 
     let Some(encoding) = font_dict.get("Encoding") else {
         return implicit_encoding_label(font_dict, reader, subtype);
     };
-    let resolved = reader.resolve(encoding.clone()).unwrap_or_else(|_| encoding.clone());
+    let resolved = reader
+        .resolve(encoding.clone())
+        .unwrap_or_else(|_| encoding.clone());
     match resolved {
         PdfObject::Name(name) => normalize_encoding_name(&name),
         PdfObject::Dictionary(dict) => {
@@ -396,11 +403,7 @@ fn encoding_label(font_dict: &PdfDictionary, reader: &PdfReader, subtype: &str) 
 /// following pdffonts' behaviour: composite fonts report "Identity"; simple
 /// fonts report their standard encoding unless flagged symbolic (then
 /// "Builtin"). Matches Poppler closely so the cross-check agrees.
-fn implicit_encoding_label(
-    font_dict: &PdfDictionary,
-    reader: &PdfReader,
-    subtype: &str,
-) -> String {
+fn implicit_encoding_label(font_dict: &PdfDictionary, reader: &PdfReader, subtype: &str) -> String {
     if subtype == "Type0" {
         return "Identity".to_string();
     }

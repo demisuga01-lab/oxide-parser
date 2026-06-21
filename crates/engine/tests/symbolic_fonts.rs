@@ -14,7 +14,9 @@ struct PdfBuilder {
 
 impl PdfBuilder {
     fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
     fn add(&mut self, body: &str) -> usize {
         self.objects.push(body.as_bytes().to_vec());
@@ -81,10 +83,10 @@ fn symbolic_font_pdf(base_font: &str, text_hex: &str) -> Vec<u8> {
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 80] /Contents 4 0 R \
          /Resources << /Font << /F1 5 0 R >> >> >>",
     ); // 3
-    // Draw the text at a large size near the top-left.
+       // Draw the text at a large size near the top-left.
     let content = format!("BT /F1 48 Tf 10 20 Td <{text_hex}> Tj ET\n");
     b.add_stream("", content.as_bytes()); // 4
-    // A non-embedded Type 1 symbolic font (no FontDescriptor / FontFile).
+                                          // A non-embedded Type 1 symbolic font (no FontDescriptor / FontFile).
     b.add(&format!(
         "<< /Type /Font /Subtype /Type1 /BaseFont /{base_font} >>"
     )); // 5

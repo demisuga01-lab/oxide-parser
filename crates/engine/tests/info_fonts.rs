@@ -143,8 +143,8 @@ struct PdffontsRow {
 
 #[test]
 fn info_basic_fields_match_fixture() {
-    let doc = PdfDocument::open_bytes(std::fs::read(fixture_path("tracemonkey.pdf")).unwrap())
-        .unwrap();
+    let doc =
+        PdfDocument::open_bytes(std::fs::read(fixture_path("tracemonkey.pdf")).unwrap()).unwrap();
     let engine =
         ContentEngine::open_bytes(std::fs::read(fixture_path("tracemonkey.pdf")).unwrap()).unwrap();
     let info = engine.document_info().unwrap();
@@ -225,7 +225,9 @@ fn info_reports_encryption_on_encrypted_fixture() {
     // Find an encrypted corpus fixture that unlocks with the empty password.
     let candidates = ["pdfjs/empty_protected.pdf", "pdfjs/secHandler.pdf"];
     for rel in candidates {
-        let Some(path) = corpus_path(rel) else { continue };
+        let Some(path) = corpus_path(rel) else {
+            continue;
+        };
         let Ok(engine) = ContentEngine::open_bytes(std::fs::read(&path).unwrap()) else {
             continue;
         };
@@ -266,7 +268,10 @@ fn fonts_cross_checks_pdffonts_set_and_flags() {
 
         // Same SET of object ids (the critical missing-font check).
         let mut ours: Vec<u32> = fonts.iter().map(|f| f.object_number).collect();
-        let mut theirs: Vec<u32> = poppler_rows.iter().filter_map(|r| r.object_number).collect();
+        let mut theirs: Vec<u32> = poppler_rows
+            .iter()
+            .filter_map(|r| r.object_number)
+            .collect();
         ours.sort_unstable();
         theirs.sort_unstable();
         assert_eq!(
@@ -276,12 +281,17 @@ fn fonts_cross_checks_pdffonts_set_and_flags() {
 
         // For each font Poppler reports, our emb/sub/uni flags must agree.
         for pr in &poppler_rows {
-            let Some(obj) = pr.object_number else { continue };
+            let Some(obj) = pr.object_number else {
+                continue;
+            };
             let ours = fonts
                 .iter()
                 .find(|f| f.object_number == obj)
                 .unwrap_or_else(|| panic!("{name}: missing font object {obj}"));
-            assert_eq!(ours.embedded, pr.emb, "{name}: font {obj} emb flag disagrees");
+            assert_eq!(
+                ours.embedded, pr.emb,
+                "{name}: font {obj} emb flag disagrees"
+            );
             assert_eq!(ours.subset, pr.sub, "{name}: font {obj} sub flag disagrees");
             assert_eq!(
                 ours.to_unicode, pr.uni,

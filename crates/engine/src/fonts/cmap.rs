@@ -4,6 +4,8 @@ use crate::filters::decode_stream_lossless;
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
 
+const MAX_CMAP_MAPPINGS: usize = 65_536;
+
 pub struct ToUnicodeCMap {
     map: HashMap<u16, String>,
     code_size: u8,
@@ -53,6 +55,9 @@ struct CMapParser<'a> {
 impl CMapParser<'_> {
     fn parse_all(&mut self) {
         while self.pos < self.bytes.len() {
+            if self.map.len() >= MAX_CMAP_MAPPINGS {
+                return;
+            }
             self.skip_ws_and_comments();
             if self.starts_with(b"beginbfchar") {
                 self.pos += b"beginbfchar".len();
@@ -68,6 +73,9 @@ impl CMapParser<'_> {
 
     fn parse_bfchar_block(&mut self) {
         while self.pos < self.bytes.len() {
+            if self.map.len() >= MAX_CMAP_MAPPINGS {
+                return;
+            }
             self.skip_ws_and_comments();
             if self.starts_with(b"endbfchar") {
                 self.pos += b"endbfchar".len();
@@ -86,6 +94,9 @@ impl CMapParser<'_> {
 
     fn parse_bfrange_block(&mut self) {
         while self.pos < self.bytes.len() {
+            if self.map.len() >= MAX_CMAP_MAPPINGS {
+                return;
+            }
             self.skip_ws_and_comments();
             if self.starts_with(b"endbfrange") {
                 self.pos += b"endbfrange".len();
@@ -110,6 +121,9 @@ impl CMapParser<'_> {
             if self.peek() == Some(b'[') {
                 let destinations = parse_bfrange_array(self.bytes, &mut self.pos);
                 for (offset, dst) in destinations.into_iter().enumerate() {
+                    if self.map.len() >= MAX_CMAP_MAPPINGS {
+                        break;
+                    }
                     let code = start_code.saturating_add(offset as u16);
                     if code > end_code {
                         break;
@@ -118,6 +132,9 @@ impl CMapParser<'_> {
                 }
             } else if let Some(dst) = parse_hex_string(self.bytes, &mut self.pos) {
                 for code in start_code..=end_code {
+                    if self.map.len() >= MAX_CMAP_MAPPINGS {
+                        break;
+                    }
                     let offset = code.saturating_sub(start_code);
                     let mapped = increment_utf16be(&dst, offset);
                     self.map.insert(code, utf16be_to_string(&mapped));
@@ -127,6 +144,9 @@ impl CMapParser<'_> {
     }
 
     fn insert_mapping(&mut self, src: &[u8], dst: &[u8]) {
+        if self.map.len() >= MAX_CMAP_MAPPINGS {
+            return;
+        }
         self.record_source_len(src);
         self.map.insert(source_code(src), utf16be_to_string(dst));
     }
@@ -355,6 +375,9 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
 }
 
 fn parse_bf_char_line(line: &str, map: &mut HashMap<u32, char>) {
+    if map.len() >= MAX_CMAP_MAPPINGS {
+        return;
+    }
     let hexes = extract_hex_values(line);
     if hexes.len() < 2 {
         return;
@@ -390,6 +413,9 @@ fn parse_bf_range_line(line: &str, map: &mut HashMap<u32, char>) {
         }
         let arr_str = &line[arr_start + 1..arr_end];
         for (offset, unicode_hex) in extract_hex_values(arr_str).iter().enumerate() {
+            if map.len() >= MAX_CMAP_MAPPINGS {
+                break;
+            }
             let cid = cid_start.saturating_add(offset as u32);
             if cid > cid_end {
                 break;
@@ -403,6 +429,9 @@ fn parse_bf_range_line(line: &str, map: &mut HashMap<u32, char>) {
             return;
         };
         for cid in cid_start..=cid_end {
+            if map.len() >= MAX_CMAP_MAPPINGS {
+                break;
+            }
             let unicode_val = unicode_start.saturating_add(cid - cid_start);
             if let Some(ch) = char::from_u32(unicode_val) {
                 map.insert(cid, ch);
@@ -528,6 +557,20 @@ mod cid_cmap_tests {
         assert_eq!(map.len(), 4);
         assert_eq!(map.get(&0x41), Some(&'A'));
         assert_eq!(map.get(&0x44), Some(&'D'));
+    }
+
+    #[test]
+    fn parse_bf_lines_stop_at_mapping_cap() {
+        let mut map = HashMap::new();
+        for cid in 0..MAX_CMAP_MAPPINGS as u32 {
+            map.insert(cid, 'A');
+        }
+
+        parse_bf_char_line("<10000> <0042>", &mut map);
+        parse_bf_range_line("<10001> <1FFFF> <0043>", &mut map);
+
+        assert_eq!(map.len(), MAX_CMAP_MAPPINGS);
+        assert_eq!(map.get(&0x10000), None);
     }
 }
 
