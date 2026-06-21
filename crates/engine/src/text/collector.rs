@@ -18,6 +18,12 @@ pub struct TextChunk {
     pub is_invisible: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct MarkedTextChunk {
+    pub chunk: TextChunk,
+    pub mcid: Option<i64>,
+}
+
 impl TextChunk {
     pub fn right(&self) -> f64 {
         self.x + self.width
@@ -108,6 +114,52 @@ impl<'a> TextCollector<'a> {
             self.process_op(operation, &mut chunks);
         }
         chunks
+    }
+
+    /// Collect text chunks and record the currently active marked-content
+    /// identifier, when a chunk is emitted inside `/Tag <</MCID n>> BDC ... EMC`.
+    ///
+    /// The default [`collect`](Self::collect) path deliberately stays unchanged;
+    /// this side-channel is used by tagged-PDF semantic extraction.
+    pub fn collect_marked(&mut self, operations: &[ContentOperation]) -> Vec<MarkedTextChunk> {
+        self.gs = GraphicsState::new();
+        if self.reader.is_some() {
+            self.font_resolvers.clear();
+        }
+
+        let mut chunks = Vec::new();
+        let mut marked = Vec::new();
+        let mut mcid_stack: Vec<Option<i64>> = Vec::new();
+
+        for operation in operations {
+            match operation.operator.as_str() {
+                "BDC" => {
+                    mcid_stack.push(extract_mcid(operation));
+                    self.gs.process(operation);
+                }
+                "BMC" => {
+                    mcid_stack.push(None);
+                    self.gs.process(operation);
+                }
+                "EMC" => {
+                    let _ = mcid_stack.pop();
+                    self.gs.process(operation);
+                }
+                _ => {
+                    let before = chunks.len();
+                    self.process_op(operation, &mut chunks);
+                    let active_mcid = mcid_stack.iter().rev().find_map(|id| *id);
+                    for chunk in chunks[before..].iter().cloned() {
+                        marked.push(MarkedTextChunk {
+                            chunk,
+                            mcid: active_mcid,
+                        });
+                    }
+                }
+            }
+        }
+
+        marked
     }
 
     fn process_op(&mut self, op: &ContentOperation, chunks: &mut Vec<TextChunk>) {
@@ -286,8 +338,12 @@ impl<'a> TextCollector<'a> {
         for elem in array {
             match elem {
                 Operand::String(bytes) => self.show_bytes(bytes, chunks),
-                Operand::Integer(value) => self.apply_tj_adjust(value as f64, font_size, h_scale, is_vertical),
-                Operand::Real(value) => self.apply_tj_adjust(value, font_size, h_scale, is_vertical),
+                Operand::Integer(value) => {
+                    self.apply_tj_adjust(value as f64, font_size, h_scale, is_vertical)
+                }
+                Operand::Real(value) => {
+                    self.apply_tj_adjust(value, font_size, h_scale, is_vertical)
+                }
                 _ => {}
             }
         }
@@ -307,6 +363,29 @@ impl<'a> TextCollector<'a> {
             self.gs.text.tm[4] += self.gs.text.tm[0] * tx;
             self.gs.text.tm[5] += self.gs.text.tm[1] * tx;
         }
+    }
+}
+
+fn extract_mcid(op: &ContentOperation) -> Option<i64> {
+    op.operands.iter().find_map(operand_mcid)
+}
+
+fn operand_mcid(operand: &Operand) -> Option<i64> {
+    match operand {
+        Operand::Integer(value) => Some(*value),
+        Operand::Array(items) => {
+            let mut iter = items.iter();
+            while let Some(item) = iter.next() {
+                if matches!(item.as_name(), Some("MCID")) {
+                    return iter.next().and_then(Operand::as_integer);
+                }
+                if let Some(mcid) = operand_mcid(item) {
+                    return Some(mcid);
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 
@@ -585,8 +664,7 @@ mod tests {
         // vertical because the rotation puts the magnitude on tm[1]. With
         // WMode-driven detection the (horizontal) font keeps it horizontal.
         // 90° rotation: [0 1 -1 0 x y] via `Tm`.
-        let chunks =
-            collect_text(b"BT /F1 12 Tf 0 1 -1 0 100 700 Tm (Sideways) Tj ET");
+        let chunks = collect_text(b"BT /F1 12 Tf 0 1 -1 0 100 700 Tm (Sideways) Tj ET");
         assert_eq!(chunks.len(), 1);
         assert!(
             !chunks[0].is_vertical,
@@ -614,7 +692,10 @@ mod tests {
         let mut resources = PageResources::default();
         resources.fonts.insert("V1".to_string(), font_dict.clone());
         let mut resolvers = HashMap::new();
-        resolvers.insert("V1".to_string(), FontResolver::new_from_dict_only(&font_dict));
+        resolvers.insert(
+            "V1".to_string(),
+            FontResolver::new_from_dict_only(&font_dict),
+        );
         let mut collector = TextCollector::new_with_resolvers(resources, resolvers);
 
         // Two-byte CID 0x0001 at 12pt, starting at (300,700).
