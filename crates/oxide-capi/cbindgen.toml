@@ -1,0 +1,23 @@
+language = "C"
+include_guard = "OXIDE_H"
+usize_is_size_t = true
+cpp_compat = true
+
+[export]
+include = [
+  "OxideBuffer",
+  "OxideDocument",
+  "oxide_document_open_from_bytes",
+  "oxide_document_free",
+  "oxide_string_free",
+  "oxide_error_free",
+  "oxide_buffer_free",
+  "oxide_document_page_count",
+  "oxide_document_extract_text",
+  "oxide_document_parse_markdown",
+  "oxide_document_parse_json",
+  "oxide_document_extract_fields_json",
+  "oxide_document_extract_semantic_json",
+  "oxide_document_info_json",
+  "oxide_document_render_page_png",
+]

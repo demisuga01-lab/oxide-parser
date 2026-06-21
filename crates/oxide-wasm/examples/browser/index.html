@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Oxide WASM PDF Demo</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+        max-width: 960px;
+      }
+      pre {
+        background: #f5f5f5;
+        overflow: auto;
+        padding: 1rem;
+        white-space: pre-wrap;
+      }
+      img {
+        border: 1px solid #ccc;
+        max-width: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Oxide WASM PDF Demo</h1>
+    <p>
+      Structured document parsing — Markdown, RAG chunks, and key-value fields —
+      running entirely client-side. Nothing is uploaded. (Digital-born PDFs
+      only: OCR for scanned pages needs the external Tesseract process and is
+      not available in the browser.)
+    </p>
+    <input id="file" type="file" accept="application/pdf" />
+    <p id="status">Choose a PDF.</p>
+
+    <h2>Parsed Markdown (the canonical document model)</h2>
+    <pre id="markdown"></pre>
+
+    <h2>RAG Chunks (count + first chunk)</h2>
+    <pre id="chunks"></pre>
+
+    <h2>Key-Value Fields (auto-detected type)</h2>
+    <pre id="fields"></pre>
+
+    <h2>Page 1 Text</h2>
+    <pre id="text"></pre>
+
+    <h2>Page 1 Render</h2>
+    <img id="render" alt="Rendered PDF page" />
+
+    <script type="module">
+      import init, { OxidePdf } from "./pkg/oxide_wasm.js";
+
+      const status = document.getElementById("status");
+      const markdown = document.getElementById("markdown");
+      const chunks = document.getElementById("chunks");
+      const fields = document.getElementById("fields");
+      const text = document.getElementById("text");
+      const render = document.getElementById("render");
+
+      await init();
+      status.textContent = "WASM loaded. Choose a PDF.";
+
+      document.getElementById("file").addEventListener("change", async (event) => {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        status.textContent = "Reading PDF...";
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const pdf = new OxidePdf(bytes);
+
+        status.textContent = `Pages: ${pdf.pageCount()}`;
+
+        // The parser surface — all client-side.
+        markdown.textContent = pdf.parseMarkdown();
+
+        // RAG chunks (0, 0 = default target/overlap of 512/64 tokens).
+        const chunkSet = JSON.parse(pdf.chunk(0, 0));
+        const first = chunkSet.chunks?.[0];
+        chunks.textContent =
+          `chunks: ${chunkSet.chunks?.length ?? 0}\n\n` +
+          (first ? `--- chunk 0 (${first.tokens} tokens) ---\n${first.text}` : "(none)");
+
+        // Key-value field extraction (auto-detect doc type).
+        fields.textContent = pdf.extractFieldsJson("auto");
+
+        // Plain page text + a rendered preview (pre-existing capabilities).
+        text.textContent = pdf.extractText(1);
+        const png = pdf.renderPagePng(1, 120);
+        const blob = new Blob([png], { type: "image/png" });
+        render.src = URL.createObjectURL(blob);
+      });
+    </script>
+  </body>
+</html>
