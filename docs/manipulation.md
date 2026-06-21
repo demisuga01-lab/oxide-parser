@@ -184,13 +184,36 @@ Produces a smaller, cleaner PDF **without changing visible content**:
 - recompresses **uncompressed** content streams with `FlateDecode` when smaller.
   Image-codec streams (`DCTDecode`/`JPX`/`CCITT`/`JBIG2`) and already-filtered
   streams are left untouched — no lossy re-encoding, image fidelity preserved.
+- **packs eligible non-stream objects into compressed object streams** and emits
+  a cross-reference stream (the modern writer, see below), the main structural
+  size win — so optimize now **shrinks even files that were already xref/object-
+  stream based** instead of growing them (the Bucket-2 regression, fixed).
 - **Visually safe**: a rendered page of the output is byte-identical to the
   original under the same renderer (asserted in `tests/structural_ops.rs`; the
-  0B harness is the belt-and-braces check).
-- Note: a file that was already **object-stream / xref-stream packed** (PDF 1.5+)
-  may grow, because the writer emits classic objects + a classic xref (object-
-  stream packing is not yet implemented — see Future enhancements). The op
-  reports input/output bytes so the effect is visible.
+  0B harness is the belt-and-braces check). qpdf `--check` is clean and reports
+  the object streams as compressed (type-2) entries.
+
+### Writer modes (`oxide_engine::WriterMode`)
+
+The writer can emit three cross-reference structures:
+
+- **`ClassicXref`** (default) — a PDF 1.x `xref` table + `trailer`. Maximum
+  reader compatibility. This is the default for `PdfWriter` / `rewrite_document`
+  and therefore for `rotate` / `repair` / `encrypt`, whose output is unchanged.
+- **`XrefStream`** — a PDF 1.5+ `/Type /XRef` cross-reference stream (smaller;
+  prerequisite for object streams and linearization).
+- **`XrefStreamWithObjStm`** — xref stream **plus** object-stream packing
+  (`/Type /ObjStm`): eligible non-stream objects (not streams, not the
+  `/Encrypt` dict) are packed into FlateDecode'd object streams and referenced
+  as type-2 entries. The main file-size win; the default for `optimize`.
+
+Encryption interaction: an object stream is encrypted as a **whole stream**
+(compressed first, then encrypted — encryption is the outermost layer); the
+objects packed inside it are **not** individually encrypted, and the `/Encrypt`
+dictionary and the cross-reference stream itself are never encrypted. Validated
+by `tests/modern_writer.rs::encrypted_objstm_roundtrips`. All three modes
+round-trip through Oxide, qpdf `--check`, and Poppler; output is deterministic
+per mode.
 
 ### `oxide repair` (`oxide_engine::repair`)
 
@@ -202,13 +225,16 @@ located at all (e.g. `startxref` past EOF, truncated files) currently fail to
 open and so can't be repaired — a from-scratch object scan + trailer synthesis
 is recorded as future work. Repaired output is unencrypted.
 
-### `oxide linearize` — deferred
+### `oxide linearize` — still deferred (prerequisite now in place)
 
-Linearization (fast web view) is **not implemented**: it needs cross-reference-
-stream + object-stream output and a precise two-pass object/offset layout with
-hint streams (ISO 32000 Annex F) that the current classic-xref writer lacks.
-The command and `structural::linearize::linearize()` return an explicit error
-with that diagnosis rather than emitting a non-linearized file.
+Linearization (fast web view) is **not yet implemented**, but its core
+prerequisite — cross-reference-stream + object-stream output — now **exists**
+(the modern writer above). What remains is the precise two-pass object/offset
+layout with hint streams (ISO 32000 Annex F): first-page objects first, a
+linearization parameter dictionary, and page-offset/shared-object hint streams.
+The command and `structural::linearize::linearize()` still return an explicit
+error with that diagnosis rather than emitting a non-linearized file. A
+follow-up prompt finishes it on top of the modern writer.
 
 ## Validation
 
