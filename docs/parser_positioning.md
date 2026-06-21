@@ -93,23 +93,17 @@ paper) — a tie, stated as such.
   re-measured here and is **not** fabricated; re-run
   `renderer-benchmark/scripts/renderer_benchmark.py` to refresh it.
 
-### Not yet built (deferred structural-write operations)
+### Structural-write operations
 
-Oxide's structural operations are currently **merge / split / extract-pages**
-(read-and-rewrite). The following PDF-mutating operations are **not implemented**
-anywhere (neither the library nor the CLI nor the server) and are honest future
-work, not shipped features:
+Oxide's CLI/library structural operations now include merge, split,
+extract-pages, encrypt, rotate, optimize, repair, and a guarded
+qpdf-validated linearization subset. The server remains intentionally
+**non-mutating** unless a route explicitly documents otherwise, which is a real
+safety property for a service ingesting untrusted PDFs.
 
-- **encrypt / decrypt** — the crypto layer is decrypt-only today; producing an
-  encrypted PDF needs write-direction key derivation (and a security review
-  before any server exposure).
-- **rotate-and-write, optimize / linearize, repair** — page `/Rotate` is read
-  only; there is no linearizer or xref-repair builder that emits new bytes.
-
-These are deliberately deferred rather than half-built. The CLI does not expose
-`encrypt`/`decrypt`/`rotate`/`optimize`/`linearize`/`repair` subcommands; the
-server is intentionally **non-mutating** (a real safety property for a service
-ingesting untrusted PDFs).
+Remaining structural follow-ups are documented in `docs/manipulation.md`:
+decrypt-as-write, broader multi-page/form-heavy linearization, and from-scratch
+xref/trailer rebuild for the most damaged repair inputs.
 
 ## Who it's for
 

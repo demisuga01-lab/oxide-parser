@@ -66,9 +66,10 @@ oxide render input.pdf --dpi 150 --format png
 `chunk`, and `extract-text` when the binary was built `--features ocr` (see §4).
 A binary built without OCR returns an actionable error if you pass `--ocr`.
 
-> **Not yet available.** There are no `encrypt`/`decrypt`/`rotate`/`optimize`/
-> `linearize`/`repair` subcommands — those PDF-mutating operations are not
-> implemented (see the deferred-ops note in `docs/parser_positioning.md`).
+> **Structural writes.** The CLI includes `encrypt`, `rotate`, `optimize`,
+> `repair`, and a guarded qpdf-validated `linearize` subset. Broader
+> linearization coverage, decrypt-as-write, and server mutation routes remain
+> deliberate follow-ups (see `docs/manipulation.md`).
 > `extract-tables` does not support `--ocr` (OCR'd table-grid reconstruction is
 > a known gap; use `extract-fields --ocr` for scanned tabular data).
 

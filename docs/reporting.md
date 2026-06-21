@@ -130,7 +130,8 @@ drawn are reported.)
 ## Future enhancements
 
 - Full XMP metadata parsing (currently presence-only).
-- More robust linearization detection (currently a low-object-number probe).
+- Broader linearization reporting beyond the current first-kilobyte
+  `/Linearized` marker scan.
 - Server endpoints (`POST /api/v1/info`, `/api/v1/fonts`) — deferred this round;
   the CLI is complete. These are lightweight (no large output) so they need no
   async-job machinery.

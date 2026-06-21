@@ -98,11 +98,15 @@ pub mod writer;
 /// Semantic version of the oxide-engine crate.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use analysis::graphics::{
+    collect_graphics, collect_graphics_with_images, DrawnGraphics, ImagePlacement, Rect, Segment,
+};
 pub use analyzer::{PdfAnalyzer, TextLayerAnalysis, TextLayerRecommendation};
 pub use attachments::{
     extract_attachment, list_attachments, sanitize_filename, Attachment, AttachmentSource,
 };
 pub use cancel::CancelToken;
+pub use chunk::{chunk, estimate_tokens, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
 pub use classify::{
     classify_document, classify_page, ClassifyConfig, PageClassification, PageSource,
 };
@@ -117,32 +121,18 @@ pub use crypto::{
     verify_v5_perms, verify_v5_user_password, CryptMethod, EncryptAlgorithm, EncryptParams,
     EncryptState, EncryptionInfo, Rc4, V5Fields, PADDING,
 };
-pub use analysis::graphics::{
-    collect_graphics, collect_graphics_with_images, DrawnGraphics, ImagePlacement, Rect, Segment,
-};
 pub use docmodel::{
     render_markdown as render_document_markdown, ClassifiedType, DocBlock, DocumentModel, ListItem,
     ModelSource, RegionKind,
 };
-pub use parse::{
-    parse, Block, BlockKind, Document, DocumentMetadata, ImageHandling, ImageRef, InlineSpan,
-    InlineText, ListEntry, Page, ParseOptions, SerializeOptions, SourceInfo, SCHEMA_VERSION,
-};
-pub use ocr::preprocess::{
-    binarize_otsu, binarize_sauvola, detect_skew, preprocess, Binarization, PreprocessConfig,
-};
-pub use ocr::{OcrEngine, OcrImage, OcrOptions, OcrPage, OcrWord};
+pub use document::{PdfDocument, PdfPage};
+pub use engine::{max_render_pixels, ContentEngine, PageResources, DEFAULT_MAX_RENDER_PIXELS};
+pub use error::{OxideError, Result};
+pub use eval::{score, score_json, ScoreInput, ScoreOutput};
 pub use extract::{
     extract_fields, DocType, ExtractOptions, ExtractedFields, Field, FieldSource, FieldValue,
     LineItem, ValueHint, FIELDS_SCHEMA_VERSION,
 };
-pub use chunk::{
-    chunk, estimate_tokens, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION,
-};
-pub use eval::{score, score_json, ScoreInput, ScoreOutput};
-pub use document::{PdfDocument, PdfPage};
-pub use engine::{max_render_pixels, ContentEngine, PageResources, DEFAULT_MAX_RENDER_PIXELS};
-pub use error::{OxideError, Result};
 pub use filters::{
     decode_stream, decode_stream_lossless, flate_encode, DecodedStream, StreamDecodeStatus,
     MAX_FLATE_DECOMPRESSED_BYTES,
@@ -159,6 +149,14 @@ pub use info::{
     decode_pdf_text_string, format_pdf_date, DocumentInfo, EncryptionReport, PageSize, Permissions,
 };
 pub use object::{PdfDictionary, PdfObject};
+pub use ocr::preprocess::{
+    binarize_otsu, binarize_sauvola, detect_skew, preprocess, Binarization, PreprocessConfig,
+};
+pub use ocr::{OcrEngine, OcrImage, OcrOptions, OcrPage, OcrWord};
+pub use parse::{
+    parse, Block, BlockKind, Document, DocumentMetadata, ImageHandling, ImageRef, InlineSpan,
+    InlineText, ListEntry, Page, ParseOptions, SerializeOptions, SourceInfo, SCHEMA_VERSION,
+};
 pub use reader::{EncryptionContext, PdfReader, XrefEntry};
 pub use render::{
     flatten_cubic, flatten_path, get_fallback_font, rgb, rgba, AlphaMask, CachedGlyph, ClipMask,
@@ -170,15 +168,17 @@ pub use render::{
 pub use render::{render_page_svg, svg, text_decode};
 pub use semantic::{SemanticDocument, SemanticElement, SemanticMcid, SemanticSource};
 pub use signature::{verify_signatures, CertInfo, Coverage, SignatureReport, SignatureValidity};
-pub use structural::{encrypt, optimize, repair, rotate_pages, OptimizeReport, Rotation};
+pub use structural::{
+    encrypt, linearize::linearize, optimize, repair, rotate_pages, OptimizeReport, Rotation,
+};
 pub use text::{
     LineEnding, MarkedTextChunk, ReadingOrderReconstructor, TextChunk, TextCollector,
     TextExtractOptions, TextExtractor, TextFormatOptions, TextFormatter, TextLine,
 };
 pub use writer::{
     build_merged, build_subset, rewrite_document, rewrite_document_objects,
-    rewrite_document_with_mode, rewrite_references, serialize_object, write_document_roundtrip,
-    OutputObject, PdfWriter, WriterMode,
+    rewrite_document_with_mode, rewrite_references, serialize_object, write_document_linearized,
+    write_document_roundtrip, OutputObject, PdfWriter, WriterMode,
 };
 
 /// The curated high-level embedding surface.

@@ -20,6 +20,10 @@ impl PdfDictionary {
         self.entries.insert(key.into(), value)
     }
 
+    pub fn remove(&mut self, key: &str) -> Option<PdfObject> {
+        self.entries.remove(key)
+    }
+
     pub fn get(&self, key: &str) -> Option<&PdfObject> {
         self.entries.get(key)
     }

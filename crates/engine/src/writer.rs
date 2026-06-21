@@ -29,7 +29,7 @@
 //! [`PdfObject::Reference`] using a remap built during the copy. See
 //! [`build_subset`] / [`build_merged`] and [`rewrite_references`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::document::PdfDocument;
 use crate::error::{OxideError, Result};
@@ -446,8 +446,7 @@ impl PdfWriter {
         let obj_by_number: std::collections::HashMap<u32, &OutputObject> =
             objects.iter().map(|o| (o.number, *o)).collect();
         for plan in &objstms {
-            let (objstm_bytes, member_indices) =
-                build_objstm_body(&plan.members, &obj_by_number)?;
+            let (objstm_bytes, member_indices) = build_objstm_body(&plan.members, &obj_by_number)?;
             // Filter order matters: the data is FIRST FlateDecode-compressed,
             // THEN (if encrypting) encrypted as a WHOLE stream — encryption is
             // the outermost layer, undone first on read, exactly mirroring how
@@ -470,7 +469,10 @@ impl PdfWriter {
             let mut dict = PdfDictionary::empty();
             dict.insert("Type", PdfObject::Name("ObjStm".to_string()));
             dict.insert("N", PdfObject::Integer(plan.members.len() as i64));
-            dict.insert("First", PdfObject::Integer(member_indices.first_offset as i64));
+            dict.insert(
+                "First",
+                PdfObject::Integer(member_indices.first_offset as i64),
+            );
             dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
             dict.insert("Length", PdfObject::Integer(payload.len() as i64));
             out.extend_from_slice(format!("{} 0 obj\n", plan.number).as_bytes());
@@ -495,18 +497,16 @@ impl PdfWriter {
         let xref_offset = out.len();
         entries.push((
             xref_stream_number,
-            XrefEntryOut::Uncompressed { offset: xref_offset },
+            XrefEntryOut::Uncompressed {
+                offset: xref_offset,
+            },
         ));
         // Object 0 is the free-list head (type 0).
         entries.push((0, XrefEntryOut::Free));
 
         let xref_dict_extra = self.build_trailer_dict(size, None);
-        let xref_bytes = build_xref_stream(
-            xref_stream_number,
-            size,
-            &mut entries,
-            &xref_dict_extra,
-        )?;
+        let xref_bytes =
+            build_xref_stream(xref_stream_number, size, &mut entries, &xref_dict_extra)?;
         out.extend_from_slice(&xref_bytes);
 
         out.extend_from_slice(b"\nstartxref\n");
@@ -716,6 +716,16 @@ fn build_xref_stream(
     entries: &mut [(u32, XrefEntryOut)],
     dict_keys: &PdfDictionary,
 ) -> Result<Vec<u8>> {
+    build_xref_stream_with_index(xref_number, size, entries, dict_keys, None)
+}
+
+fn build_xref_stream_with_index(
+    xref_number: u32,
+    size: usize,
+    entries: &mut [(u32, XrefEntryOut)],
+    dict_keys: &PdfDictionary,
+    index_ranges: Option<Vec<(u32, u32)>>,
+) -> Result<Vec<u8>> {
     entries.sort_by_key(|(n, _)| *n);
 
     // Choose field widths. W[0] = type (1 byte is plenty: types 0/1/2).
@@ -738,31 +748,35 @@ fn build_xref_stream(
     let w1 = byte_width(max_f1).max(1);
     let w2 = byte_width(max_f2).max(1);
 
-    // Build the binary payload: every object number 0..size, in order. The
-    // entries cover a contiguous 0..size range (the renumbering layer produces
-    // contiguous numbers and we added object 0 + the xref object), so a single
-    // /Index [0 size] range is correct. Any gap is emitted as a free entry.
+    let index_ranges = index_ranges.unwrap_or_else(|| vec![(0, size as u32)]);
+
+    // Build the binary payload for the requested /Index ranges. Any gap inside
+    // a range is emitted as a free entry.
     let mut by_number: std::collections::HashMap<u32, XrefEntryOut> =
         std::collections::HashMap::with_capacity(entries.len());
     for (n, e) in entries.iter() {
         by_number.insert(*n, *e);
     }
-    let mut payload = Vec::with_capacity(size * (w0 + w1 + w2));
-    for n in 0..size as u32 {
-        let entry = by_number.get(&n).copied().unwrap_or(XrefEntryOut::Free);
-        let (t, f1, f2): (u64, u64, u64) = match entry {
-            XrefEntryOut::Free => (0, 0, 0),
-            XrefEntryOut::Uncompressed { offset } => (1, offset as u64, 0),
-            XrefEntryOut::Compressed { objstm, index } => (2, objstm as u64, index as u64),
-        };
-        write_be_field(&mut payload, t, w0);
-        write_be_field(&mut payload, f1, w1);
-        write_be_field(&mut payload, f2, w2);
+    let entry_count: usize = index_ranges.iter().map(|(_, count)| *count as usize).sum();
+    let mut payload = Vec::with_capacity(entry_count * (w0 + w1 + w2));
+    for (start, count) in &index_ranges {
+        for n in *start..start.saturating_add(*count) {
+            let entry = by_number.get(&n).copied().unwrap_or(XrefEntryOut::Free);
+            let (t, f1, f2): (u64, u64, u64) = match entry {
+                XrefEntryOut::Free => (0, 0, 0),
+                XrefEntryOut::Uncompressed { offset } => (1, offset as u64, 0),
+                XrefEntryOut::Compressed { objstm, index } => (2, objstm as u64, index as u64),
+            };
+            write_be_field(&mut payload, t, w0);
+            write_be_field(&mut payload, f1, w1);
+            write_be_field(&mut payload, f2, w2);
+        }
     }
 
     let compressed = crate::filters::flate_encode(&payload, 9);
 
     let mut dict = dict_keys.clone();
+    dict.insert("Size", PdfObject::Integer(size as i64));
     dict.insert("Type", PdfObject::Name("XRef".to_string()));
     dict.insert(
         "W",
@@ -774,15 +788,12 @@ fn build_xref_stream(
     );
     dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
     dict.insert("Length", PdfObject::Integer(compressed.len() as i64));
-    // /Index defaults to [0 Size] which matches our contiguous coverage; emit
-    // it explicitly for clarity and to satisfy strict readers.
-    dict.insert(
-        "Index",
-        PdfObject::Array(vec![
-            PdfObject::Integer(0),
-            PdfObject::Integer(size as i64),
-        ]),
-    );
+    let mut index_array = Vec::with_capacity(index_ranges.len() * 2);
+    for (start, count) in &index_ranges {
+        index_array.push(PdfObject::Integer(*start as i64));
+        index_array.push(PdfObject::Integer(*count as i64));
+    }
+    dict.insert("Index", PdfObject::Array(index_array));
 
     let mut out = Vec::new();
     out.extend_from_slice(format!("{xref_number} 0 obj\n").as_bytes());
@@ -1487,6 +1498,962 @@ pub fn rewrite_document_objects(
     Ok((objects, new_root, info_number))
 }
 
+/// Write a linearized (Fast Web View) PDF using PDF 1.5 cross-reference
+/// streams. The content-preserving object copy is the same base used by the
+/// other structural operations; this layer changes object ordering, writes the
+/// linearization parameter dictionary, emits page/shared-object hint tables,
+/// and iterates until the offset-bearing structures are stable.
+pub fn write_document_linearized(doc: &PdfDocument) -> Result<Vec<u8>> {
+    let reader = doc.reader();
+    let pages = doc.get_pages()?;
+    if pages.is_empty() {
+        return Err(OxideError::MalformedPdf(
+            "linearize: document has no pages".to_string(),
+        ));
+    }
+    ensure_linearization_supported(doc, &pages)?;
+
+    let remap = build_identity_remap(reader);
+    let page_by_source: HashMap<u32, crate::document::PdfPage> = pages
+        .iter()
+        .cloned()
+        .map(|page| (page.object_number, page))
+        .collect();
+    let mut normalize_pages = |orig: u32, object: &mut PdfObject| {
+        let PdfObject::Dictionary(dict) = object else {
+            return;
+        };
+        if dict.get_name("Type") == Some("Catalog") {
+            dict.remove("Outlines");
+            dict.remove("OpenAction");
+            dict.remove("Dests");
+            dict.remove("Names");
+            dict.remove("PageMode");
+        }
+        if dict.get_name("Type") == Some("Pages") {
+            dict.remove("MediaBox");
+            dict.remove("CropBox");
+            dict.remove("Rotate");
+            dict.remove("Resources");
+            return;
+        }
+        let Some(page) = page_by_source.get(&orig) else {
+            return;
+        };
+        if dict.get_name("Type") != Some("Page") {
+            return;
+        }
+        dict.insert("MediaBox", box_array(page.media_box));
+        if page.crop_box != page.media_box {
+            dict.insert("CropBox", box_array(page.crop_box));
+        } else {
+            dict.remove("CropBox");
+        }
+        if page.rotate != 0 {
+            dict.insert("Rotate", PdfObject::Integer(page.rotate as i64));
+        } else {
+            dict.remove("Rotate");
+        }
+        let resources = rewrite_references(PdfObject::Dictionary(page.resources.clone()), &remap);
+        dict.insert("Resources", resources);
+    };
+    let (mut objects, new_root, info_number) =
+        rewrite_document_objects(reader, &mut normalize_pages)?;
+    retain_reachable_linearized_objects(&mut objects, new_root, info_number);
+    let object_map: HashMap<u32, PdfObject> = objects
+        .iter()
+        .map(|obj| (obj.number, obj.object.clone()))
+        .collect();
+
+    let page_groups = analyze_linearized_page_groups(&pages, &object_map, &remap, new_root)?;
+    let layout = LinearizedObjectLayout::new(&objects, new_root, &page_groups);
+
+    let max_regular = objects.iter().map(|obj| obj.number).max().unwrap_or(0);
+    let linearization_number = max_regular + 1;
+    let front_xref_number = max_regular + 2;
+    let hint_number = max_regular + 3;
+    let main_xref_number = max_regular + 4;
+    let max_number = main_xref_number;
+
+    let version = if version_lt_1_5(reader.version()) {
+        "1.5".to_string()
+    } else {
+        reader.version().to_string()
+    };
+    let header = pdf_header(&version);
+    let placeholder_params = LinearizationParams {
+        file_length: 0,
+        hint_offset: 0,
+        hint_length: 0,
+        first_page_object: page_groups[0].objects[0],
+        first_page_end: 0,
+        page_count: pages.len(),
+        main_xref_offset: 0,
+    };
+    let linearization_placeholder =
+        build_linearization_dictionary(linearization_number, &placeholder_params);
+    let front_xref_offset = header.len() + linearization_placeholder.len();
+
+    let mut state = LinearizedBuildState {
+        front_xref_len: 256,
+        hint_len: 128,
+    };
+
+    for _ in 0..30 {
+        let positions = compute_linearized_positions(&layout, &state, front_xref_offset);
+        let hint_bytes = build_hint_stream(hint_number, &page_groups, &positions)?;
+
+        let mut front_entries = positions.front_xref_entries.clone();
+        front_entries.push((
+            linearization_number,
+            XrefEntryOut::Uncompressed {
+                offset: header.len(),
+            },
+        ));
+        front_entries.push((
+            front_xref_number,
+            XrefEntryOut::Uncompressed {
+                offset: front_xref_offset,
+            },
+        ));
+        front_entries.push((
+            hint_number,
+            XrefEntryOut::Uncompressed {
+                offset: positions.hint_offset,
+            },
+        ));
+
+        let mut front_dict = trailer_id_dict(reader.first_file_id());
+        front_dict.insert(
+            "Root",
+            PdfObject::Reference {
+                number: new_root,
+                generation: 0,
+            },
+        );
+        if let Some(info) = info_number {
+            front_dict.insert(
+                "Info",
+                PdfObject::Reference {
+                    number: info,
+                    generation: 0,
+                },
+            );
+        }
+        front_dict.insert(
+            "Prev",
+            PdfObject::Integer(positions.main_xref_offset as i64),
+        );
+        let front_index = xref_index_ranges(front_entries.iter().map(|(n, _)| *n));
+        let front_xref_bytes = build_xref_stream_with_index(
+            front_xref_number,
+            max_number as usize + 1,
+            &mut front_entries,
+            &front_dict,
+            Some(front_index),
+        )?;
+
+        let mut main_entries = vec![
+            (0, XrefEntryOut::Free),
+            (
+                main_xref_number,
+                XrefEntryOut::Uncompressed {
+                    offset: positions.main_xref_offset,
+                },
+            ),
+        ];
+        let main_index = xref_index_ranges(main_entries.iter().map(|(n, _)| *n));
+        let main_dict = trailer_id_dict(reader.first_file_id());
+        let main_xref_bytes = build_xref_stream_with_index(
+            main_xref_number,
+            max_number as usize + 1,
+            &mut main_entries,
+            &main_dict,
+            Some(main_index),
+        )?;
+
+        if front_xref_bytes.len() > state.front_xref_len || hint_bytes.len() > state.hint_len {
+            state.front_xref_len = state.front_xref_len.max(front_xref_bytes.len() + 64);
+            state.hint_len = state.hint_len.max(hint_bytes.len() + 64);
+            continue;
+        }
+
+        let startxref = build_startxref(front_xref_offset);
+        let file_length = positions.main_xref_offset + main_xref_bytes.len() + startxref.len();
+        let params = LinearizationParams {
+            file_length,
+            hint_offset: positions.hint_offset,
+            hint_length: state.hint_len,
+            first_page_object: page_groups[0].objects[0],
+            first_page_end: positions.first_page_end,
+            page_count: pages.len(),
+            main_xref_offset: positions.main_xref_offset,
+        };
+        let linearization_dict = build_linearization_dictionary(linearization_number, &params);
+        debug_assert_eq!(linearization_dict.len(), linearization_placeholder.len());
+
+        let output = assemble_linearized_output(LinearizedOutputParts {
+            header: &header,
+            linearization_dict: &linearization_dict,
+            front_xref: &front_xref_bytes,
+            front_xref_reserved_len: state.front_xref_len,
+            layout: &layout,
+            positions: &positions,
+            hint: &hint_bytes,
+            hint_reserved_len: state.hint_len,
+            main_xref: &main_xref_bytes,
+            startxref: &startxref,
+        });
+
+        return Ok(output);
+    }
+
+    Err(OxideError::UnsupportedFeature(
+        "linearize: offset layout did not stabilize".to_string(),
+    ))
+}
+
+fn ensure_linearization_supported(
+    doc: &PdfDocument,
+    pages: &[crate::document::PdfPage],
+) -> Result<()> {
+    if pages.len() != 1 {
+        return Err(OxideError::UnsupportedFeature(
+            "linearize: qpdf-valid output is currently implemented for simple single-page PDFs; multi-page page/shared-object hint refinement remains deferred".to_string(),
+        ));
+    }
+    let catalog = doc.get_catalog()?;
+    for key in [
+        "AcroForm",
+        "Outlines",
+        "OpenAction",
+        "Names",
+        "Dests",
+        "StructTreeRoot",
+        "PageLabels",
+    ] {
+        if catalog.contains_key(key) {
+            return Err(OxideError::UnsupportedFeature(format!(
+                "linearize: qpdf-valid output for documents with /{key} is still deferred"
+            )));
+        }
+    }
+    let reader = doc.reader();
+    for page in pages {
+        let page_obj = reader.get_object(page.object_number, page.generation_number)?;
+        if let Some(dict) = page_obj.as_dict() {
+            if dict.contains_key("Annots") {
+                return Err(OxideError::UnsupportedFeature(
+                    "linearize: qpdf-valid output for annotated/form pages is still deferred"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_identity_remap(reader: &PdfReader) -> HashMap<u32, u32> {
+    let mut remap = HashMap::new();
+    let mut next = 1u32;
+    for (number, _) in reader.object_ids() {
+        remap.entry(number).or_insert_with(|| {
+            let new = next;
+            next += 1;
+            new
+        });
+    }
+    remap
+}
+
+fn retain_reachable_linearized_objects(
+    objects: &mut Vec<OutputObject>,
+    root: u32,
+    info: Option<u32>,
+) {
+    let object_map: HashMap<u32, PdfObject> = objects
+        .iter()
+        .map(|obj| (obj.number, obj.object.clone()))
+        .collect();
+    let mut reachable = BTreeSet::new();
+    let mut stack = vec![root];
+    if let Some(info) = info {
+        stack.push(info);
+    }
+    while let Some(number) = stack.pop() {
+        if !reachable.insert(number) {
+            continue;
+        }
+        let Some(object) = object_map.get(&number) else {
+            continue;
+        };
+        let mut refs = Vec::new();
+        collect_references(object, &mut refs);
+        for reference in refs {
+            if !reachable.contains(&reference) {
+                stack.push(reference);
+            }
+        }
+    }
+    objects.retain(|obj| reachable.contains(&obj.number));
+}
+
+#[derive(Debug, Clone)]
+struct LinearizedPageGroup {
+    objects: Vec<u32>,
+    shared_identifiers: Vec<usize>,
+}
+
+fn analyze_linearized_page_groups(
+    pages: &[crate::document::PdfPage],
+    object_map: &HashMap<u32, PdfObject>,
+    remap: &HashMap<u32, u32>,
+    _new_root: u32,
+) -> Result<Vec<LinearizedPageGroup>> {
+    let mut closures: Vec<BTreeSet<u32>> = Vec::with_capacity(pages.len());
+    for page in pages {
+        let page_number = remap.get(&page.object_number).copied().ok_or_else(|| {
+            OxideError::MalformedPdf(format!(
+                "linearize: page object {} was not copied",
+                page.object_number
+            ))
+        })?;
+        let mut roots = BTreeSet::new();
+        roots.insert(page_number);
+
+        if let Some(page_obj) = object_map.get(&page_number) {
+            collect_page_local_references(page_obj, &mut roots);
+        }
+
+        let rewritten_resources =
+            rewrite_references(PdfObject::Dictionary(page.resources.clone()), remap);
+        collect_references_into_set(&rewritten_resources, &mut roots);
+
+        for (content, _) in &page.contents {
+            if let Some(&new_content) = remap.get(content) {
+                roots.insert(new_content);
+            }
+        }
+
+        let mut closure = dependency_closure_for_linearization(&roots, object_map);
+        closure.insert(page_number);
+        closures.push(closure);
+    }
+
+    let first_page_number = remap[&pages[0].object_number];
+    let first_group = closures[0].clone();
+
+    let first_objects = ordered_group_with_first(first_page_number, &first_group);
+    let first_index: HashMap<u32, usize> = first_objects
+        .iter()
+        .enumerate()
+        .map(|(idx, &number)| (number, idx))
+        .collect();
+
+    let mut emitted: BTreeSet<u32> = first_objects.iter().copied().collect();
+    let mut groups = Vec::with_capacity(pages.len());
+    groups.push(LinearizedPageGroup {
+        objects: first_objects,
+        shared_identifiers: Vec::new(),
+    });
+
+    for (idx, page) in pages.iter().enumerate().skip(1) {
+        let page_number = remap[&page.object_number];
+        let mut shared_identifiers: Vec<usize> = closures[idx]
+            .iter()
+            .filter_map(|number| first_index.get(number).copied())
+            .collect();
+        shared_identifiers.sort_unstable();
+        shared_identifiers.dedup();
+
+        let mut owned: BTreeSet<u32> = closures[idx]
+            .iter()
+            .copied()
+            .filter(|number| !emitted.contains(number))
+            .filter(|number| !first_index.contains_key(number))
+            .collect();
+        owned.insert(page_number);
+        let objects = ordered_group_with_first(page_number, &owned);
+        emitted.extend(objects.iter().copied());
+
+        groups.push(LinearizedPageGroup {
+            objects,
+            shared_identifiers,
+        });
+    }
+
+    Ok(groups)
+}
+
+fn collect_page_local_references(object: &PdfObject, out: &mut BTreeSet<u32>) {
+    match object {
+        PdfObject::Dictionary(dict) => {
+            let is_page = dict.get_name("Type") == Some("Page");
+            let is_pages = dict.get_name("Type") == Some("Pages");
+            if is_page {
+                for key in ["Contents", "Resources", "Group"] {
+                    if let Some(value) = dict.get(key) {
+                        collect_references_into_set(value, out);
+                    }
+                }
+                return;
+            }
+            for (key, value) in dict.iter() {
+                if is_pages && (key == "Parent" || key == "Kids") {
+                    continue;
+                }
+                collect_references_into_set(value, out);
+            }
+        }
+        other => collect_references_into_set(other, out),
+    }
+}
+
+fn dependency_closure_for_linearization(
+    roots: &BTreeSet<u32>,
+    object_map: &HashMap<u32, PdfObject>,
+) -> BTreeSet<u32> {
+    let mut closure = BTreeSet::new();
+    let mut stack: Vec<u32> = roots.iter().copied().collect();
+    while let Some(number) = stack.pop() {
+        if !closure.insert(number) {
+            continue;
+        }
+        let Some(object) = object_map.get(&number) else {
+            continue;
+        };
+        let mut refs = BTreeSet::new();
+        collect_page_local_references(object, &mut refs);
+        for reference in refs {
+            if !closure.contains(&reference) {
+                stack.push(reference);
+            }
+        }
+    }
+    closure
+}
+
+fn collect_references_into_set(object: &PdfObject, out: &mut BTreeSet<u32>) {
+    let mut refs = Vec::new();
+    collect_references(object, &mut refs);
+    out.extend(refs);
+}
+
+fn ordered_group_with_first(first: u32, group: &BTreeSet<u32>) -> Vec<u32> {
+    let mut out = Vec::with_capacity(group.len());
+    if group.contains(&first) {
+        out.push(first);
+    }
+    out.extend(group.iter().copied().filter(|&number| number != first));
+    out
+}
+
+struct LinearizedObjectLayout {
+    opening_objects: Vec<u32>,
+    page_groups: Vec<Vec<u32>>,
+    leftovers: Vec<u32>,
+    object_bytes: HashMap<u32, Vec<u8>>,
+}
+
+impl LinearizedObjectLayout {
+    fn new(objects: &[OutputObject], new_root: u32, page_groups: &[LinearizedPageGroup]) -> Self {
+        let mut object_bytes = HashMap::new();
+        for object in objects {
+            object_bytes.insert(
+                object.number,
+                indirect_object_bytes(object.number, &object.object),
+            );
+        }
+
+        let mut assigned = BTreeSet::new();
+        let opening_objects = if object_bytes.contains_key(&new_root) {
+            assigned.insert(new_root);
+            vec![new_root]
+        } else {
+            Vec::new()
+        };
+
+        let mut page_group_numbers = Vec::with_capacity(page_groups.len());
+        for group in page_groups {
+            let mut numbers = Vec::new();
+            for &number in &group.objects {
+                if assigned.insert(number) {
+                    numbers.push(number);
+                }
+            }
+            page_group_numbers.push(numbers);
+        }
+
+        let leftovers = objects
+            .iter()
+            .map(|object| object.number)
+            .filter(|number| !assigned.contains(number))
+            .collect();
+
+        Self {
+            opening_objects,
+            page_groups: page_group_numbers,
+            leftovers,
+            object_bytes,
+        }
+    }
+
+    fn object_len(&self, number: u32) -> usize {
+        self.object_bytes
+            .get(&number)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinearizedBuildState {
+    front_xref_len: usize,
+    hint_len: usize,
+}
+
+struct LinearizedPositions {
+    opening_offsets: Vec<(u32, usize)>,
+    hint_offset: usize,
+    page_offsets: Vec<Vec<(u32, usize)>>,
+    page_lengths: Vec<usize>,
+    first_page_end: usize,
+    leftover_offsets: Vec<(u32, usize)>,
+    main_xref_offset: usize,
+    front_xref_entries: Vec<(u32, XrefEntryOut)>,
+}
+
+fn compute_linearized_positions(
+    layout: &LinearizedObjectLayout,
+    state: &LinearizedBuildState,
+    front_xref_offset: usize,
+) -> LinearizedPositions {
+    let mut pos = front_xref_offset + state.front_xref_len;
+
+    let mut opening_offsets = Vec::with_capacity(layout.opening_objects.len());
+    for &number in &layout.opening_objects {
+        opening_offsets.push((number, pos));
+        pos += layout.object_len(number);
+    }
+
+    let hint_offset = pos;
+    pos += state.hint_len;
+
+    let mut page_offsets = Vec::with_capacity(layout.page_groups.len());
+    let mut page_lengths = Vec::with_capacity(layout.page_groups.len());
+    let mut first_page_end = pos;
+    for (idx, group) in layout.page_groups.iter().enumerate() {
+        let start = pos;
+        let mut offsets = Vec::with_capacity(group.len());
+        for &number in group {
+            offsets.push((number, pos));
+            pos += layout.object_len(number);
+        }
+        if idx == 0 {
+            first_page_end = pos;
+        }
+        page_lengths.push(pos - start);
+        page_offsets.push(offsets);
+    }
+
+    let mut leftover_offsets = Vec::with_capacity(layout.leftovers.len());
+    for &number in &layout.leftovers {
+        leftover_offsets.push((number, pos));
+        pos += layout.object_len(number);
+    }
+
+    let main_xref_offset = pos;
+    let mut front_xref_entries = Vec::new();
+    for (number, offset) in opening_offsets
+        .iter()
+        .chain(page_offsets.iter().flatten())
+        .chain(leftover_offsets.iter())
+    {
+        front_xref_entries.push((*number, XrefEntryOut::Uncompressed { offset: *offset }));
+    }
+
+    LinearizedPositions {
+        opening_offsets,
+        hint_offset,
+        page_offsets,
+        page_lengths,
+        first_page_end,
+        leftover_offsets,
+        main_xref_offset,
+        front_xref_entries,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LinearizationParams {
+    file_length: usize,
+    hint_offset: usize,
+    hint_length: usize,
+    first_page_object: u32,
+    first_page_end: usize,
+    page_count: usize,
+    main_xref_offset: usize,
+}
+
+fn build_linearization_dictionary(number: u32, params: &LinearizationParams) -> Vec<u8> {
+    format!(
+        "{number} 0 obj\n<< /Linearized 1 /L {file_length:>20} /H [ {hint_offset:>20} {hint_length:>20} ] /O {first_page_object:>20} /E {first_page_end:>20} /N {page_count:>20} /T {main_xref_offset:>20} >>\nendobj\n",
+        file_length = params.file_length,
+        hint_offset = params.hint_offset,
+        hint_length = params.hint_length,
+        first_page_object = params.first_page_object,
+        first_page_end = params.first_page_end,
+        page_count = params.page_count,
+        main_xref_offset = params.main_xref_offset,
+    )
+    .into_bytes()
+}
+
+fn build_hint_stream(
+    number: u32,
+    page_groups: &[LinearizedPageGroup],
+    positions: &LinearizedPositions,
+) -> Result<Vec<u8>> {
+    let raw = build_hint_stream_data(page_groups, positions)?;
+    let shared_offset = raw.shared_table_offset;
+    let compressed = crate::filters::flate_encode(&raw.bytes, 9);
+
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Filter", PdfObject::Name("FlateDecode".to_string()));
+    dict.insert("S", PdfObject::Integer(shared_offset as i64));
+    dict.insert("Length", PdfObject::Integer(compressed.len() as i64));
+
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+    serialize_dictionary(&dict, &mut out);
+    out.extend_from_slice(b"\nstream\n");
+    out.extend_from_slice(&compressed);
+    out.extend_from_slice(b"\nendstream\nendobj\n");
+    Ok(out)
+}
+
+struct HintStreamData {
+    bytes: Vec<u8>,
+    shared_table_offset: usize,
+}
+
+fn build_hint_stream_data(
+    page_groups: &[LinearizedPageGroup],
+    positions: &LinearizedPositions,
+) -> Result<HintStreamData> {
+    let page_object_counts: Vec<usize> = page_groups.iter().map(|g| g.objects.len()).collect();
+    let page_lengths = &positions.page_lengths;
+    let shared_counts: Vec<usize> = page_groups
+        .iter()
+        .map(|g| g.shared_identifiers.len())
+        .collect();
+
+    let min_objects = *page_object_counts.iter().min().unwrap_or(&0);
+    let max_objects_delta = page_object_counts
+        .iter()
+        .map(|count| count - min_objects)
+        .max()
+        .unwrap_or(0);
+    let min_page_length = *page_lengths.iter().min().unwrap_or(&0);
+    let max_page_length_delta = page_lengths
+        .iter()
+        .map(|length| length - min_page_length)
+        .max()
+        .unwrap_or(0);
+    let min_content_offset = 0usize;
+    let min_content_length = min_page_length;
+    let max_content_length_delta = max_page_length_delta;
+    let max_shared_count = *shared_counts.iter().max().unwrap_or(&0);
+    let max_shared_identifier = page_groups
+        .iter()
+        .flat_map(|group| group.shared_identifiers.iter().copied())
+        .max()
+        .unwrap_or(0);
+
+    let nbits_objects = bits_required(max_objects_delta as u64);
+    let nbits_page_length = bits_required(max_page_length_delta as u64);
+    let nbits_content_offset = 0usize;
+    let nbits_content_length = bits_required(max_content_length_delta as u64);
+    let nbits_shared_count = bits_required(max_shared_count as u64);
+    let nbits_shared_identifier = bits_required(max_shared_identifier as u64).max(1);
+    let nbits_shared_numerator = 0usize;
+    let shared_denominator = 4usize;
+
+    let mut page_table = Vec::new();
+    write_u32(&mut page_table, min_objects)?;
+    write_u32(&mut page_table, positions.hint_offset)?;
+    write_u16(&mut page_table, nbits_objects)?;
+    write_u32(&mut page_table, min_page_length)?;
+    write_u16(&mut page_table, nbits_page_length)?;
+    write_u32(&mut page_table, min_content_offset)?;
+    write_u16(&mut page_table, nbits_content_offset)?;
+    write_u32(&mut page_table, min_content_length)?;
+    write_u16(&mut page_table, nbits_content_length)?;
+    write_u16(&mut page_table, nbits_shared_count)?;
+    write_u16(&mut page_table, nbits_shared_identifier)?;
+    write_u16(&mut page_table, nbits_shared_numerator)?;
+    write_u16(&mut page_table, shared_denominator)?;
+
+    let mut page_bits = BitWriter::new();
+    for count in &page_object_counts {
+        page_bits.write(*count - min_objects, nbits_objects);
+    }
+    page_bits.align_byte();
+    for length in page_lengths {
+        page_bits.write(*length - min_page_length, nbits_page_length);
+    }
+    page_bits.align_byte();
+    for group in page_groups {
+        page_bits.write(group.shared_identifiers.len(), nbits_shared_count);
+    }
+    page_bits.align_byte();
+    for group in page_groups {
+        for &identifier in &group.shared_identifiers {
+            page_bits.write(identifier, nbits_shared_identifier);
+            page_bits.write(0, nbits_shared_numerator);
+        }
+    }
+    page_bits.align_byte();
+    for _ in page_groups {
+        page_bits.write(0, nbits_content_offset);
+    }
+    page_bits.align_byte();
+    for length in page_lengths {
+        page_bits.write(*length - min_content_length, nbits_content_length);
+    }
+    page_bits.align_byte();
+    page_table.extend_from_slice(&page_bits.finish());
+
+    let shared_table_offset = page_table.len();
+    let first_page_groups = &page_groups[0].objects;
+    let shared_lengths: Vec<usize> = positions
+        .page_offsets
+        .first()
+        .into_iter()
+        .flatten()
+        .map(|(number, _)| {
+            let idx = first_page_groups
+                .iter()
+                .position(|candidate| candidate == number)
+                .unwrap_or(0);
+            let start = positions.page_offsets[0][idx].1;
+            let end = if idx + 1 < positions.page_offsets[0].len() {
+                positions.page_offsets[0][idx + 1].1
+            } else {
+                positions.first_page_end
+            };
+            end - start
+        })
+        .collect();
+
+    let min_group_length = *shared_lengths.iter().min().unwrap_or(&0);
+    let max_group_delta = shared_lengths
+        .iter()
+        .map(|length| length - min_group_length)
+        .max()
+        .unwrap_or(0);
+    let nbits_group_length = bits_required(max_group_delta as u64);
+
+    let mut bytes = page_table;
+    write_u32(&mut bytes, 0)?;
+    write_u32(&mut bytes, 0)?;
+    write_u32(&mut bytes, first_page_groups.len())?;
+    write_u32(&mut bytes, first_page_groups.len())?;
+    write_u16(&mut bytes, 0)?;
+    write_u32(&mut bytes, min_group_length)?;
+    write_u16(&mut bytes, nbits_group_length)?;
+
+    let mut shared_bits = BitWriter::new();
+    for length in shared_lengths {
+        shared_bits.write(length - min_group_length, nbits_group_length);
+    }
+    shared_bits.align_byte();
+    for _ in first_page_groups {
+        shared_bits.write(0, 1);
+    }
+    shared_bits.align_byte();
+    bytes.extend_from_slice(&shared_bits.finish());
+    while (bytes.len() - shared_table_offset) % 4 != 0 {
+        bytes.push(0);
+    }
+
+    Ok(HintStreamData {
+        bytes,
+        shared_table_offset,
+    })
+}
+
+fn indirect_object_bytes(number: u32, object: &PdfObject) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+    serialize_object(object, &mut out);
+    out.extend_from_slice(b"\nendobj\n");
+    out
+}
+
+struct LinearizedOutputParts<'a> {
+    header: &'a [u8],
+    linearization_dict: &'a [u8],
+    front_xref: &'a [u8],
+    front_xref_reserved_len: usize,
+    layout: &'a LinearizedObjectLayout,
+    positions: &'a LinearizedPositions,
+    hint: &'a [u8],
+    hint_reserved_len: usize,
+    main_xref: &'a [u8],
+    startxref: &'a [u8],
+}
+
+fn assemble_linearized_output(parts: LinearizedOutputParts<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(parts.header);
+    out.extend_from_slice(parts.linearization_dict);
+    out.extend_from_slice(parts.front_xref);
+    out.extend(std::iter::repeat_n(
+        b' ',
+        parts.front_xref_reserved_len - parts.front_xref.len(),
+    ));
+
+    for (number, _) in &parts.positions.opening_offsets {
+        out.extend_from_slice(&parts.layout.object_bytes[number]);
+    }
+    out.extend_from_slice(parts.hint);
+    out.extend(std::iter::repeat_n(
+        b' ',
+        parts.hint_reserved_len - parts.hint.len(),
+    ));
+    for group in &parts.positions.page_offsets {
+        for (number, _) in group {
+            out.extend_from_slice(&parts.layout.object_bytes[number]);
+        }
+    }
+    for (number, _) in &parts.positions.leftover_offsets {
+        out.extend_from_slice(&parts.layout.object_bytes[number]);
+    }
+    out.extend_from_slice(parts.main_xref);
+    out.extend_from_slice(parts.startxref);
+    out
+}
+
+fn trailer_id_dict(id: Option<Vec<u8>>) -> PdfDictionary {
+    let mut dict = PdfDictionary::empty();
+    if let Some(id) = id {
+        dict.insert(
+            "ID",
+            PdfObject::Array(vec![PdfObject::String(id.clone()), PdfObject::String(id)]),
+        );
+    }
+    dict
+}
+
+fn xref_index_ranges(numbers: impl Iterator<Item = u32>) -> Vec<(u32, u32)> {
+    let mut numbers: Vec<u32> = numbers.collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+
+    let mut ranges = Vec::new();
+    let mut iter = numbers.into_iter();
+    let Some(mut start) = iter.next() else {
+        return ranges;
+    };
+    let mut last = start;
+    for number in iter {
+        if number == last + 1 {
+            last = number;
+        } else {
+            ranges.push((start, last - start + 1));
+            start = number;
+            last = number;
+        }
+    }
+    ranges.push((start, last - start + 1));
+    ranges
+}
+
+fn pdf_header(version: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("%PDF-{version}\n").as_bytes());
+    out.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
+    out
+}
+
+fn build_startxref(offset: usize) -> Vec<u8> {
+    format!("\nstartxref\n{offset}\n%%EOF\n").into_bytes()
+}
+
+fn write_u32(out: &mut Vec<u8>, value: usize) -> Result<()> {
+    let value = u32::try_from(value)
+        .map_err(|_| OxideError::UnsupportedFeature("linearize: hint value exceeds u32".into()))?;
+    out.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn write_u16(out: &mut Vec<u8>, value: usize) -> Result<()> {
+    let value = u16::try_from(value).map_err(|_| {
+        OxideError::UnsupportedFeature("linearize: hint bit width exceeds u16".into())
+    })?;
+    out.extend_from_slice(&value.to_be_bytes());
+    Ok(())
+}
+
+fn bits_required(value: u64) -> usize {
+    if value == 0 {
+        0
+    } else {
+        (64 - value.leading_zeros() as usize).max(1)
+    }
+}
+
+struct BitWriter {
+    bytes: Vec<u8>,
+    current: u8,
+    used: u8,
+}
+
+impl BitWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            current: 0,
+            used: 0,
+        }
+    }
+
+    fn write(&mut self, value: usize, width: usize) {
+        if width == 0 {
+            return;
+        }
+        for shift in (0..width).rev() {
+            let bit = ((value >> shift) & 1) as u8;
+            self.current = (self.current << 1) | bit;
+            self.used += 1;
+            if self.used == 8 {
+                self.bytes.push(self.current);
+                self.current = 0;
+                self.used = 0;
+            }
+        }
+    }
+
+    fn align_byte(&mut self) {
+        if self.used == 0 {
+            return;
+        }
+        self.current <<= 8 - self.used;
+        self.bytes.push(self.current);
+        self.current = 0;
+        self.used = 0;
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.used > 0 {
+            self.current <<= 8 - self.used;
+            self.bytes.push(self.current);
+        }
+        self.bytes
+    }
+}
+
 fn box_array(values: [f64; 4]) -> PdfObject {
     PdfObject::Array(values.iter().map(|&v| number_object(v)).collect())
 }
@@ -1555,7 +2522,10 @@ mod tests {
             crate::reader::parse_object_stream_data(&decoded, 2, off.first_offset, None).unwrap();
         assert_eq!(parsed.len(), 2);
         assert!(matches!(parsed.get(&5), Some((0, PdfObject::Integer(42)))));
-        assert!(matches!(parsed.get(&7), Some((1, PdfObject::Boolean(true)))));
+        assert!(matches!(
+            parsed.get(&7),
+            Some((1, PdfObject::Boolean(true)))
+        ));
     }
 
     #[test]
@@ -1600,7 +2570,13 @@ mod tests {
         let mut entries = vec![
             (0u32, XrefEntryOut::Free),
             (1u32, XrefEntryOut::Uncompressed { offset: 17 }),
-            (2u32, XrefEntryOut::Compressed { objstm: 1, index: 3 }),
+            (
+                2u32,
+                XrefEntryOut::Compressed {
+                    objstm: 1,
+                    index: 3,
+                },
+            ),
         ];
         let obj_text = build_xref_stream(3, 3, &mut entries, &PdfDictionary::empty()).unwrap();
         let s = String::from_utf8_lossy(&obj_text);

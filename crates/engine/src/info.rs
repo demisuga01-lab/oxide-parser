@@ -231,17 +231,11 @@ fn is_tagged(catalog: &PdfDictionary, reader: &crate::reader::PdfReader) -> bool
 /// key) as the very first object, right after the header. We scan the first
 /// chunk of the file for the `/Linearized` marker.
 fn detect_linearized(reader: &crate::reader::PdfReader) -> bool {
-    // The reader doesn't expose the raw bytes, but object 1 (if linearized) is
-    // the parameter dictionary. Probe the first few low-numbered objects for a
-    // dict carrying /Linearized.
-    for num in 1..=4u32 {
-        if let Ok(PdfObject::Dictionary(dict)) = reader.get_and_resolve(num, 0) {
-            if dict.contains_key("Linearized") {
-                return true;
-            }
-        }
-    }
-    false
+    let bytes = reader.file_bytes();
+    let prefix = &bytes[..bytes.len().min(1024)];
+    prefix
+        .windows(b"/Linearized".len())
+        .any(|window| window == b"/Linearized")
 }
 
 /// Collapse a page list into distinct `(width, height, rotation)` sizes,

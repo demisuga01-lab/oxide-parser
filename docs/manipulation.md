@@ -225,16 +225,27 @@ located at all (e.g. `startxref` past EOF, truncated files) currently fail to
 open and so can't be repaired — a from-scratch object scan + trailer synthesis
 is recorded as future work. Repaired output is unencrypted.
 
-### `oxide linearize` — still deferred (prerequisite now in place)
+### `oxide linearize`
 
-Linearization (fast web view) is **not yet implemented**, but its core
-prerequisite — cross-reference-stream + object-stream output — now **exists**
-(the modern writer above). What remains is the precise two-pass object/offset
-layout with hint streams (ISO 32000 Annex F): first-page objects first, a
-linearization parameter dictionary, and page-offset/shared-object hint streams.
-The command and `structural::linearize::linearize()` still return an explicit
-error with that diagnosis rather than emitting a non-linearized file. A
-follow-up prompt finishes it on top of the modern writer.
+Produces a qpdf-validated Fast Web View PDF for the proven subset: simple
+single-page documents without forms, annotations, outlines, destinations, named
+trees, page labels, or structure trees. The implementation builds on the modern
+cross-reference-stream writer and adds the linearization layer:
+
+- a fixed-width linearization parameter dictionary (`/Linearized`, `/L`, `/H`,
+  `/O`, `/E`, `/N`, `/T`) immediately after the PDF header;
+- a front cross-reference stream plus the main cross-reference stream chain;
+- page-offset and shared-object hint stream data encoded in the Annex-F order
+  qpdf validates;
+- dependency analysis that groups the page object and its render dependencies
+  at the front, with catalog/root objects retained before the first-page span;
+- iterative fixed-width/padded offset resolution so `/L`, `/H`, `/O`, `/E`, and
+  `/T` stabilize exactly.
+
+Inputs outside the validated subset return `UnsupportedFeature` and do not write
+an output file. Multi-page page/shared-object hint refinement, form/annotation
+closures, and object-stream packing inside linearized output remain follow-ups;
+the command will not emit a `/Linearized` file unless qpdf accepts it.
 
 ## Validation
 
@@ -258,10 +269,12 @@ The writer is validated three ways (see `crates/engine/tests/writer.rs`):
 
 ## Future enhancements
 
-- **Linearization** (fast web view) — deferred; needs xref/object-stream output
-  (see above).
-- **Object-stream / cross-reference-stream output** (PDF 1.5+) so `optimize`
-  shrinks object-heavy / already-packed files instead of growing them.
+- **Linearization broadening** (fast web view) — multi-page page/shared-object
+  hints, form/annotation closures, and object-stream packing in linearized
+  output. The current subset is qpdf-validated and guarded.
+- **Object-stream / cross-reference-stream output** (PDF 1.5+) for more
+  structural operations. `optimize` already uses this path so object-heavy /
+  already-packed files shrink instead of growing.
 - **Cross-reader-interoperable legacy (V4) encryption** — AES-256 is verified;
   the RC4/AES-128 V4 crypt-filter path needs a spec-conformance fix for qpdf/
   Poppler interop.
@@ -273,4 +286,5 @@ The writer is validated three ways (see `crates/engine/tests/writer.rs`):
   complete.
 
 Done this round (Bucket 2): `encrypt` (AES-256 verified), `rotate`, `optimize`
-(GC + recompression, visually safe), `repair` (persisted recovery).
+(GC + recompression, visually safe), `repair` (persisted recovery), and the
+guarded qpdf-valid linearization subset.

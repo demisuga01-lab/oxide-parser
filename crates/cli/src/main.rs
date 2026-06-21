@@ -104,7 +104,7 @@ enum Commands {
     Optimize(OptimizeArgs),
     /// Write a clean, normalized copy of a damaged PDF (qpdf --check passes)
     Repair(RepairArgs),
-    /// Produce a linearized (fast-web-view) PDF — NOT yet implemented (deferred)
+    /// Produce a linearized (fast-web-view) PDF
     Linearize(LinearizeArgs),
 }
 
@@ -193,7 +193,7 @@ struct RepairArgs {
 struct LinearizeArgs {
     /// Path to the input PDF
     pdf: PathBuf,
-    /// Output file (not written — linearization is deferred)
+    /// Output file
     #[arg(short, long, default_value = "linearized.pdf")]
     output: PathBuf,
     /// Password for encrypted PDFs
@@ -1029,19 +1029,19 @@ fn table_pages_to_html(pages: &[(usize, Vec<oxide_engine::analysis::tables::Tabl
 /// with the feature off, it returns an actionable error so a default
 /// (pure-Rust) CLI build still parses, just without OCR.
 #[cfg(feature = "ocr")]
-fn build_ocr_engine(
-) -> Result<std::sync::Arc<dyn oxide_engine::OcrEngine>, Box<dyn Error>> {
+fn build_ocr_engine() -> Result<std::sync::Arc<dyn oxide_engine::OcrEngine>, Box<dyn Error>> {
     let engine = oxide_ocr_tesseract::TesseractEngine::new()?;
     Ok(std::sync::Arc::new(engine))
 }
 
 #[cfg(not(feature = "ocr"))]
-fn build_ocr_engine(
-) -> Result<std::sync::Arc<dyn oxide_engine::OcrEngine>, Box<dyn Error>> {
-    Err("this build of oxide has no OCR backend; rebuild the CLI with \
+fn build_ocr_engine() -> Result<std::sync::Arc<dyn oxide_engine::OcrEngine>, Box<dyn Error>> {
+    Err(
+        "this build of oxide has no OCR backend; rebuild the CLI with \
          `--features ocr` (and install the `tesseract` binary + language data) \
          to use --ocr"
-        .into())
+            .into(),
+    )
 }
 
 /// Build [`oxide_engine::OcrOptions`] from the shared CLI `--ocr-lang`/`--ocr-dpi`
@@ -1176,10 +1176,9 @@ fn run_extract_fields(args: ExtractFieldsArgs) -> Result<(), Box<dyn Error>> {
 
     let doc_type = match args.r#type.to_lowercase().as_str() {
         "auto" => None,
-        other => Some(
-            DocType::parse(other)
-                .ok_or_else(|| format!("unknown --type '{other}'; use auto, invoice, receipt, form, or generic"))?,
-        ),
+        other => Some(DocType::parse(other).ok_or_else(|| {
+            format!("unknown --type '{other}'; use auto, invoice, receipt, form, or generic")
+        })?),
     };
 
     let engine = open_engine(&args.pdf, &args.password)?;
@@ -1234,7 +1233,11 @@ fn run_extract_fields(args: ExtractFieldsArgs) -> Result<(), Box<dyn Error>> {
             String::new()
         },
         result.doc_type,
-        if result.doc_type_forced { " (forced)" } else { " (auto-detected)" },
+        if result.doc_type_forced {
+            " (forced)"
+        } else {
+            " (auto-detected)"
+        },
         result.line_items.len(),
     );
     Ok(())
@@ -1268,7 +1271,11 @@ fn run_chunk(args: ChunkArgs) -> Result<(), Box<dyn Error>> {
             .collect();
         parse_opts.ocr = Some(build_ocr_engine()?);
         parse_opts.ocr_options = oxide_engine::OcrOptions {
-            languages: if langs.is_empty() { vec!["eng".to_string()] } else { langs },
+            languages: if langs.is_empty() {
+                vec!["eng".to_string()]
+            } else {
+                langs
+            },
             dpi: args.ocr_dpi,
             psm: None,
         };
@@ -1328,7 +1335,8 @@ fn run_eval_score(args: EvalScoreArgs) -> Result<(), Box<dyn Error>> {
             s
         }
     };
-    let output_json = oxide_engine::score_json(&input_json).map_err(|e| -> Box<dyn Error> { e.into() })?;
+    let output_json =
+        oxide_engine::score_json(&input_json).map_err(|e| -> Box<dyn Error> { e.into() })?;
     match &args.output {
         Some(path) => std::fs::write(path, &output_json)?,
         None => println!("{output_json}"),
@@ -2241,7 +2249,9 @@ fn run_rotate(args: RotateArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_optimize(args: OptimizeArgs) -> Result<(), Box<dyn Error>> {
-    let input_size = std::fs::metadata(&args.pdf).map(|m| m.len() as usize).unwrap_or(0);
+    let input_size = std::fs::metadata(&args.pdf)
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
     let engine = open_engine(&args.pdf, &args.password)?;
     let (bytes, report) = oxide_engine::optimize(&engine)?;
     std::fs::write(&args.output, &bytes)?;
@@ -2296,10 +2306,15 @@ fn run_repair(args: RepairArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_linearize(args: LinearizeArgs) -> Result<(), Box<dyn Error>> {
-    // Linearization is deferred; surface the actionable diagnosis and exit
-    // non-zero rather than emitting a non-linearized file.
-    let _ = open_engine(&args.pdf, &args.password)?; // validate the input opens
-    Err(oxide_engine::structural::linearize::LINEARIZE_DEFERRED_REASON.into())
+    let engine = open_engine(&args.pdf, &args.password)?;
+    let bytes = oxide_engine::linearize(&engine)?;
+    std::fs::write(&args.output, &bytes)?;
+    eprintln!(
+        "Linearized -> {} ({} bytes)",
+        args.output.display(),
+        bytes.len()
+    );
+    Ok(())
 }
 
 /// Expand a split output pattern. Supports `%d` and `%0Nd` (zero-padded width

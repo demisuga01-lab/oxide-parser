@@ -5,10 +5,9 @@
 //! whole object graph (preserving forms / outlines / annotations / structure
 //! tree) while letting an op mutate specific objects.
 //!
-//! Linearization (web-optimized output) is intentionally NOT implemented here:
-//! it requires object-stream + cross-reference-stream + precise-offset two-xref
-//! writer support the current classic-xref writer does not have. See the
-//! module-level note in [`linearize`].
+//! Linearization (web-optimized output) builds on the modern writer's
+//! cross-reference stream support and adds the offset-sensitive object ordering,
+//! parameter dictionary, and hint stream layer required by Fast Web View.
 
 use std::collections::HashMap;
 
@@ -62,7 +61,11 @@ pub fn rotate_pages(
     let targets: Vec<usize> = if pages.is_empty() {
         (1..=total).collect()
     } else {
-        let mut p: Vec<usize> = pages.iter().copied().filter(|&n| n >= 1 && n <= total).collect();
+        let mut p: Vec<usize> = pages
+            .iter()
+            .copied()
+            .filter(|&n| n >= 1 && n <= total)
+            .collect();
         p.sort_unstable();
         p.dedup();
         p
@@ -229,28 +232,23 @@ pub fn repair(bytes: Vec<u8>, password: &[u8]) -> Result<Vec<u8>> {
     crate::writer::write_document_roundtrip(&reader)
 }
 
-/// Linearization (fast-web-view) is **deferred** — see the crate's structural
-/// docs and `docs/manipulation.md`. The current writer emits only a classic
-/// cross-reference table; a linearized file needs object-stream + cross-
-/// reference-stream output and a precise two-pass offset/​hint-stream layout that
-/// does not exist yet. This function returns an explicit, actionable error
-/// rather than emitting a non-linearized file that would fail `qpdf
-/// --show-linearization`.
+/// Linearization (fast-web-view) is implemented for the proven, qpdf-validated
+/// subset. Inputs outside that subset return an explicit `UnsupportedFeature`
+/// rather than emitting a `/Linearized` file that qpdf would reject.
 pub mod linearize {
-    use crate::error::{OxideError, Result};
+    use crate::engine::ContentEngine;
+    use crate::error::Result;
 
-    /// Diagnosis of what linearization needs that the writer lacks today.
+    /// Compatibility copy for callers that surfaced the old deferral string.
+    /// The operation is implemented now; normal callers should not see this.
     pub const LINEARIZE_DEFERRED_REASON: &str = "\
-linearization (fast web view) is not yet implemented: it requires \
-cross-reference-stream output, object-stream packing, and a precise two-pass \
-object/offset layout with hint streams (ISO 32000 Annex F). The current writer \
-emits only a classic cross-reference table. Use `optimize` for size reduction; \
-linearization is tracked as future work.";
+linearization (fast web view) requires cross-reference-stream output and a \
+precise two-pass object/offset layout with hint streams (ISO 32000 Annex F).";
 
-    /// Always returns an error describing the deferral; never emits a file.
-    pub fn linearize() -> Result<Vec<u8>> {
-        Err(OxideError::UnsupportedFeature(
-            LINEARIZE_DEFERRED_REASON.to_string(),
-        ))
+    /// Emit a qpdf-valid linearized PDF. Encrypted inputs are opened by the
+    /// reader and written back unencrypted, matching the other structural write
+    /// operations in this crate.
+    pub fn linearize(engine: &ContentEngine) -> Result<Vec<u8>> {
+        crate::writer::write_document_linearized(engine.document())
     }
 }

@@ -182,9 +182,18 @@ fn parse_runs() {
     ]);
     assert_ok(&json, "parse --format json");
     let s = String::from_utf8_lossy(&json.stdout);
-    assert!(s.contains("\"schema_version\""), "JSON should carry a schema version");
-    assert!(s.contains("\"body\""), "JSON should carry the body block stream");
-    assert!(s.contains("\"pages\""), "JSON should carry the per-page view");
+    assert!(
+        s.contains("\"schema_version\""),
+        "JSON should carry a schema version"
+    );
+    assert!(
+        s.contains("\"body\""),
+        "JSON should carry the body block stream"
+    );
+    assert!(
+        s.contains("\"pages\""),
+        "JSON should carry the per-page view"
+    );
 
     let html = run(&[
         "parse",
@@ -556,11 +565,7 @@ fn extract_tables_ocr_errors_cleanly() {
     // --ocr on extract-tables is intentionally unsupported (OCR'd table-grid
     // reconstruction is a known gap); it must fail with an actionable message,
     // not silently produce empty/garbage output.
-    let out = run(&[
-        "extract-tables",
-        fx("flate.pdf").to_str().unwrap(),
-        "--ocr",
-    ]);
+    let out = run(&["extract-tables", fx("flate.pdf").to_str().unwrap(), "--ocr"]);
     assert!(!out.status.success(), "extract-tables --ocr should error");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -603,7 +608,10 @@ fn encrypt_command_aes256_roundtrips_via_cli() {
     assert_ok(&res, "encrypt");
     // The encrypted file must NOT extract text without the password...
     let no_pw = run(&["extract-text", out.to_str().unwrap()]);
-    assert!(!no_pw.status.success(), "encrypted file must require a password");
+    assert!(
+        !no_pw.status.success(),
+        "encrypted file must require a password"
+    );
     // ...and must extract WITH it.
     let with_pw = run(&[
         "extract-text",
@@ -629,7 +637,10 @@ fn optimize_command_writes_smaller_or_equal_pdf() {
     assert!(out.exists());
     // --json output is parseable and reports the op.
     let stdout = String::from_utf8_lossy(&res.stdout);
-    assert!(stdout.contains("\"op\":\"optimize\""), "json result: {stdout}");
+    assert!(
+        stdout.contains("\"op\":\"optimize\""),
+        "json result: {stdout}"
+    );
     let _ = std::fs::remove_file(&out);
 }
 
@@ -651,18 +662,54 @@ fn repair_command_writes_clean_pdf() {
 }
 
 #[test]
-fn linearize_command_errors_with_diagnosis() {
-    // Linearization is deferred; the command must fail cleanly with a message,
-    // not emit a bogus file.
+fn linearize_command_writes_fast_web_view_pdf() {
     let out = tmp("linearize_out.pdf");
+    let _ = std::fs::remove_file(&out);
     let res = run(&[
         "linearize",
         fx("flate.pdf").to_str().unwrap(),
         "-o",
         out.to_str().unwrap(),
     ]);
-    assert!(!res.status.success(), "linearize should exit non-zero (deferred)");
-    let err = String::from_utf8_lossy(&res.stderr);
-    assert!(err.contains("not yet implemented"), "should explain deferral: {err}");
+    assert_ok(&res, "linearize");
+    assert!(out.exists());
+    let bytes = std::fs::read(&out).expect("linearized output");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("/Linearized"),
+        "output should carry /Linearized"
+    );
+    let info = run(&["info", out.to_str().unwrap()]);
+    assert_ok(&info, "info on linearized");
+    let stdout = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        stdout.contains("Optimized:       yes"),
+        "info output: {stdout}"
+    );
     let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn linearize_command_refuses_unvalidated_multi_page_pdf() {
+    let out = tmp("linearize_multi_out.pdf");
+    let _ = std::fs::remove_file(&out);
+    let res = run(&[
+        "linearize",
+        fx("tracemonkey.pdf").to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(
+        !res.status.success(),
+        "linearize should reject unvalidated multi-page output"
+    );
+    let err = String::from_utf8_lossy(&res.stderr);
+    assert!(
+        err.contains("multi-page"),
+        "should explain the staged boundary: {err}"
+    );
+    assert!(
+        !out.exists(),
+        "unsupported linearization must not write output"
+    );
 }
