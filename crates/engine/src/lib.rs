@@ -91,6 +91,7 @@ pub mod reader;
 pub mod render;
 pub mod semantic;
 pub mod signature;
+pub mod structural;
 pub mod text;
 pub mod writer;
 
@@ -110,10 +111,11 @@ pub use content::{
     Matrix, Operand, TextState, IDENTITY_MATRIX,
 };
 pub use crypto::{
-    aes128_cbc_decrypt, aes256_cbc_decrypt, compute_encryption_key, decrypt_stream, decrypt_string,
-    derive_v5_file_key_from_owner, derive_v5_file_key_from_user, md5, object_key, r6_hash,
-    verify_user_password, verify_v5_owner_password, verify_v5_perms, verify_v5_user_password,
-    CryptMethod, EncryptionInfo, Rc4, V5Fields, PADDING,
+    aes128_cbc_decrypt, aes256_cbc_decrypt, build_encryption, compute_encryption_key,
+    decrypt_stream, decrypt_string, derive_v5_file_key_from_owner, derive_v5_file_key_from_user,
+    encrypt_bytes, md5, object_key, r6_hash, verify_user_password, verify_v5_owner_password,
+    verify_v5_perms, verify_v5_user_password, CryptMethod, EncryptAlgorithm, EncryptParams,
+    EncryptState, EncryptionInfo, Rc4, V5Fields, PADDING,
 };
 pub use analysis::graphics::{
     collect_graphics, collect_graphics_with_images, DrawnGraphics, ImagePlacement, Rect, Segment,
@@ -142,7 +144,7 @@ pub use document::{PdfDocument, PdfPage};
 pub use engine::{max_render_pixels, ContentEngine, PageResources, DEFAULT_MAX_RENDER_PIXELS};
 pub use error::{OxideError, Result};
 pub use filters::{
-    decode_stream, decode_stream_lossless, DecodedStream, StreamDecodeStatus,
+    decode_stream, decode_stream_lossless, flate_encode, DecodedStream, StreamDecodeStatus,
     MAX_FLATE_DECOMPRESSED_BYTES,
 };
 pub use fonts::variations::{AxisValue, VariationRequest};
@@ -168,13 +170,14 @@ pub use render::{
 pub use render::{render_page_svg, svg, text_decode};
 pub use semantic::{SemanticDocument, SemanticElement, SemanticMcid, SemanticSource};
 pub use signature::{verify_signatures, CertInfo, Coverage, SignatureReport, SignatureValidity};
+pub use structural::{encrypt, optimize, repair, rotate_pages, OptimizeReport, Rotation};
 pub use text::{
     LineEnding, MarkedTextChunk, ReadingOrderReconstructor, TextChunk, TextCollector,
     TextExtractOptions, TextExtractor, TextFormatOptions, TextFormatter, TextLine,
 };
 pub use writer::{
-    build_merged, build_subset, rewrite_references, serialize_object, write_document_roundtrip,
-    OutputObject, PdfWriter,
+    build_merged, build_subset, rewrite_document, rewrite_document_objects, rewrite_references,
+    serialize_object, write_document_roundtrip, OutputObject, PdfWriter,
 };
 
 /// The curated high-level embedding surface.
