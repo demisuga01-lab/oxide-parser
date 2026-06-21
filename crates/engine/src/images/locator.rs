@@ -318,12 +318,12 @@ impl ImageLocator {
             let op = &ops[i];
             if op.operator == "ID" {
                 let params = Self::parse_inline_image_params(&op.operands);
-                let pixel_bytes =
-                    if i + 1 < ops.len() && ops[i + 1].operator == "inline_image_data" {
-                        ops[i + 1].string_bytes(0).map(|bytes| bytes.to_vec())
-                    } else {
-                        None
-                    };
+                let pixel_bytes = if i + 1 < ops.len() && ops[i + 1].operator == "inline_image_data"
+                {
+                    ops[i + 1].string_bytes(0).map(|bytes| bytes.to_vec())
+                } else {
+                    None
+                };
 
                 let xobject_name = format!("inline_{}_{}", page_number, inline_index);
                 let width = params
@@ -717,7 +717,10 @@ mod tests {
             Operand::Name("Fl".to_string()),
         ];
         let params = ImageLocator::parse_inline_image_params(&operands);
-        assert_eq!(ImageLocator::inline_filters(&params), vec!["Fl".to_string()]);
+        assert_eq!(
+            ImageLocator::inline_filters(&params),
+            vec!["Fl".to_string()]
+        );
     }
 
     #[test]
@@ -752,10 +755,7 @@ mod tests {
 
     #[test]
     fn inline_filters_empty_when_absent() {
-        let operands = vec![
-            Operand::Name("W".to_string()),
-            Operand::Integer(2),
-        ];
+        let operands = vec![Operand::Name("W".to_string()), Operand::Integer(2)];
         let params = ImageLocator::parse_inline_image_params(&operands);
         assert!(ImageLocator::inline_filters(&params).is_empty());
     }

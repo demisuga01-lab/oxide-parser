@@ -205,10 +205,9 @@ impl BlendMode {
             BlendMode::Difference => (dst - src).abs(),
             BlendMode::Exclusion => src + dst - 2.0 * src * dst,
             // Non-separable: handled by blend_rgb; per-channel fallback = src.
-            BlendMode::Hue
-            | BlendMode::Saturation
-            | BlendMode::Color
-            | BlendMode::Luminosity => src,
+            BlendMode::Hue | BlendMode::Saturation | BlendMode::Color | BlendMode::Luminosity => {
+                src
+            }
         }
     }
 
@@ -1025,6 +1024,13 @@ mod tests {
         (a - b).abs() < 1e-3
     }
 
+    fn approx_rgb(actual: [f32; 3], expected: [f32; 3]) -> bool {
+        actual
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| approx(*actual, *expected))
+    }
+
     #[test]
     fn blend_from_name_parses_all_extended_modes() {
         assert_eq!(BlendMode::from_name("ColorDodge"), BlendMode::ColorDodge);
@@ -1088,7 +1094,10 @@ mod tests {
         for &(s, d) in &[(0.3, 0.7), (0.8, 0.2), (0.5, 0.5), (0.1, 0.9)] {
             let hl = BlendMode::HardLight.blend_channel(s, d);
             let ov = BlendMode::Overlay.blend_channel(d, s);
-            assert!(approx(hl, ov), "HardLight({s},{d})={hl} Overlay({d},{s})={ov}");
+            assert!(
+                approx(hl, ov),
+                "HardLight({s},{d})={hl} Overlay({d},{s})={ov}"
+            );
         }
         // src <= 0.5: 2*s*d. src 0.25, d 0.6 -> 0.3.
         assert!(approx(BlendMode::HardLight.blend_channel(0.25, 0.6), 0.3));
@@ -1108,6 +1117,31 @@ mod tests {
         // src < 0.5 darkens, src > 0.5 lightens a mid backdrop.
         assert!(BlendMode::SoftLight.blend_channel(0.2, 0.5) < 0.5);
         assert!(BlendMode::SoftLight.blend_channel(0.8, 0.5) > 0.5);
+    }
+
+    #[test]
+    fn soft_light_both_branches_match_spec_formula() {
+        // Spec Table 137, exact per-channel formula (not just directional).
+        //
+        // Branch src <= 0.5: dst - (1 - 2*src) * dst * (1 - dst).
+        //   src=0.2, dst=0.8 -> 0.8 - 0.6 * 0.8 * 0.2 = 0.704.
+        assert!(approx(BlendMode::SoftLight.blend_channel(0.2, 0.8), 0.704));
+        //   src=0.4, dst=0.6 -> 0.6 - 0.2 * 0.6 * 0.4 = 0.552.
+        assert!(approx(BlendMode::SoftLight.blend_channel(0.4, 0.6), 0.552));
+        //
+        // Branch src > 0.5, dst > 0.25: d = sqrt(dst); dst + (2*src-1)*(d - dst).
+        //   src=0.8, dst=0.6 -> 0.6 + 0.6*(sqrt(0.6) - 0.6) = 0.704758...
+        let expected_hi = 0.6 + 0.6 * (0.6f32.sqrt() - 0.6);
+        assert!(approx(
+            BlendMode::SoftLight.blend_channel(0.8, 0.6),
+            expected_hi
+        ));
+        assert!((expected_hi - 0.70476).abs() < 1e-3);
+        //
+        // Branch src > 0.5, dst <= 0.25: d = ((16*dst-12)*dst + 4)*dst.
+        //   src=0.8, dst=0.2 -> d = ((3.2-12)*0.2 + 4)*0.2 = 0.448;
+        //                       0.2 + 0.6*(0.448 - 0.2) = 0.3488.
+        assert!(approx(BlendMode::SoftLight.blend_channel(0.8, 0.2), 0.3488));
     }
 
     #[test]
@@ -1162,7 +1196,10 @@ mod tests {
         let src = [0.9, 0.9, 0.9]; // bright, lum 0.9
         let dst = [0.8, 0.1, 0.1]; // reddish
         let out = BlendMode::Luminosity.blend_rgb(src, dst);
-        assert!(approx(lum(out), lum(src)), "Luminosity takes src luma: {out:?}");
+        assert!(
+            approx(lum(out), lum(src)),
+            "Luminosity takes src luma: {out:?}"
+        );
     }
 
     #[test]
@@ -1172,7 +1209,111 @@ mod tests {
         let hue = BlendMode::Hue.blend_rgb(src, dst);
         let satm = BlendMode::Saturation.blend_rgb(src, dst);
         assert!(approx(lum(hue), lum(dst)), "Hue keeps dst luma: {hue:?}");
-        assert!(approx(lum(satm), lum(dst)), "Saturation keeps dst luma: {satm:?}");
+        assert!(
+            approx(lum(satm), lum(dst)),
+            "Saturation keeps dst luma: {satm:?}"
+        );
+    }
+
+    /// Full-RGB-vector exact assertions for the four non-separable modes
+    /// (spec Table 138 + §11.3.5.3). Each expected vector was computed by
+    /// hand via the spec helpers (Lum / Sat / SetLum / SetSat / ClipColor)
+    /// with the PDF Lum weights 0.30 / 0.59 / 0.11, and is asserted on all
+    /// three channels — the earlier property-only `lum()` checks proved only
+    /// the luma contract, not the channel-wise result.
+    #[test]
+    fn nonsep_color_blend_full_vector() {
+        // Color(red=[1,0,0], gray=[0.5,0.5,0.5]):
+        //   = set_lum([1,0,0], lum([0.5,0.5,0.5])=0.5)
+        //   raw = [1.2, 0.2, 0.2]; clip at x=1.2 to gamut -> [1.0, 0.285714, 0.285714]
+        let out = BlendMode::Color.blend_rgb([1.0, 0.0, 0.0], [0.5, 0.5, 0.5]);
+        assert!((out[0] - 1.0).abs() < 1e-3, "R = 1.0, got {out:?}");
+        assert!(
+            (out[1] - 2.0 / 7.0).abs() < 1e-3 && (out[2] - 2.0 / 7.0).abs() < 1e-3,
+            "G = B = 2/7, got {out:?}"
+        );
+        // And the luma contract (redundancy with the lum-only check).
+        assert!(approx(lum(out), lum([0.5, 0.5, 0.5])));
+    }
+
+    #[test]
+    fn nonsep_luminosity_blend_full_vector() {
+        // Luminosity(gray=[0.9,0.9,0.9], red=[0.8,0.1,0.1]):
+        //   = set_lum([0.8,0.1,0.1], lum([0.9,0.9,0.9])=0.9)
+        //   raw = [1.39, 0.69, 0.69]; clip at x=1.39 -> [1.0, 6/7, 6/7]
+        let out = BlendMode::Luminosity.blend_rgb([0.9, 0.9, 0.9], [0.8, 0.1, 0.1]);
+        assert!((out[0] - 1.0).abs() < 1e-3, "R = 1.0, got {out:?}");
+        assert!(
+            (out[1] - 6.0 / 7.0).abs() < 1e-3 && (out[2] - 6.0 / 7.0).abs() < 1e-3,
+            "G = B = 6/7, got {out:?}"
+        );
+        assert!(approx(lum(out), lum([0.9, 0.9, 0.9])));
+    }
+
+    #[test]
+    fn nonsep_hue_blend_full_vector() {
+        // Hue(blue=[0,0,1], dst=[0.6,0.4,0.2]):
+        //   = set_lum(set_sat([0,0,1], sat(dst)=0.4), lum(dst)=0.438)
+        //   set_sat([0,0,1], 0.4): max=1 -> out=[0, 0, 0.4]
+        //   set_lum([0,0,0.4], 0.438): raw=[0.394, 0.394, 0.794]; in gamut.
+        let out = BlendMode::Hue.blend_rgb([0.0, 0.0, 1.0], [0.6, 0.4, 0.2]);
+        assert!(
+            approx(out[0], 0.394) && approx(out[1], 0.394) && (out[2] - 0.794).abs() < 1e-3,
+            "Hue vector = [0.394, 0.394, 0.794], got {out:?}"
+        );
+        assert!(approx(lum(out), lum([0.6, 0.4, 0.2])));
+    }
+
+    #[test]
+    fn nonsep_saturation_blend_full_vector() {
+        // Saturation(blue=[0,0,1], dst=[0.6,0.4,0.2]):
+        //   = set_lum(set_sat([0.6,0.4,0.2], sat(blue)=1.0), lum(dst)=0.438)
+        //   set_sat([0.6,0.4,0.2], 1.0): [1.0, 0.5, 0]
+        //   set_lum([1.0,0.5,0], 0.438): raw=[0.843, 0.343, -0.157];
+        //   clip at n=-0.157 -> [0.73613, 0.36807, 0.0]
+        let out = BlendMode::Saturation.blend_rgb([0.0, 0.0, 1.0], [0.6, 0.4, 0.2]);
+        let exp = [0.736_134_4_f32, 0.368_067_2_f32, 0.0];
+        for i in 0..3 {
+            assert!(
+                (out[i] - exp[i]).abs() < 1e-3,
+                "channel {i} = {} exp {}",
+                out[i],
+                exp[i]
+            );
+        }
+        assert!(approx(lum(out), lum([0.6, 0.4, 0.2])));
+    }
+
+    #[test]
+    fn all_blend_modes_match_spec_table() {
+        let src = [0.2, 0.6, 0.9];
+        let dst = [0.7, 0.3, 0.4];
+        let cases: &[(BlendMode, [f32; 3])] = &[
+            (BlendMode::Normal, [0.2, 0.6, 0.9]),
+            (BlendMode::Multiply, [0.14, 0.18, 0.36]),
+            (BlendMode::Screen, [0.76, 0.72, 0.94]),
+            (BlendMode::Overlay, [0.52, 0.36, 0.72]),
+            (BlendMode::Darken, [0.2, 0.3, 0.4]),
+            (BlendMode::Lighten, [0.7, 0.6, 0.9]),
+            (BlendMode::ColorDodge, [0.875, 0.75, 1.0]),
+            (BlendMode::ColorBurn, [0.0, 0.0, 0.333_333_34]),
+            (BlendMode::HardLight, [0.28, 0.44, 0.88]),
+            (BlendMode::SoftLight, [0.574, 0.349_544_5, 0.585_964_44]),
+            (BlendMode::Difference, [0.5, 0.3, 0.5]),
+            (BlendMode::Exclusion, [0.62, 0.54, 0.58]),
+            (BlendMode::Hue, [0.252_142_85, 0.480_714_3, 0.652_142_9]),
+            (BlendMode::Saturation, [0.901_75, 0.201_75, 0.376_75]),
+            (BlendMode::Color, [0.118, 0.518, 0.818]),
+            (BlendMode::Luminosity, [0.782, 0.382, 0.482]),
+        ];
+
+        for &(mode, expected) in cases {
+            let actual = mode.blend_rgb(src, dst);
+            assert!(
+                approx_rgb(actual, expected),
+                "{mode:?} actual {actual:?}, expected {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -1182,7 +1323,10 @@ mod tests {
         let dst = [0.5, 0.5, 0.5];
         let out = BlendMode::Multiply.blend_rgb(src, dst);
         for i in 0..3 {
-            assert!(approx(out[i], BlendMode::Multiply.blend_channel(src[i], dst[i])));
+            assert!(approx(
+                out[i],
+                BlendMode::Multiply.blend_channel(src[i], dst[i])
+            ));
         }
     }
 }

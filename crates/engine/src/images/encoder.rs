@@ -319,8 +319,7 @@ mod tests {
         assert_eq!(&webp[0..4], b"RIFF");
         assert_eq!(&webp[8..12], b"WEBP");
 
-        let mut decoder =
-            image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
+        let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
         assert_eq!(decoder.dimensions(), (4, 4));
         let mut decoded = vec![0u8; decoder.output_buffer_size().unwrap()];
         decoder.read_image(&mut decoded).unwrap();
@@ -338,8 +337,7 @@ mod tests {
             pixels: pixels.clone(),
         };
         let webp = ImageEncoder::encode_webp(&img, 80).unwrap();
-        let mut decoder =
-            image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
+        let mut decoder = image_webp::WebPDecoder::new(std::io::Cursor::new(&webp)).unwrap();
         assert_eq!(decoder.dimensions(), (4, 4));
         let mut decoded = vec![0u8; decoder.output_buffer_size().unwrap()];
         decoder.read_image(&mut decoded).unwrap();

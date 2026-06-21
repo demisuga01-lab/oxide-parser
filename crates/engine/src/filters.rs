@@ -165,6 +165,22 @@ fn decode_stream_parts(
             "ASCIIHexDecode" | "AHx" => data = ascii_hex_decode(&data)?,
             "ASCII85Decode" | "A85" => data = ascii85_decode(&data)?,
             "RunLengthDecode" | "RL" => data = run_length_decode(&data)?,
+            // The reader applies PDF crypt filters while fetching stream
+            // objects, because decryption needs object/generation numbers and
+            // the document encryption dictionary. At the decode-filter layer,
+            // `/Crypt` is therefore just the marker for that already-applied
+            // step. If there is no active encryption context, only the
+            // explicit `/Identity` crypt filter is a no-op; any other crypt
+            // filter means the caller needs to reopen with the right password.
+            "Crypt" => {
+                if reader.and_then(PdfReader::encryption).is_none()
+                    && !crypt_filter_is_identity(param)
+                {
+                    return Err(OxideError::EncryptedPdf(
+                        "stream uses /Crypt filter; provide the correct password".to_string(),
+                    ));
+                }
+            }
             "DCTDecode" | "DCT" | "JPXDecode" | "CCITTFaxDecode" | "CCF" | "JBIG2Decode" => {
                 return Ok(DecodedStream {
                     data,
@@ -190,6 +206,13 @@ fn resolved_object(obj: &PdfObject, reader: Option<&PdfReader>) -> Result<PdfObj
         Some(reader) => reader.resolve(obj.clone()),
         None => Ok(obj.clone()),
     }
+}
+
+fn crypt_filter_is_identity(param: Option<&PdfDictionary>) -> bool {
+    matches!(
+        param.and_then(|dict| dict.get_name("Name")),
+        Some("Identity")
+    )
 }
 
 fn filter_names(dict: &PdfDictionary, reader: Option<&PdfReader>) -> Result<Vec<String>> {

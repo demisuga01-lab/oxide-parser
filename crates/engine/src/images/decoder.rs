@@ -6,6 +6,7 @@ use crate::images::locator::{ImageLocator, ImageReference};
 use crate::images::{ccitt, jbig2, jpx};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
+use crate::render::cmm;
 
 /// Decoded image data: always 8 bits per channel, channels interleaved.
 #[derive(Debug, Clone)]
@@ -399,10 +400,27 @@ impl ImageDecoder {
         }
 
         let (mut pixels, channels) = match color_space {
-            "DeviceGray" | "G" | "CalGray" => (normalised, 1u8),
-            "DeviceRGB" | "RGB" | "CalRGB" | "sRGB" => (normalised, 3u8),
+            "DeviceGray" | "G" => (normalised, 1u8),
+            "CalGray" => (
+                cmm::cal_gray_bytes_to_rgb(
+                    &normalised,
+                    cmm::cal_gray_params_from_image_dict(dict, reader),
+                ),
+                3u8,
+            ),
+            "DeviceRGB" | "RGB" | "sRGB" => (normalised, 3u8),
+            "CalRGB" => (
+                cmm::cal_rgb_bytes_to_rgb(
+                    &normalised,
+                    cmm::cal_rgb_params_from_image_dict(dict, reader),
+                ),
+                3u8,
+            ),
             "DeviceCMYK" | "CMYK" => (ColorSpaceConverter::cmyk_to_rgb(&normalised), 3u8),
-            "Lab" => (ColorSpaceConverter::lab_to_rgb(&normalised), 3u8),
+            "Lab" => (
+                cmm::lab_bytes_to_rgb(&normalised, cmm::lab_params_from_image_dict(dict, reader)),
+                3u8,
+            ),
             "Indexed" => {
                 if let Some(reader) = reader {
                     ColorSpaceConverter::decode_indexed(&normalised, dict, reader, width, height)?
@@ -413,15 +431,19 @@ impl ImageDecoder {
             }
             "ICCBased" => {
                 if let Some(reader) = reader {
-                    let n = ColorSpaceConverter::icc_channel_count(dict, reader).unwrap_or(3);
-                    match n {
-                        1 => (normalised, 1u8),
-                        3 => (normalised, 3u8),
-                        4 => (ColorSpaceConverter::cmyk_to_rgb(&normalised), 3u8),
-                        _ => {
-                            return Err(OxideError::UnsupportedFeature(format!(
-                                "ICCBased with {n} components not supported"
-                            )))
+                    if let Some(converted) = cmm::icc_bytes_to_rgb(&normalised, dict, reader) {
+                        converted
+                    } else {
+                        let n = ColorSpaceConverter::icc_channel_count(dict, reader).unwrap_or(3);
+                        match n {
+                            1 => (normalised, 1u8),
+                            3 => (normalised, 3u8),
+                            4 => (ColorSpaceConverter::cmyk_to_rgb(&normalised), 3u8),
+                            _ => {
+                                return Err(OxideError::UnsupportedFeature(format!(
+                                    "ICCBased with {n} components not supported"
+                                )))
+                            }
                         }
                     }
                 } else {
@@ -481,22 +503,43 @@ impl ColorSpaceConverter {
         reader: &PdfReader,
     ) -> Result<(Vec<u8>, u8)> {
         match source_cs {
-            "DeviceGray" | "G" | "CalGray" => Ok((pixels, 1)),
-            "DeviceRGB" | "RGB" | "CalRGB" | "sRGB" => Ok((pixels, 3)),
+            "DeviceGray" | "G" => Ok((pixels, 1)),
+            "CalGray" => Ok((
+                cmm::cal_gray_bytes_to_rgb(
+                    &pixels,
+                    cmm::cal_gray_params_from_image_dict(dict, Some(reader)),
+                ),
+                3,
+            )),
+            "DeviceRGB" | "RGB" | "sRGB" => Ok((pixels, 3)),
+            "CalRGB" => Ok((
+                cmm::cal_rgb_bytes_to_rgb(
+                    &pixels,
+                    cmm::cal_rgb_params_from_image_dict(dict, Some(reader)),
+                ),
+                3,
+            )),
             "DeviceCMYK" | "CMYK" => Ok((Self::cmyk_to_rgb(&pixels), 3)),
             "ICCBased" => {
-                let n = Self::icc_channel_count(dict, reader).unwrap_or(3);
-                match n {
-                    1 => Ok((pixels, 1)),
-                    3 => Ok((pixels, 3)),
-                    4 => Ok((Self::cmyk_to_rgb(&pixels), 3)),
-                    _ => Err(OxideError::UnsupportedFeature(format!(
-                        "ICCBased with {n} components not supported"
-                    ))),
+                if let Some(converted) = cmm::icc_bytes_to_rgb(&pixels, dict, reader) {
+                    Ok(converted)
+                } else {
+                    let n = Self::icc_channel_count(dict, reader).unwrap_or(3);
+                    match n {
+                        1 => Ok((pixels, 1)),
+                        3 => Ok((pixels, 3)),
+                        4 => Ok((Self::cmyk_to_rgb(&pixels), 3)),
+                        _ => Err(OxideError::UnsupportedFeature(format!(
+                            "ICCBased with {n} components not supported"
+                        ))),
+                    }
                 }
             }
             "Indexed" => Self::decode_indexed(&pixels, dict, reader, width, height),
-            "Lab" => Ok((Self::lab_to_rgb(&pixels), 3)),
+            "Lab" => Ok((
+                cmm::lab_bytes_to_rgb(&pixels, cmm::lab_params_from_image_dict(dict, Some(reader))),
+                3,
+            )),
             other => {
                 log::warn!(
                     "unknown color space '{}', treating as RGB/Gray by channel count",
@@ -514,20 +557,7 @@ impl ColorSpaceConverter {
 
     /// Convert interleaved CMYK pixels to RGB.
     pub fn cmyk_to_rgb(pixels: &[u8]) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity(pixels.len() / 4 * 3);
-        for chunk in pixels.chunks_exact(4) {
-            let c = chunk[0] as f32 / 255.0;
-            let m = chunk[1] as f32 / 255.0;
-            let y = chunk[2] as f32 / 255.0;
-            let k = chunk[3] as f32 / 255.0;
-            let r = ((1.0 - c) * (1.0 - k) * 255.0).round().clamp(0.0, 255.0) as u8;
-            let g = ((1.0 - m) * (1.0 - k) * 255.0).round().clamp(0.0, 255.0) as u8;
-            let b = ((1.0 - y) * (1.0 - k) * 255.0).round().clamp(0.0, 255.0) as u8;
-            rgb.push(r);
-            rgb.push(g);
-            rgb.push(b);
-        }
-        rgb
+        cmm::device_cmyk_bytes_to_rgb(pixels)
     }
 
     fn decode_indexed(
@@ -611,60 +641,7 @@ impl ColorSpaceConverter {
     }
 
     fn icc_channel_count(dict: &PdfDictionary, reader: &PdfReader) -> Option<u8> {
-        let arr = dict.get("ColorSpace")?.as_array()?;
-        let reference = arr.get(1)?;
-        let (obj_num, gen_num) = match reference {
-            PdfObject::Reference { number, generation } => (*number, *generation),
-            _ => return None,
-        };
-        match reader.get_object(obj_num, gen_num).ok()? {
-            PdfObject::Stream { dict: icc_dict, .. } => {
-                icc_dict.get_integer("N").map(|n| n.clamp(1, 4) as u8)
-            }
-            _ => None,
-        }
-    }
-
-    fn lab_to_rgb(pixels: &[u8]) -> Vec<u8> {
-        let mut rgb = Vec::with_capacity(pixels.len());
-        for chunk in pixels.chunks_exact(3) {
-            let l = chunk[0] as f32 / 2.55;
-            let a = chunk[1] as f32 - 128.0;
-            let b = chunk[2] as f32 - 128.0;
-            let fy = (l + 16.0) / 116.0;
-            let fx = a / 500.0 + fy;
-            let fz = fy - b / 200.0;
-            let x = 0.96422 * Self::lab_f_inv(fx);
-            let y = Self::lab_f_inv(fy);
-            let z = 0.82521 * Self::lab_f_inv(fz);
-            let r_lin = 3.133_856 * x - 1.6168667 * y - 0.4906146 * z;
-            let g_lin = -0.9787684 * x + 1.9161415 * y + 0.0334540 * z;
-            let b_lin = 0.0719453 * x - 0.2289914 * y + 1.4052427 * z;
-            let r = (Self::srgb_gamma(r_lin) * 255.0).clamp(0.0, 255.0) as u8;
-            let g = (Self::srgb_gamma(g_lin) * 255.0).clamp(0.0, 255.0) as u8;
-            let b = (Self::srgb_gamma(b_lin) * 255.0).clamp(0.0, 255.0) as u8;
-            rgb.push(r);
-            rgb.push(g);
-            rgb.push(b);
-        }
-        rgb
-    }
-
-    fn lab_f_inv(t: f32) -> f32 {
-        const DELTA: f32 = 6.0 / 29.0;
-        if t > DELTA {
-            t * t * t
-        } else {
-            3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
-        }
-    }
-
-    fn srgb_gamma(linear: f32) -> f32 {
-        if linear <= 0.0031308 {
-            12.92 * linear
-        } else {
-            1.055 * linear.powf(1.0 / 2.4) - 0.055
-        }
+        cmm::icc_channel_count(dict, reader)
     }
 }
 
@@ -943,7 +920,7 @@ mod tests {
     #[test]
     fn cmyk_to_rgb_pure_black() {
         let cmyk = vec![0u8, 0, 0, 255];
-        assert_eq!(ColorSpaceConverter::cmyk_to_rgb(&cmyk), vec![0, 0, 0]);
+        assert_eq!(ColorSpaceConverter::cmyk_to_rgb(&cmyk), vec![35, 31, 32]);
     }
 
     #[test]
@@ -956,21 +933,21 @@ mod tests {
     fn cmyk_to_rgb_pure_cyan() {
         let cmyk = vec![255u8, 0, 0, 0];
         let rgb = ColorSpaceConverter::cmyk_to_rgb(&cmyk);
-        assert_eq!(rgb, vec![0, 255, 255]);
+        assert_eq!(rgb, vec![0, 173, 239]);
     }
 
     #[test]
     fn cmyk_to_rgb_pure_magenta() {
         let cmyk = vec![0u8, 255, 0, 0];
         let rgb = ColorSpaceConverter::cmyk_to_rgb(&cmyk);
-        assert_eq!(rgb, vec![255, 0, 255]);
+        assert_eq!(rgb, vec![236, 0, 140]);
     }
 
     #[test]
     fn cmyk_to_rgb_processes_multiple_pixels() {
         let cmyk = vec![0u8, 0, 0, 0, 0, 0, 0, 255];
         let rgb = ColorSpaceConverter::cmyk_to_rgb(&cmyk);
-        assert_eq!(rgb, vec![255, 255, 255, 0, 0, 0]);
+        assert_eq!(rgb, vec![255, 255, 255, 35, 31, 32]);
     }
 
     #[test]
@@ -1012,7 +989,7 @@ mod tests {
         };
         assert_eq!(img.pixel(0, 0), &[10, 20, 30]);
         assert_eq!(img.pixel(1, 0), &[40, 50, 60]);
-        assert_eq!(img.pixel(3, 0), &[]);
+        assert_eq!(img.pixel(3, 0), &[] as &[u8]);
     }
 
     #[test]
