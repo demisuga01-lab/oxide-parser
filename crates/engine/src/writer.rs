@@ -72,6 +72,18 @@ pub struct PdfWriter {
     /// document. Both `/ID` elements are written equal to this value (a fresh
     /// document has no update history, so the two ids coincide).
     id: Option<Vec<u8>>,
+    /// When set, the output is ENCRYPTED: every string and stream is encrypted
+    /// per-object with the standard security handler, and an `/Encrypt`
+    /// dictionary object is added (its number recorded so it is itself NOT
+    /// encrypted). See [`PdfWriter::with_encryption`].
+    encryption: Option<WriterEncryption>,
+}
+
+/// Encryption configuration for [`PdfWriter`]: the derived key/params plus the
+/// output object number reserved for the `/Encrypt` dictionary.
+struct WriterEncryption {
+    state: crate::crypto::EncryptState,
+    encrypt_obj_number: u32,
 }
 
 impl PdfWriter {
@@ -85,7 +97,38 @@ impl PdfWriter {
             root,
             info: None,
             id: None,
+            encryption: None,
         }
+    }
+
+    /// Encrypt the output with the standard security handler. `state` carries the
+    /// derived file key + `/Encrypt` parameters (build it via
+    /// [`crate::crypto::build_encryption`]). This reserves the next free object
+    /// number for the `/Encrypt` dictionary and forces the file `/ID` to a fresh
+    /// random value (required: AES-256 ignores it, but legacy keys depend on it,
+    /// and a stable `/ID` is needed for the dict). All strings/streams except the
+    /// `/Encrypt` dict are encrypted on write. AES-256 output bumps the header to
+    /// 2.0; AES-128/RC4 to 1.6/1.4 as appropriate.
+    pub fn with_encryption(mut self, state: crate::crypto::EncryptState) -> Self {
+        // Reserve an object number for the /Encrypt dict (one past the max).
+        let max = self.objects.iter().map(|o| o.number).max().unwrap_or(0);
+        let encrypt_obj_number = max + 1;
+        // A deterministic-but-unique /ID isn't available without RNG; use random.
+        // (The /Encrypt dict + legacy key derivation need a stable /ID; AES-256
+        // ignores it. We always set one so the file is well-formed.)
+        if self.id.is_none() {
+            self.id = Some(crate::crypto::random_bytes(16));
+        }
+        self.version = match state.info.v {
+            5 => "2.0".to_string(),
+            4 => "1.6".to_string(),
+            _ => "1.4".to_string(),
+        };
+        self.encryption = Some(WriterEncryption {
+            state,
+            encrypt_obj_number,
+        });
+        self
     }
 
     /// Set the output PDF header version (e.g. `"1.7"`). Defaults to `1.7`.
@@ -108,10 +151,21 @@ impl PdfWriter {
 
     /// Serialize the whole document to PDF bytes.
     pub fn write(&self) -> Result<Vec<u8>> {
+        // When encrypting, build an owned, encrypted object set (every string +
+        // stream encrypted per-object) plus the appended /Encrypt dict object.
+        // The /Encrypt dict itself is never encrypted.
+        let owned: Vec<OutputObject>;
+        let objects_src: Vec<&OutputObject> = if let Some(enc) = &self.encryption {
+            owned = self.build_encrypted_objects(enc)?;
+            owned.iter().collect()
+        } else {
+            self.objects.iter().collect()
+        };
+
         // Sort by object number so the body is written in ascending order and
         // the xref table (which is offset-indexed by object number) is simple
         // to build. The highest object number determines /Size.
-        let mut objects: Vec<&OutputObject> = self.objects.iter().collect();
+        let mut objects: Vec<&OutputObject> = objects_src;
         objects.sort_by_key(|o| o.number);
 
         for obj in &objects {
@@ -206,6 +260,15 @@ impl PdfWriter {
                 ]),
             );
         }
+        if let Some(enc) = &self.encryption {
+            trailer.insert(
+                "Encrypt",
+                PdfObject::Reference {
+                    number: enc.encrypt_obj_number,
+                    generation: 0,
+                },
+            );
+        }
         serialize_dictionary(&trailer, &mut out);
         out.extend_from_slice(b"\nstartxref\n");
         out.extend_from_slice(format!("{xref_offset}\n").as_bytes());
@@ -213,6 +276,126 @@ impl PdfWriter {
 
         Ok(out)
     }
+
+    /// Build the encrypted object set: a deep copy of every output object with
+    /// its strings + stream bytes encrypted per-object, plus the appended
+    /// `/Encrypt` dictionary object (itself unencrypted).
+    fn build_encrypted_objects(&self, enc: &WriterEncryption) -> Result<Vec<OutputObject>> {
+        let is_aes = enc.state.is_aes();
+        let is_v5 = enc.state.is_v5();
+        let key = &enc.state.file_key;
+
+        let mut out: Vec<OutputObject> = Vec::with_capacity(self.objects.len() + 1);
+        for obj in &self.objects {
+            let mut object = obj.object.clone();
+            encrypt_object_in_place(&mut object, obj.number, 0, key, is_aes, is_v5)?;
+            out.push(OutputObject {
+                number: obj.number,
+                object,
+            });
+        }
+        // Append the /Encrypt dictionary object (NOT encrypted).
+        out.push(OutputObject {
+            number: enc.encrypt_obj_number,
+            object: PdfObject::Dictionary(encryption_info_to_dict(&enc.state.info)),
+        });
+        Ok(out)
+    }
+}
+
+/// Recursively encrypt every string and the stream raw bytes inside one indirect
+/// object, keyed by its object number/generation. Dictionaries and arrays are
+/// walked; references/names/numbers are untouched. Errors propagate (a cipher
+/// failure must not silently emit plaintext).
+fn encrypt_object_in_place(
+    object: &mut PdfObject,
+    obj_num: u32,
+    gen_num: u16,
+    key: &[u8],
+    is_aes: bool,
+    is_v5: bool,
+) -> Result<()> {
+    match object {
+        PdfObject::String(bytes) => {
+            *bytes = crate::crypto::encrypt_bytes(bytes, key, obj_num, gen_num, is_aes, is_v5)?;
+        }
+        PdfObject::Array(items) => {
+            for item in items.iter_mut() {
+                encrypt_object_in_place(item, obj_num, gen_num, key, is_aes, is_v5)?;
+            }
+        }
+        PdfObject::Dictionary(dict) => {
+            encrypt_dict_in_place(dict, obj_num, gen_num, key, is_aes, is_v5)?;
+        }
+        PdfObject::Stream { dict, raw } => {
+            encrypt_dict_in_place(dict, obj_num, gen_num, key, is_aes, is_v5)?;
+            *raw = crate::crypto::encrypt_bytes(raw, key, obj_num, gen_num, is_aes, is_v5)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn encrypt_dict_in_place(
+    dict: &mut PdfDictionary,
+    obj_num: u32,
+    gen_num: u16,
+    key: &[u8],
+    is_aes: bool,
+    is_v5: bool,
+) -> Result<()> {
+    // Rebuild the dictionary with encrypted string values (BTreeMap iteration is
+    // by key; we collect then reinsert to mutate values).
+    let keys: Vec<String> = dict.iter().map(|(k, _)| k.clone()).collect();
+    for k in keys {
+        if let Some(mut value) = dict.get(&k).cloned() {
+            encrypt_object_in_place(&mut value, obj_num, gen_num, key, is_aes, is_v5)?;
+            dict.insert(k, value);
+        }
+    }
+    Ok(())
+}
+
+/// Serialize an [`crate::crypto::EncryptionInfo`] into the `/Encrypt`
+/// dictionary that a reader's `EncryptionInfo::from_dict` parses back.
+fn encryption_info_to_dict(info: &crate::crypto::EncryptionInfo) -> PdfDictionary {
+    use crate::crypto::CryptMethod;
+    let mut d = PdfDictionary::empty();
+    d.insert("Filter", PdfObject::Name("Standard".to_string()));
+    d.insert("V", PdfObject::Integer(info.v as i64));
+    d.insert("R", PdfObject::Integer(info.r as i64));
+    d.insert("Length", PdfObject::Integer(info.key_length as i64));
+    d.insert("O", PdfObject::String(info.o.clone()));
+    d.insert("U", PdfObject::String(info.u.clone()));
+    d.insert("P", PdfObject::Integer(info.p as i64));
+    if !info.encrypt_metadata {
+        d.insert("EncryptMetadata", PdfObject::Boolean(false));
+    }
+    if let Some(v5) = &info.v5 {
+        d.insert("OE", PdfObject::String(v5.oe.clone()));
+        d.insert("UE", PdfObject::String(v5.ue.clone()));
+        d.insert("Perms", PdfObject::String(v5.perms.clone()));
+    }
+    // V4/V5 require crypt filters (/CF, /StmF, /StrF) naming the method.
+    if info.v >= 4 {
+        let cfm = match info.stream_method {
+            CryptMethod::AesV3 => "AESV3",
+            CryptMethod::AesV2 => "AESV2",
+            _ => "V2",
+        };
+        let mut stdcf = PdfDictionary::empty();
+        stdcf.insert("Type", PdfObject::Name("CryptFilter".to_string()));
+        stdcf.insert("CFM", PdfObject::Name(cfm.to_string()));
+        // AuthEvent defaults to DocOpen; Length in bytes for the filter.
+        let cf_len = if info.v == 5 { 32 } else { info.key_length / 8 };
+        stdcf.insert("Length", PdfObject::Integer(cf_len as i64));
+        let mut cf = PdfDictionary::empty();
+        cf.insert("StdCF", PdfObject::Dictionary(stdcf));
+        d.insert("CF", PdfObject::Dictionary(cf));
+        d.insert("StmF", PdfObject::Name("StdCF".to_string()));
+        d.insert("StrF", PdfObject::Name("StdCF".to_string()));
+    }
+    d
 }
 
 /// Serialize a single [`PdfObject`] to PDF syntax, appending to `out`.
@@ -784,6 +967,43 @@ fn build_merged_internal(inputs: &[(&PdfDocument, Vec<usize>)]) -> Result<Vec<u8
 /// sizes, and text). Encrypted inputs are decrypted on read, so the output is
 /// unencrypted.
 pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
+    rewrite_document(reader, |_orig, _obj| {})
+}
+
+/// Whole-document copy with a per-object MUTATION HOOK — the content-preserving
+/// base shared by the structural-write ops (rotate, optimize, encrypt, repair).
+///
+/// Walks every live object (`reader.object_ids()`), re-fetches each (which
+/// re-applies the parser's stream-length recovery), identity-renumbers to a
+/// contiguous gen-0 space, rewrites references, and emits a fresh classic
+/// xref + trailer. Unlike [`build_subset`]/[`build_merged`] this preserves the
+/// ORIGINAL catalog (AcroForm, outlines, named destinations, annotations,
+/// structure tree all survive) — it mutates objects in place rather than
+/// synthesizing a fresh page tree.
+///
+/// `mutate` is called for every object after reference-rewriting, with its
+/// ORIGINAL (source) object number and a mutable handle, so an op can adjust
+/// specific objects (e.g. set `/Rotate` on a page) by their identity. `/Type
+/// /XRef` streams are dropped (the writer emits its own classic xref).
+pub fn rewrite_document(
+    reader: &PdfReader,
+    mut mutate: impl FnMut(u32, &mut PdfObject),
+) -> Result<Vec<u8>> {
+    let (objects, new_root, info_number) = rewrite_document_objects(reader, &mut mutate)?;
+    let writer = PdfWriter::new(objects, new_root)
+        .with_info(info_number)
+        .with_id(reader.first_file_id());
+    writer.write()
+}
+
+/// The object-collection half of [`rewrite_document`], returning the renumbered
+/// objects + new root + new info number. Separated so ops that need to add
+/// objects (e.g. encrypt appends an `/Encrypt` dict) or drive the writer with
+/// extra configuration can do so before calling [`PdfWriter::write`].
+pub fn rewrite_document_objects(
+    reader: &PdfReader,
+    mutate: &mut impl FnMut(u32, &mut PdfObject),
+) -> Result<(Vec<OutputObject>, u32, Option<u32>)> {
     let root = reader.root_reference().ok_or_else(|| {
         OxideError::MalformedPdf("cannot round-trip: trailer is missing /Root".to_string())
     })?;
@@ -817,7 +1037,8 @@ pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
             }
         }
         let new_number = remap[&number];
-        let rewritten = rewrite_references(object, &remap);
+        let mut rewritten = rewrite_references(object, &remap);
+        mutate(number, &mut rewritten);
         objects.push(OutputObject {
             number: new_number,
             object: rewritten,
@@ -829,10 +1050,7 @@ pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
         .info_reference()
         .and_then(|(n, _)| remap.get(&n).copied());
 
-    let writer = PdfWriter::new(objects, new_root)
-        .with_info(info_number)
-        .with_id(reader.first_file_id());
-    writer.write()
+    Ok((objects, new_root, info_number))
 }
 
 fn box_array(values: [f64; 4]) -> PdfObject {
