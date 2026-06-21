@@ -85,6 +85,13 @@ paper) — a tie, stated as such.
 - **Renderer fidelity (different axis).** Oxide is *not* positioned as a
   visual-proof renderer; for that, `docs/oxide_vs_poppler.md` recommends
   Poppler/PDFium. Oxide rendering exists primarily to feed OCR and previews.
+  The last recorded visual-fidelity figure is **33.40%** visual-page pass
+  (`docs/oxide_vs_poppler.md`, 2026-06-18). A fresh full renderer-benchmark run
+  measuring the cumulative effect of the later render R&D was **deferred** in
+  the foundation pass (it renders thousands of pages over a ~332 MB corpus and
+  is not gating the parser/extraction story) — that number is therefore *not*
+  re-measured here and is **not** fabricated; re-run
+  `renderer-benchmark/scripts/renderer_benchmark.py` to refresh it.
 
 ### Not yet built (deferred structural-write operations)
 
