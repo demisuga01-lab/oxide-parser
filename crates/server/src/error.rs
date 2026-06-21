@@ -58,6 +58,12 @@ impl From<oxide_engine::OxideError> for ServerError {
             // Unsupported features are client-actionable: report the specific
             // feature with a 422 rather than burying it in a generic 500.
             UnsupportedFeature(msg) => ServerError::Unsupported(msg),
+            // A page that exceeds the render-pixel cap (e.g. a hostile giant
+            // MediaBox) is a resource-limit condition, surfaced as such rather
+            // than a generic 500. The server's own check_render_pixels normally
+            // catches this first; this maps the engine-level guard for the cases
+            // a render path reaches the engine directly.
+            ResourceLimit(msg) => ServerError::ResourceLimit(msg),
             // I/O is an unexpected internal condition; detail goes to logs only.
             Io(io_err) => ServerError::Internal(io_err.to_string()),
         }

@@ -102,7 +102,9 @@ pub(crate) async fn process_pdf2img(
     // every requested page's viewport up front so the rejection costs nothing
     // beyond reading page geometry.
     for page_num in &page_nums {
-        let viewport = probe.page_viewport(*page_num, dpi).map_err(ServerError::from)?;
+        let viewport = probe
+            .page_viewport(*page_num, dpi)
+            .map_err(ServerError::from)?;
         crate::processing::check_render_pixels(
             config,
             *page_num,
@@ -195,7 +197,9 @@ pub(crate) async fn process_pdf2img(
     })
 }
 
-pub(crate) async fn extract_pdf2img_fields(mut multipart: Multipart) -> ServerResult<Pdf2ImgParams> {
+pub(crate) async fn extract_pdf2img_fields(
+    mut multipart: Multipart,
+) -> ServerResult<Pdf2ImgParams> {
     let mut file_bytes: Option<Bytes> = None;
     let mut pages_str: Option<String> = None;
     let mut dpi_str: Option<String> = None;

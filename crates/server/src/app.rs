@@ -34,6 +34,26 @@ use crate::routes;
 //   Render PDF pages to PNG or JPEG images as a ZIP archive.
 //   Fields: file, pages, dpi (24-600), format (png/jpg), quality.
 //
+// POST /api/v1/parse
+//   Parse a PDF into the canonical document model, serialized as Markdown /
+//   JSON / HTML (the same schema the CLI `parse` and the bindings emit).
+//   Fields: file, pages, format (markdown/json/html), password.
+//
+// POST /api/v1/chunk
+//   Split a PDF into RAG-ready semantic chunks (JSON).
+//   Fields: file, pages, target_tokens, overlap, keep_furniture, password.
+//
+// POST /api/v1/extract-fields
+//   Extract structured key-value fields (JSON).
+//   Fields: file, pages, doc_type (auto/invoice/receipt/form/generic), password.
+//
+// POST /api/v1/info
+//   Document metadata, pdfinfo-style (JSON). Fields: file, password.
+//
+//   These parser endpoints are digital-born only: OCR is not performed
+//   server-side (no Tesseract dependency). Use /api/v1/analyze to detect
+//   scanned input.
+//
 // --- Async job API (for large/slow inputs; additive to the sync endpoints) ---
 //
 // POST /api/v1/jobs/pdf2img
@@ -88,10 +108,7 @@ pub fn create_app_with_limiter(config: ServerConfig, limiter: Arc<RateLimiter>) 
     // sub-router with its state, then merge — `with_state` erases the state
     // type so the merged router is uniformly `Router<()>`.
     let job_routes = Router::new()
-        .route(
-            "/api/v1/jobs/pdf2img",
-            post(routes::jobs::submit_pdf2img),
-        )
+        .route("/api/v1/jobs/pdf2img", post(routes::jobs::submit_pdf2img))
         .route(
             "/api/v1/jobs/extract-images",
             post(routes::jobs::submit_extract_images),
@@ -113,6 +130,13 @@ pub fn create_app_with_limiter(config: ServerConfig, limiter: Arc<RateLimiter>) 
         )
         .route("/api/v1/analyze", post(routes::analyze::handler))
         .route("/api/v1/pdf2img", post(routes::pdf2img::handler))
+        .route("/api/v1/parse", post(routes::parse_ops::parse))
+        .route("/api/v1/chunk", post(routes::parse_ops::chunk))
+        .route(
+            "/api/v1/extract-fields",
+            post(routes::parse_ops::extract_fields),
+        )
+        .route("/api/v1/info", post(routes::parse_ops::info))
         .merge(job_routes)
         .layer(TraceLayer::new_for_http())
         .layer(RequestBodyLimitLayer::new(config.max_file_size))

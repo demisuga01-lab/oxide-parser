@@ -136,7 +136,8 @@ pub trait JobStore: Send + Sync {
     /// or `None` if the store is at its `max_jobs` cap (submission should then
     /// be rejected). The `progress` handle is returned to the caller so the
     /// worker can update it.
-    fn create(&self, owner: String, kind_label: &'static str) -> Option<(String, Arc<JobProgress>)>;
+    fn create(&self, owner: String, kind_label: &'static str)
+        -> Option<(String, Arc<JobProgress>)>;
 
     /// Snapshot a job's state if it exists.
     fn get(&self, id: &str) -> Option<JobSnapshot>;

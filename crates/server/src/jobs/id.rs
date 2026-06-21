@@ -46,7 +46,9 @@ mod tests {
     fn ids_are_32_hex_chars() {
         let id = generate_job_id();
         assert_eq!(id.len(), 32);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 
     #[test]

@@ -1333,3 +1333,171 @@ async fn pdf2img_form_xobject_pdf_returns_valid_png() {
         .any(|p| p[0] != 255 || p[1] != 255 || p[2] != 255);
     assert!(has_non_white, "Form XObject should paint non-white pixels");
 }
+
+// --- Parser endpoints (parse / chunk / extract-fields / info) ---------------
+
+#[tokio::test]
+async fn parse_markdown_returns_text() {
+    let pdf = fixture_pdf("flate.pdf");
+    let (ct, body) = make_multipart("test.pdf", &pdf, &[("format", "markdown")]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/parse")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let md = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!md.trim().is_empty(), "parsed markdown should not be empty");
+}
+
+#[tokio::test]
+async fn parse_json_is_canonical_schema() {
+    let pdf = fixture_pdf("flate.pdf");
+    let (ct, body) = make_multipart("test.pdf", &pdf, &[("format", "json")]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/parse")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    // Canonical Document model: schema_version + body present (matches CLI/C/WASM).
+    assert!(
+        json["schema_version"].is_string(),
+        "parse json must carry the canonical schema_version"
+    );
+    assert!(json.get("body").is_some(), "parse json must have a body");
+}
+
+#[tokio::test]
+async fn parse_invalid_format_returns_400() {
+    let pdf = fixture_pdf("flate.pdf");
+    let (ct, body) = make_multipart("test.pdf", &pdf, &[("format", "yaml")]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/parse")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn parse_missing_file_returns_400() {
+    let boundary = "oxide-test-boundary-xyz";
+    let body = format!("--{0}--\r\n", boundary).into_bytes();
+    let ct = format!("multipart/form-data; boundary={}", boundary);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/parse")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn chunk_returns_chunkset_json() {
+    let pdf = fixture_pdf("flate.pdf");
+    let (ct, body) = make_multipart("test.pdf", &pdf, &[("target_tokens", "256")]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/chunk")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["chunks"].is_array(), "chunk response must have a chunks array");
+    assert!(json["schema_version"].is_string());
+}
+
+#[tokio::test]
+async fn extract_fields_returns_json_on_acroform() {
+    let pdf = fixture_pdf("form_160f.pdf");
+    let (ct, body) = make_multipart("form.pdf", &pdf, &[("doc_type", "auto")]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/extract-fields")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json["fields"].is_array(), "extract-fields must return a fields array");
+    let fields = json["fields"].as_array().unwrap();
+    assert!(!fields.is_empty(), "AcroForm document should yield fields");
+}
+
+#[tokio::test]
+async fn info_returns_metadata_json() {
+    let pdf = fixture_pdf("flate.pdf");
+    let (ct, body) = make_multipart("test.pdf", &pdf, &[]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/info")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let json: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(json.is_object(), "info must return a JSON object");
+    assert!(json.get("page_count").is_some(), "info must report page_count");
+}
+
+#[tokio::test]
+async fn parse_garbage_input_does_not_crash() {
+    // Untrusted/garbage bytes must produce a clean 4xx/5xx, never panic the server.
+    let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03];
+    let (ct, body) = make_multipart("not.pdf", &garbage, &[]);
+    let app = oxide_server::app::create_app();
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/parse")
+                .header("content-type", ct)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_client_error() || response.status().is_server_error(),
+        "garbage input should be rejected, got {}",
+        response.status()
+    );
+}

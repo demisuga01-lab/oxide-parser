@@ -213,7 +213,12 @@ async fn readiness_and_version_reachable_without_key() {
             .oneshot(Request::get(path).body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{} should be public", path);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{} should be public",
+            path
+        );
     }
 }
 
@@ -232,10 +237,8 @@ fn cors_config(origins: &[&str], allow_any: bool) -> ServerConfig {
 
 #[tokio::test]
 async fn cors_allows_listed_origin() {
-    let app = oxide_server::app::create_app_with_config(cors_config(
-        &["https://app.example.com"],
-        false,
-    ));
+    let app =
+        oxide_server::app::create_app_with_config(cors_config(&["https://app.example.com"], false));
     let response = app
         .oneshot(
             Request::builder()
@@ -257,10 +260,8 @@ async fn cors_allows_listed_origin() {
 
 #[tokio::test]
 async fn cors_denies_unlisted_origin() {
-    let app = oxide_server::app::create_app_with_config(cors_config(
-        &["https://app.example.com"],
-        false,
-    ));
+    let app =
+        oxide_server::app::create_app_with_config(cors_config(&["https://app.example.com"], false));
     let response = app
         .oneshot(
             Request::builder()
@@ -513,7 +514,10 @@ async fn spawned_cleanup_task_shrinks_the_map_on_schedule() {
     let handle = limiter.spawn_cleanup(Duration::from_millis(20));
     // Give the interval a few ticks.
     tokio::time::sleep(Duration::from_millis(120)).await;
-    assert!(!handle.is_finished(), "cleanup task should still be running");
+    assert!(
+        !handle.is_finished(),
+        "cleanup task should still be running"
+    );
     // Active windows (created just now) are correctly retained by cleanup.
     assert_eq!(limiter.tracked_keys(), 20);
 

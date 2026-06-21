@@ -142,7 +142,10 @@ async fn get_result_raw(
         .unwrap();
     let status = response.status();
     let headers = response.headers().clone();
-    let bytes = to_bytes(response.into_body(), MAX_BODY).await.unwrap().to_vec();
+    let bytes = to_bytes(response.into_body(), MAX_BODY)
+        .await
+        .unwrap()
+        .to_vec();
     (status, headers, bytes)
 }
 
@@ -150,7 +153,12 @@ async fn get_result_raw(
 async fn poll_until_terminal(app: &Router, status_url: &str, api_key: Option<&str>) -> Value {
     for _ in 0..300 {
         let (code, body) = get_status(app, status_url, api_key).await;
-        assert_eq!(code, StatusCode::OK, "status poll should be 200: {:?}", body);
+        assert_eq!(
+            code,
+            StatusCode::OK,
+            "status poll should be 200: {:?}",
+            body
+        );
         let s = body["status"].as_str().unwrap_or("");
         if s == "completed" || s == "failed" {
             return body;
@@ -221,7 +229,10 @@ async fn pdf2img_job_happy_path_and_matches_sync() {
         .await
         .unwrap();
     assert_eq!(sync_resp.status(), StatusCode::OK);
-    let sync_zip = to_bytes(sync_resp.into_body(), MAX_BODY).await.unwrap().to_vec();
+    let sync_zip = to_bytes(sync_resp.into_body(), MAX_BODY)
+        .await
+        .unwrap()
+        .to_vec();
     let sync_pages = count_zip_entries(&sync_zip);
     assert_eq!(
         async_pages, sync_pages,
@@ -285,7 +296,8 @@ async fn result_can_be_downloaded_twice_within_retention() {
 #[tokio::test]
 async fn unknown_job_id_returns_404() {
     let app = build_app(test_config("unknown"));
-    let (code, body) = get_status(&app, "/api/v1/jobs/deadbeefdeadbeefdeadbeefdeadbeef", None).await;
+    let (code, body) =
+        get_status(&app, "/api/v1/jobs/deadbeefdeadbeefdeadbeefdeadbeef", None).await;
     assert_eq!(code, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "job_not_found");
 }
@@ -323,12 +335,19 @@ async fn corrupt_pdf_job_fails_with_classified_error() {
     let app = build_app(test_config("corrupt"));
     let not_a_pdf = b"this is definitely not a pdf file at all";
     let (code, body) = submit(&app, "/api/v1/jobs/pdf2img", not_a_pdf, &[], None).await;
-    assert_eq!(code, StatusCode::ACCEPTED, "submit accepts; failure surfaces via status");
+    assert_eq!(
+        code,
+        StatusCode::ACCEPTED,
+        "submit accepts; failure surfaces via status"
+    );
     let status_url = body["status_url"].as_str().unwrap().to_string();
     let final_status = poll_until_terminal(&app, &status_url, None).await;
     assert_eq!(final_status["status"], "failed", "corrupt PDF -> failed");
     // Safe, classified error — a stable code and a message, no internal leakage.
-    assert!(final_status["error"].is_string(), "failed job carries an error code");
+    assert!(
+        final_status["error"].is_string(),
+        "failed job carries an error code"
+    );
     assert!(final_status["message"].is_string());
     let msg = final_status["message"].as_str().unwrap();
     assert!(
@@ -360,7 +379,10 @@ async fn worker_survives_a_failing_job_and_processes_the_next() {
     .await;
     let s2 = b2["status_url"].as_str().unwrap().to_string();
     let f2 = poll_until_terminal(&app, &s2, None).await;
-    assert_eq!(f2["status"], "completed", "worker survived and completed the next job");
+    assert_eq!(
+        f2["status"], "completed",
+        "worker survived and completed the next job"
+    );
 }
 
 #[tokio::test]
@@ -450,11 +472,19 @@ async fn job_owned_by_another_key_is_404_not_403() {
 
     // Different key (key-b) gets 404 for status and result.
     let (other_status, other_body) = get_status(&app, &status_url, Some("key-b")).await;
-    assert_eq!(other_status, StatusCode::NOT_FOUND, "non-owner -> 404 (not 403)");
+    assert_eq!(
+        other_status,
+        StatusCode::NOT_FOUND,
+        "non-owner -> 404 (not 403)"
+    );
     assert_eq!(other_body["error"], "job_not_found");
 
     let (other_result, _h, _b) = get_result_raw(&app, &result_url, Some("key-b")).await;
-    assert_eq!(other_result, StatusCode::NOT_FOUND, "non-owner result -> 404");
+    assert_eq!(
+        other_result,
+        StatusCode::NOT_FOUND,
+        "non-owner result -> 404"
+    );
 }
 
 #[tokio::test]
@@ -524,7 +554,11 @@ async fn completed_job_is_cleaned_up_after_retention() {
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     let (code, body) = get_status(&app, &status_url, None).await;
-    assert_eq!(code, StatusCode::NOT_FOUND, "job should be reaped after retention");
+    assert_eq!(
+        code,
+        StatusCode::NOT_FOUND,
+        "job should be reaped after retention"
+    );
     assert_eq!(body["error"], "job_not_found");
     assert!(
         !result_file.exists(),

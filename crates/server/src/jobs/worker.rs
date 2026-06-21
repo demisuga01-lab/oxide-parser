@@ -216,7 +216,10 @@ async fn worker_loop(
             Err(join_err) => {
                 tracing::error!(job_id = %id, worker_id, error = %join_err,
                     "job task panicked; marking failed and continuing");
-                Err(ServerError::Internal(format!("job task aborted: {}", join_err)))
+                Err(ServerError::Internal(format!(
+                    "job task aborted: {}",
+                    join_err
+                )))
             }
         };
 

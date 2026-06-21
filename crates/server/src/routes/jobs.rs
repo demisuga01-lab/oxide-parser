@@ -46,7 +46,12 @@ pub async fn submit_extract_images(
     let params =
         crate::routes::extract_images::extract_extract_images_fields(multipart, false).await?;
     let owner = caller_identity(&headers);
-    submit_response(&jobs, owner, JobKind::ExtractImages(params), "extract-images")
+    submit_response(
+        &jobs,
+        owner,
+        JobKind::ExtractImages(params),
+        "extract-images",
+    )
 }
 
 fn submit_response(
@@ -70,9 +75,9 @@ fn submit_response(
         // the correct signal — the work was not accepted; the client should
         // retry shortly. (Distinct from 413/resource-limit, which means the
         // input itself is too large and retrying won't help.)
-        SubmitOutcome::QueueFull => Ok(service_unavailable(
-            "The job queue is full; retry shortly.",
-        )),
+        SubmitOutcome::QueueFull => {
+            Ok(service_unavailable("The job queue is full; retry shortly."))
+        }
         SubmitOutcome::StoreFull => Ok(service_unavailable(
             "The server is retaining the maximum number of jobs; retry shortly.",
         )),

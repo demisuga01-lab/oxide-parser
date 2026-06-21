@@ -114,8 +114,7 @@ pub fn pathological_tiling_pattern_pdf() -> Vec<u8> {
 
     // Page: select the pattern as fill color space, then fill a huge area so the
     // (area / step) tile count is astronomically larger than the 20k cap.
-    let content: &[u8] =
-        b"/Pattern cs\n/P0 scn\n0 0 100000 100000 re\nf\n";
+    let content: &[u8] = b"/Pattern cs\n/P0 scn\n0 0 100000 100000 re\nf\n";
 
     assemble(
         "0 0 5000 5000",
