@@ -16,6 +16,12 @@ green. Fuzzing requires a nightly toolchain.
 | `filters`           | `oxide_engine::filters::fuzz_decode_filter`   | Flate / LZW / ASCIIHex / ASCII85 / RunLength decoders (selector byte picks one) |
 | `predictor`         | `oxide_engine::filters::fuzz_apply_predictor` | PNG/TIFF predictor with attacker-controlled Columns/Colors/BitsPerComponent |
 | `content_tokenizer` | `ContentParser::parse`                        | Content-stream tokenizer + inline-image state machine + operand stack |
+| `image_decoders`    | `oxide_engine::fuzz::fuzz_decode_image`       | CCITT / JBIG2 / JPX / DCT image decoders |
+| `fonts`             | `oxide_engine::fuzz::fuzz_parse_font`         | TrueType / CFF / OpenType / bare-CFF font parsers through outline extraction |
+| `cmap`              | `oxide_engine::fuzz::fuzz_parse_cmap`         | ToUnicode CMap parsing and lookup |
+| `crypto`            | `oxide_engine::fuzz::fuzz_crypto`             | Encryption dictionary parsing, password verification, key derivation, decrypt primitives |
+| `functions`         | `oxide_engine::fuzz::fuzz_functions`          | Function Types 0/2/3/4, sampled-function bit reader, Type 4 PostScript calculator |
+| `writer`            | `oxide_engine::fuzz::fuzz_writer`             | Object serialization, string/name/stream escaping, tiny output PDF generation |
 
 The `fuzz_*` entry points are gated behind the engine's `fuzzing` feature
 (enabled here via the `oxide-engine` dependency) so they are not part of the
@@ -36,6 +42,12 @@ cargo +nightly fuzz run parse_pdf
 cargo +nightly fuzz run filters
 cargo +nightly fuzz run predictor
 cargo +nightly fuzz run content_tokenizer
+cargo +nightly fuzz run image_decoders
+cargo +nightly fuzz run fonts
+cargo +nightly fuzz run cmap
+cargo +nightly fuzz run crypto
+cargo +nightly fuzz run functions
+cargo +nightly fuzz run writer
 
 # Time-box a run (e.g. 15 minutes) and cap input size:
 cargo +nightly fuzz run parse_pdf -- -max_total_time=900 -max_len=65536
