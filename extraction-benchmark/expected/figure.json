@@ -1,0 +1,18 @@
+{
+  "doc_type": "generic",
+  "mode": "digital",
+  "text": "Results\nFigure 1. A sample chart of the results.\nThe figure above summarizes the experimental outcome.",
+  "order": [
+    "results",
+    "figure 1. a sample chart of the results.",
+    "the figure above summarizes the experimental outcome."
+  ],
+  "tables": [],
+  "fields": [],
+  "block_types": [
+    "heading",
+    "figure",
+    "caption",
+    "paragraph"
+  ]
+}

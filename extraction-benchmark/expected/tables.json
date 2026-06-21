@@ -1,0 +1,35 @@
+{
+  "doc_type": "generic",
+  "mode": "digital",
+  "text": "Measurements\nCity Temp Humidity\nParis 21 55%\nTokyo 28 70%",
+  "order": [
+    "measurements",
+    "city temp humidity",
+    "paris 21 55%",
+    "tokyo 28 70%"
+  ],
+  "tables": [
+    [
+      [
+        "City",
+        "Temp",
+        "Humidity"
+      ],
+      [
+        "Paris",
+        "21",
+        "55%"
+      ],
+      [
+        "Tokyo",
+        "28",
+        "70%"
+      ]
+    ]
+  ],
+  "fields": [],
+  "block_types": [
+    "heading",
+    "table"
+  ]
+}

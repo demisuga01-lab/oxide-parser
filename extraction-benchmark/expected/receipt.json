@@ -1,0 +1,30 @@
+{
+  "doc_type": "receipt",
+  "mode": "digital",
+  "text": "",
+  "order": [],
+  "tables": [],
+  "fields": [
+    {
+      "key": "merchant",
+      "value": "joe's coffee shop"
+    },
+    {
+      "key": "date",
+      "value": "2024-03-22"
+    },
+    {
+      "key": "subtotal",
+      "value": "8.50 usd"
+    },
+    {
+      "key": "tax",
+      "value": "0.68 usd"
+    },
+    {
+      "key": "total",
+      "value": "9.18 usd"
+    }
+  ],
+  "block_types": []
+}

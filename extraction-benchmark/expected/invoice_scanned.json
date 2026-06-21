@@ -1,0 +1,59 @@
+{
+  "doc_type": "invoice",
+  "mode": "scanned",
+  "text": "",
+  "order": [],
+  "tables": [
+    [
+      [
+        "Description",
+        "Qty",
+        "Unit Price",
+        "Amount"
+      ],
+      [
+        "Widget assembly",
+        "10",
+        "$25.00",
+        "$250.00"
+      ],
+      [
+        "Premium gizmo",
+        "2",
+        "$100.00",
+        "$200.00"
+      ]
+    ]
+  ],
+  "fields": [
+    {
+      "key": "invoice_number",
+      "value": "inv-2024-0042"
+    },
+    {
+      "key": "invoice_date",
+      "value": "2024-01-15"
+    },
+    {
+      "key": "due_date",
+      "value": "2024-02-15"
+    },
+    {
+      "key": "bill_to",
+      "value": "globex corporation"
+    },
+    {
+      "key": "subtotal",
+      "value": "450.00 usd"
+    },
+    {
+      "key": "tax",
+      "value": "36.00 usd"
+    },
+    {
+      "key": "total",
+      "value": "486.00 usd"
+    }
+  ],
+  "block_types": []
+}

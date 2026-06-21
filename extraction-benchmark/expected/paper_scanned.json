@@ -1,0 +1,29 @@
+{
+  "doc_type": "generic",
+  "mode": "scanned",
+  "text": "A Study of Document Parsing\nThis paper introduces a structure-aware approach to extraction.\nIt recovers reading order, tables, and fields from PDF documents.\n1. Introduction\nDocuments encode structure that naive text dumps discard entirely.\nWe preserve headings, paragraphs, and lists in reading order.\n2. Method\nA geometric precedence graph orders blocks across columns.\nTables are detected from ruling lines and text alignment.",
+  "order": [
+    "a study of document parsing",
+    "this paper introduces a structure-aware approach to extraction.",
+    "it recovers reading order, tables, and fields from pdf documents.",
+    "1. introduction",
+    "documents encode structure that naive text dumps discard entirely.",
+    "we preserve headings, paragraphs, and lists in reading order.",
+    "2. method",
+    "a geometric precedence graph orders blocks across columns.",
+    "tables are detected from ruling lines and text alignment."
+  ],
+  "tables": [],
+  "fields": [],
+  "block_types": [
+    "title",
+    "paragraph",
+    "paragraph",
+    "heading",
+    "paragraph",
+    "paragraph",
+    "heading",
+    "paragraph",
+    "paragraph"
+  ]
+}

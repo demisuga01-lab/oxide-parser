@@ -1,0 +1,29 @@
+{
+  "doc_type": "generic",
+  "mode": "digital",
+  "text": "Quarterly Report\nLeft column line one of the report.\nLeft column line two continues here.\nLeft column line three wraps the idea.\nLeft column line four concludes left.\nRight column line one starts here.\nRight column line two adds detail.\nRight column line three explains more.\nRight column line four ends the right.",
+  "order": [
+    "quarterly report",
+    "left column line one of the report.",
+    "left column line two continues here.",
+    "left column line three wraps the idea.",
+    "left column line four concludes left.",
+    "right column line one starts here.",
+    "right column line two adds detail.",
+    "right column line three explains more.",
+    "right column line four ends the right."
+  ],
+  "tables": [],
+  "fields": [],
+  "block_types": [
+    "title",
+    "paragraph",
+    "paragraph",
+    "paragraph",
+    "paragraph",
+    "paragraph",
+    "paragraph",
+    "paragraph",
+    "paragraph"
+  ]
+}
