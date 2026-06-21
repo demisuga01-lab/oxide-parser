@@ -1,0 +1,3715 @@
+{
+  "generated_at": "2026-06-18T17:38:03Z",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "cpu_count": 20,
+  "cpu": "13th Gen Intel(R) Core(TM) i5-13500HX",
+  "memory_mb": 16104,
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+  "oxide_bin": "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+  "poppler_bin_dir": "E:\\wellpdfsdk\\target\\tools\\poppler\\poppler-26.02.0\\Library\\bin",
+  "poppler_version": "pdftoppm version 26.02.0\nCopyright 2005-2026 The Poppler Developers - http://poppler.freedesktop.org\nCopyright 1996-2011, 2022 Glyph & Cog, LLC",
+  "dpi": 150,
+  "repeats": 3,
+  "threads": [
+    1,
+    20
+  ],
+  "rows": [
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.01158420000137994,
+          "peak_bytes": 5423104,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.009133999999903608,
+          "peak_bytes": 5435392,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.00919620000058785,
+          "peak_bytes": 5451776,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.00919620000058785,
+      "cold_s": 0.01158420000137994,
+      "warm_median_s": 0.00916510000024573,
+      "peak_mb": 5.19921875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.07152599999972153,
+          "peak_bytes": 11018240,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.020196400000713766,
+          "peak_bytes": 11005952,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.020058899997820845,
+          "peak_bytes": 11026432,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.020196400000713766,
+      "cold_s": 0.07152599999972153,
+      "warm_median_s": 0.020127649999267305,
+      "peak_mb": 10.515625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.027715600001101848,
+          "peak_bytes": 5943296,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.012359600001218496,
+          "peak_bytes": 5951488,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01198609999846667,
+          "peak_bytes": 5963776,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.012359600001218496,
+      "cold_s": 0.027715600001101848,
+      "warm_median_s": 0.012172849999842583,
+      "peak_mb": 5.6875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.013103500001307111,
+          "peak_bytes": 6586368,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01205140000092797,
+          "peak_bytes": 6586368,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.014634299997851485,
+          "peak_bytes": 6569984,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.013103500001307111,
+      "cold_s": 0.013103500001307111,
+      "warm_median_s": 0.013342849999389728,
+      "peak_mb": 6.28125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.059699800000089454,
+          "peak_bytes": 11358208,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02226199999859091,
+          "peak_bytes": 11378688,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.023273600003449246,
+          "peak_bytes": 11370496,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.023273600003449246,
+      "cold_s": 0.059699800000089454,
+      "warm_median_s": 0.022767800001020078,
+      "peak_mb": 10.8515625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.020116399999096757,
+          "peak_bytes": 5967872,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.012189000000944361,
+          "peak_bytes": 5959680,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.012761900001351023,
+          "peak_bytes": 5951488,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.012761900001351023,
+      "cold_s": 0.020116399999096757,
+      "warm_median_s": 0.012475450001147692,
+      "peak_mb": 5.69140625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.011533199998666532,
+          "peak_bytes": 6569984,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.011110600000392878,
+          "peak_bytes": 6598656,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01077409999925294,
+          "peak_bytes": 6619136,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.011110600000392878,
+      "cold_s": 0.011533199998666532,
+      "warm_median_s": 0.010942349999822909,
+      "peak_mb": 6.3125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.036199199999828124,
+          "peak_bytes": 11345920,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02208470000186935,
+          "peak_bytes": 11374592,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02297769999859156,
+          "peak_bytes": 11341824,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02297769999859156,
+      "cold_s": 0.036199199999828124,
+      "warm_median_s": 0.022531200000230456,
+      "peak_mb": 10.84765625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.025831899998593144,
+          "peak_bytes": 21299200,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03031380000174977,
+          "peak_bytes": 21344256,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.024832899998727953,
+          "peak_bytes": 21344256,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.025831899998593144,
+      "cold_s": 0.025831899998593144,
+      "warm_median_s": 0.02757335000023886,
+      "peak_mb": 20.35546875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.02538500000082422,
+          "peak_bytes": 21315584,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02566339999975753,
+          "peak_bytes": 21291008,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02471769999829121,
+          "peak_bytes": 21327872,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02538500000082422,
+      "cold_s": 0.02538500000082422,
+      "warm_median_s": 0.02519054999902437,
+      "peak_mb": 20.33984375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.10923230000116746,
+          "peak_bytes": 22949888,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05364140000165207,
+          "peak_bytes": 22929408,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05430319999868516,
+          "peak_bytes": 22933504,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05430319999868516,
+      "cold_s": 0.10923230000116746,
+      "warm_median_s": 0.053972300000168616,
+      "peak_mb": 21.88671875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.024439900000288617,
+          "peak_bytes": 21336064,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.026219000003038673,
+          "peak_bytes": 21352448,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02616430000125547,
+          "peak_bytes": 21323776,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02616430000125547,
+      "cold_s": 0.024439900000288617,
+      "warm_median_s": 0.02619165000214707,
+      "peak_mb": 20.36328125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.02392840000175056,
+          "peak_bytes": 21319680,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02852559999882942,
+          "peak_bytes": 21331968,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.038277600000583334,
+          "peak_bytes": 21315584,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02852559999882942,
+      "cold_s": 0.02392840000175056,
+      "warm_median_s": 0.03340159999970638,
+      "peak_mb": 20.34375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "small_1p_text",
+      "doc_class": "1-page small text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_basic_text.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.05662999999913154,
+          "peak_bytes": 22933504,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05371000000013737,
+          "peak_bytes": 22933504,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.052032300001883414,
+          "peak_bytes": 22958080,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05371000000013737,
+      "cold_s": 0.05662999999913154,
+      "warm_median_s": 0.05287115000101039,
+      "peak_mb": 21.89453125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.019708300002093893,
+          "peak_bytes": 5480448,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01204669999788166,
+          "peak_bytes": 5509120,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.012740699999994831,
+          "peak_bytes": 5480448,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.012740699999994831,
+      "cold_s": 0.019708300002093893,
+      "warm_median_s": 0.012393699998938246,
+      "peak_mb": 5.25390625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.020957000000635162,
+          "peak_bytes": 11010048,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02030409999861149,
+          "peak_bytes": 11005952,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03088980000029551,
+          "peak_bytes": 11022336,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.020957000000635162,
+      "cold_s": 0.020957000000635162,
+      "warm_median_s": 0.0255969499994535,
+      "peak_mb": 10.51171875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.017184600001201034,
+          "peak_bytes": 6062080,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.015811799999937648,
+          "peak_bytes": 6053888,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.0176402999968559,
+          "peak_bytes": 6234112,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.017184600001201034,
+      "cold_s": 0.017184600001201034,
+      "warm_median_s": 0.016726049998396775,
+      "peak_mb": 5.9453125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.025768700001208344,
+          "peak_bytes": 6754304,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.016454399999929592,
+          "peak_bytes": 6754304,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01660260000062408,
+          "peak_bytes": 6729728,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.01660260000062408,
+      "cold_s": 0.025768700001208344,
+      "warm_median_s": 0.016528500000276836,
+      "peak_mb": 6.44140625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "text_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.02280810000229394,
+          "peak_bytes": 11341824,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.024498099999618717,
+          "peak_bytes": 11378688,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03219049999825074,
+          "peak_bytes": 11345920,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.024498099999618717,
+      "cold_s": 0.02280810000229394,
+      "warm_median_s": 0.02834429999893473,
+      "peak_mb": 10.8515625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.34271090000038384,
+          "peak_bytes": 6389760,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.3612914000004821,
+          "peak_bytes": 6430720,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.34793119999812916,
+          "peak_bytes": 6373376,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.34793119999812916,
+      "cold_s": 0.34271090000038384,
+      "warm_median_s": 0.35461129999930563,
+      "peak_mb": 6.1328125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.0689204999980575,
+          "peak_bytes": 12533760,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.08279459999903338,
+          "peak_bytes": 12455936,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.07167739999931655,
+          "peak_bytes": 12754944,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.07167739999931655,
+      "cold_s": 0.0689204999980575,
+      "warm_median_s": 0.07723599999917496,
+      "peak_mb": 12.1640625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "text_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.03283179999925778,
+          "peak_bytes": 11460608,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.030346499999723164,
+          "peak_bytes": 11493376,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03291130000070552,
+          "peak_bytes": 11464704,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.03283179999925778,
+      "cold_s": 0.03283179999925778,
+      "warm_median_s": 0.031628900000214344,
+      "peak_mb": 10.9609375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.02927079999790294,
+          "peak_bytes": 21839872,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.033196599997609155,
+          "peak_bytes": 21704704,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03376809999826946,
+          "peak_bytes": 21630976,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.033196599997609155,
+      "cold_s": 0.02927079999790294,
+      "warm_median_s": 0.03348234999793931,
+      "peak_mb": 20.828125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.032436600002256455,
+          "peak_bytes": 21716992,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.0324523000017507,
+          "peak_bytes": 21839872,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03199289999975008,
+          "peak_bytes": 21487616,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.032436600002256455,
+      "cold_s": 0.032436600002256455,
+      "warm_median_s": 0.03222260000075039,
+      "peak_mb": 20.828125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.15605589999904623,
+          "peak_bytes": 22925312,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05392579999897862,
+          "peak_bytes": 22949888,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05581710000114981,
+          "peak_bytes": 22958080,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05581710000114981,
+      "cold_s": 0.15605589999904623,
+      "warm_median_s": 0.054871450000064215,
+      "peak_mb": 21.89453125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 2.1466817000000447,
+          "peak_bytes": 22867968,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 2.204967300000135,
+          "peak_bytes": 22884352,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 2.424141600000439,
+          "peak_bytes": 22913024,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 2.204967300000135,
+      "cold_s": 2.1466817000000447,
+      "warm_median_s": 2.314554450000287,
+      "peak_mb": 21.8515625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 2.383177899999282,
+          "peak_bytes": 22941696,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 2.250779000001785,
+          "peak_bytes": 22892544,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 2.178969700002199,
+          "peak_bytes": 22831104,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 2.250779000001785,
+      "cold_s": 2.383177899999282,
+      "warm_median_s": 2.214874350001992,
+      "peak_mb": 21.87890625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "multi_120p_text",
+      "doc_class": "100+ page text",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf",
+      "pages": 120,
+      "op": "render_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 1.818976599999587,
+          "peak_bytes": 22974464,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 1.795721800001047,
+          "peak_bytes": 22949888,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 1.787751699997898,
+          "peak_bytes": 22982656,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 1.795721800001047,
+      "cold_s": 1.818976599999587,
+      "warm_median_s": 1.7917367499994725,
+      "peak_mb": 21.91796875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.01047399999879417,
+          "peak_bytes": 6615040,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01789259999713977,
+          "peak_bytes": 6615040,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.012131900002714247,
+          "peak_bytes": 6606848,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.012131900002714247,
+      "cold_s": 0.01047399999879417,
+      "warm_median_s": 0.015012249999927008,
+      "peak_mb": 6.30859375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.023601500000950182,
+          "peak_bytes": 11120640,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02056109999830369,
+          "peak_bytes": 11141120,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01993870000296738,
+          "peak_bytes": 11132928,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02056109999830369,
+      "cold_s": 0.023601500000950182,
+      "warm_median_s": 0.020249900000635535,
+      "peak_mb": 10.625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.36151629999949364,
+          "peak_bytes": 70250496,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.3628848000007565,
+          "peak_bytes": 70893568,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.3429281000026094,
+          "peak_bytes": 70881280,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.36151629999949364,
+      "cold_s": 0.36151629999949364,
+      "warm_median_s": 0.35290645000168297,
+      "peak_mb": 67.609375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.3590022000025783,
+          "peak_bytes": 70287360,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.3471527000001515,
+          "peak_bytes": 70905856,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.35919879999710247,
+          "peak_bytes": 70270976,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.3590022000025783,
+      "cold_s": 0.3590022000025783,
+      "warm_median_s": 0.353175749998627,
+      "peak_mb": 67.62109375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.32890340000085416,
+          "peak_bytes": 33824768,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.32994309999776306,
+          "peak_bytes": 33849344,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.34754160000011325,
+          "peak_bytes": 33873920,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.32994309999776306,
+      "cold_s": 0.32890340000085416,
+      "warm_median_s": 0.33874234999893815,
+      "peak_mb": 32.3046875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.3721235000011802,
+          "peak_bytes": 70287360,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.36556869999913033,
+          "peak_bytes": 70307840,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.3896775000030175,
+          "peak_bytes": 70270976,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.3721235000011802,
+      "cold_s": 0.3721235000011802,
+      "warm_median_s": 0.3776231000010739,
+      "peak_mb": 67.05078125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.3455781000011484,
+          "peak_bytes": 70287360,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.3438581000009435,
+          "peak_bytes": 71000064,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.34386150000136695,
+          "peak_bytes": 70279168,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.34386150000136695,
+      "cold_s": 0.3455781000011484,
+      "warm_median_s": 0.34385980000115524,
+      "peak_mb": 67.7109375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.32780669999920065,
+          "peak_bytes": 33853440,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.32251060000271536,
+          "peak_bytes": 33886208,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.336605899999995,
+          "peak_bytes": 33865728,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.32780669999920065,
+      "cold_s": 0.32780669999920065,
+      "warm_median_s": 0.3295582500013552,
+      "peak_mb": 32.31640625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "images",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.05274930000086897,
+          "peak_bytes": 8110080,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05233310000039637,
+          "peak_bytes": 8110080,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.06884509999872535,
+          "peak_bytes": 7823360,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05274930000086897,
+      "cold_s": 0.05274930000086897,
+      "warm_median_s": 0.06058909999956086,
+      "peak_mb": 7.734375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "image_heavy",
+      "doc_class": "image-heavy scanned",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\images.pdf",
+      "pages": 1,
+      "op": "images",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.586717200003477,
+          "peak_bytes": 11522048,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.5361656999994011,
+          "peak_bytes": 11497472,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.5512256000001798,
+          "peak_bytes": 11513856,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.5512256000001798,
+      "cold_s": 0.586717200003477,
+      "warm_median_s": 0.5436956499997905,
+      "peak_mb": 10.98828125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.011327199998049764,
+          "peak_bytes": 5439488,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.011014800002158154,
+          "peak_bytes": 5427200,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.009809300001506926,
+          "peak_bytes": 5451776,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.011014800002158154,
+      "cold_s": 0.011327199998049764,
+      "warm_median_s": 0.01041205000183254,
+      "peak_mb": 5.19921875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.020455899997614324,
+          "peak_bytes": 11010048,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.018268100000568666,
+          "peak_bytes": 11001856,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.017095499999413732,
+          "peak_bytes": 11014144,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.018268100000568666,
+      "cold_s": 0.020455899997614324,
+      "warm_median_s": 0.0176817999999912,
+      "peak_mb": 10.50390625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.12102489999961108,
+          "peak_bytes": 30396416,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.15849580000212882,
+          "peak_bytes": 30375936,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.11978319999980158,
+          "peak_bytes": 30359552,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.12102489999961108,
+      "cold_s": 0.12102489999961108,
+      "warm_median_s": 0.1391395000009652,
+      "peak_mb": 28.98828125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.11878770000112127,
+          "peak_bytes": 30380032,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.11929000000236556,
+          "peak_bytes": 30380032,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.11866050000026007,
+          "peak_bytes": 30359552,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.11878770000112127,
+      "cold_s": 0.11878770000112127,
+      "warm_median_s": 0.11897525000131282,
+      "peak_mb": 28.97265625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.056009500000072876,
+          "peak_bytes": 20312064,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05357670000012149,
+          "peak_bytes": 20303872,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05396729999847594,
+          "peak_bytes": 20275200,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05396729999847594,
+      "cold_s": 0.056009500000072876,
+      "warm_median_s": 0.053771999999298714,
+      "peak_mb": 19.37109375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.11802669999815407,
+          "peak_bytes": 30388224,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.11800660000153584,
+          "peak_bytes": 30396416,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.12177750000046217,
+          "peak_bytes": 30396416,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.11802669999815407,
+      "cold_s": 0.11802669999815407,
+      "warm_median_s": 0.119892050000999,
+      "peak_mb": 28.98828125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.12007859999721404,
+          "peak_bytes": 30396416,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.11933109999881708,
+          "peak_bytes": 30380032,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.11769229999845265,
+          "peak_bytes": 30371840,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.11933109999881708,
+      "cold_s": 0.12007859999721404,
+      "warm_median_s": 0.11851169999863487,
+      "peak_mb": 28.98828125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "vector_heavy",
+      "doc_class": "vector-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.05595230000108131,
+          "peak_bytes": 20262912,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.057171099997503916,
+          "peak_bytes": 20283392,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05571570000029169,
+          "peak_bytes": 20287488,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05595230000108131,
+      "cold_s": 0.05595230000108131,
+      "warm_median_s": 0.0564433999988978,
+      "peak_mb": 19.34765625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.00991499999872758,
+          "peak_bytes": 5922816,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.010746200001449324,
+          "peak_bytes": 5910528,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.011063699999795062,
+          "peak_bytes": 5509120,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.010746200001449324,
+      "cold_s": 0.00991499999872758,
+      "warm_median_s": 0.010904950000622193,
+      "peak_mb": 5.6484375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.02254259999972419,
+          "peak_bytes": 11223040,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.019483699998090742,
+          "peak_bytes": 11198464,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02116549999846029,
+          "peak_bytes": 11169792,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02116549999846029,
+      "cold_s": 0.02254259999972419,
+      "warm_median_s": 0.020324599998275517,
+      "peak_mb": 10.703125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.032119900002726354,
+          "peak_bytes": 13479936,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03036710000014864,
+          "peak_bytes": 13512704,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02990249999857042,
+          "peak_bytes": 13516800,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.03036710000014864,
+      "cold_s": 0.032119900002726354,
+      "warm_median_s": 0.03013479999935953,
+      "peak_mb": 12.890625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.029059299999062205,
+          "peak_bytes": 14159872,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02997309999773279,
+          "peak_bytes": 14155776,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.029658700001164107,
+          "peak_bytes": 14106624,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.029658700001164107,
+      "cold_s": 0.029059299999062205,
+      "warm_median_s": 0.029815899999448447,
+      "peak_mb": 13.50390625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.049525500002346234,
+          "peak_bytes": 14000128,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.035516500000085216,
+          "peak_bytes": 13983744,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03138549999857787,
+          "peak_bytes": 13950976,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.035516500000085216,
+      "cold_s": 0.049525500002346234,
+      "warm_median_s": 0.03345099999933154,
+      "peak_mb": 13.3515625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.028623200003494276,
+          "peak_bytes": 13516800,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02887169999667094,
+          "peak_bytes": 13524992,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.027366199999960372,
+          "peak_bytes": 13504512,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.028623200003494276,
+      "cold_s": 0.028623200003494276,
+      "warm_median_s": 0.028118949998315657,
+      "peak_mb": 12.8984375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.032562799999141134,
+          "peak_bytes": 14151680,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02830520000134129,
+          "peak_bytes": 14135296,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02819150000141235,
+          "peak_bytes": 14131200,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02830520000134129,
+      "cold_s": 0.032562799999141134,
+      "warm_median_s": 0.02824835000137682,
+      "peak_mb": 13.49609375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.03384889999870211,
+          "peak_bytes": 13975552,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03561210000043502,
+          "peak_bytes": 13955072,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.033106999999290565,
+          "peak_bytes": 13934592,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.03384889999870211,
+      "cold_s": 0.03384889999870211,
+      "warm_median_s": 0.03435954999986279,
+      "peak_mb": 13.328125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.2094362000025285,
+          "peak_bytes": 24449024,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.2230152000011003,
+          "peak_bytes": 23699456,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.2345473999994283,
+          "peak_bytes": 23687168,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.2230152000011003,
+      "cold_s": 0.2094362000025285,
+      "warm_median_s": 0.2287813000002643,
+      "peak_mb": 23.31640625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.23922490000040852,
+          "peak_bytes": 23642112,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.2445460999988427,
+          "peak_bytes": 23666688,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.2527217999995628,
+          "peak_bytes": 23650304,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.2445460999988427,
+      "cold_s": 0.23922490000040852,
+      "warm_median_s": 0.24863394999920274,
+      "peak_mb": 22.5703125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.14079940000010538,
+          "peak_bytes": 32587776,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.1267232000027434,
+          "peak_bytes": 32497664,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.12829449999844655,
+          "peak_bytes": 32518144,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.12829449999844655,
+      "cold_s": 0.14079940000010538,
+      "warm_median_s": 0.12750885000059498,
+      "peak_mb": 31.078125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.2509073000001081,
+          "peak_bytes": 23629824,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.24516210000001593,
+          "peak_bytes": 23670784,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.23772570000073756,
+          "peak_bytes": 23609344,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.24516210000001593,
+      "cold_s": 0.2509073000001081,
+      "warm_median_s": 0.24144390000037674,
+      "peak_mb": 22.57421875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.23644060000151512,
+          "peak_bytes": 23609344,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.23240140000052634,
+          "peak_bytes": 23678976,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.23924930000066524,
+          "peak_bytes": 23707648,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.23644060000151512,
+      "cold_s": 0.23644060000151512,
+      "warm_median_s": 0.2358253500005958,
+      "peak_mb": 22.609375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "font_heavy",
+      "doc_class": "font-heavy",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\mixedfonts.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.12154170000212616,
+          "peak_bytes": 32419840,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.1187582000020484,
+          "peak_bytes": 32505856,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.12122570000065025,
+          "peak_bytes": 32436224,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.12122570000065025,
+      "cold_s": 0.12154170000212616,
+      "warm_median_s": 0.11999195000134932,
+      "peak_mb": 31.0,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.017491300000983756,
+          "peak_bytes": 8835072,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.018169399998441804,
+          "peak_bytes": 8839168,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01825729999836767,
+          "peak_bytes": 8835072,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.018169399998441804,
+      "cold_s": 0.017491300000983756,
+      "warm_median_s": 0.018213349998404738,
+      "peak_mb": 8.4296875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.04542419999779668,
+          "peak_bytes": 11374592,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.030075800001213793,
+          "peak_bytes": 11370496,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.028559099999256432,
+          "peak_bytes": 11378688,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.030075800001213793,
+      "cold_s": 0.04542419999779668,
+      "warm_median_s": 0.029317450000235112,
+      "peak_mb": 10.8515625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.04210530000273138,
+          "peak_bytes": 9334784,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.043885500002943445,
+          "peak_bytes": 9175040,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.04725589999725344,
+          "peak_bytes": 9162752,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.043885500002943445,
+      "cold_s": 0.04210530000273138,
+      "warm_median_s": 0.04557070000009844,
+      "peak_mb": 8.90234375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.04167120000056457,
+          "peak_bytes": 9953280,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05742689999897266,
+          "peak_bytes": 9822208,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03977669999949285,
+          "peak_bytes": 9789440,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.04167120000056457,
+      "cold_s": 0.04167120000056457,
+      "warm_median_s": 0.04860179999923275,
+      "peak_mb": 9.4921875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "text_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.03976390000025276,
+          "peak_bytes": 11436032,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03004510000027949,
+          "peak_bytes": 11448320,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.030261399999290006,
+          "peak_bytes": 11431936,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.030261399999290006,
+      "cold_s": 0.03976390000025276,
+      "warm_median_s": 0.030153249999784748,
+      "peak_mb": 10.91796875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 9.09256280000045,
+          "peak_bytes": 13504512,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 8.07924180000191,
+          "peak_bytes": 13103104,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 8.337993000001006,
+          "peak_bytes": 13340672,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 8.337993000001006,
+      "cold_s": 9.09256280000045,
+      "warm_median_s": 8.208617400001458,
+      "peak_mb": 12.87890625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 1.0888975000016217,
+          "peak_bytes": 37560320,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 1.395786599998246,
+          "peak_bytes": 36265984,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 1.3679138000006787,
+          "peak_bytes": 36564992,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 1.3679138000006787,
+      "cold_s": 1.0888975000016217,
+      "warm_median_s": 1.3818501999994623,
+      "peak_mb": 35.8203125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "text_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 1.0417855999985477,
+          "peak_bytes": 14135296,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.8013457000015478,
+          "peak_bytes": 14286848,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.7496620999991137,
+          "peak_bytes": 14192640,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.8013457000015478,
+      "cold_s": 1.0417855999985477,
+      "warm_median_s": 0.7755039000003308,
+      "peak_mb": 13.625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.2515601000013703,
+          "peak_bytes": 31440896,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.24531209999986459,
+          "peak_bytes": 31379456,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.2449317999999039,
+          "peak_bytes": 31453184,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.24531209999986459,
+      "cold_s": 0.2515601000013703,
+      "warm_median_s": 0.24512194999988424,
+      "peak_mb": 29.99609375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.23305080000136513,
+          "peak_bytes": 32116736,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.23245030000180122,
+          "peak_bytes": 31883264,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.23938930000076653,
+          "peak_bytes": 32145408,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.23305080000136513,
+      "cold_s": 0.23305080000136513,
+      "warm_median_s": 0.23591980000128387,
+      "peak_mb": 30.65625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "large_linearized",
+      "doc_class": "large-byte linearized",
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\pdfjs\\freeculture.pdf",
+      "pages": 352,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.22938259999864385,
+          "peak_bytes": 27447296,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.1654954000005091,
+          "peak_bytes": 27443200,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.16339520000110497,
+          "peak_bytes": 27455488,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.1654954000005091,
+      "cold_s": 0.22938259999864385,
+      "warm_median_s": 0.16444530000080704,
+      "peak_mb": 26.18359375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.012988200000108918,
+          "peak_bytes": 8060928,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.012183000002551125,
+          "peak_bytes": 8056832,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.011261799998464994,
+          "peak_bytes": 8077312,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.012183000002551125,
+      "cold_s": 0.012988200000108918,
+      "warm_median_s": 0.01172240000050806,
+      "peak_mb": 7.703125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "info",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.04297890000088955,
+          "peak_bytes": 11358208,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.023746200000459794,
+          "peak_bytes": 11341824,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.022480700001324294,
+          "peak_bytes": 11341824,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.023746200000459794,
+      "cold_s": 0.04297890000088955,
+      "warm_median_s": 0.023113450000892044,
+      "peak_mb": 10.83203125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.013815799997246359,
+          "peak_bytes": 8536064,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.014813800000410993,
+          "peak_bytes": 8531968,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.017758499998308253,
+          "peak_bytes": 8523776,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.014813800000410993,
+      "cold_s": 0.013815799997246359,
+      "warm_median_s": 0.016286149999359623,
+      "peak_mb": 8.140625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.014242299999750685,
+          "peak_bytes": 9056256,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.0177521000005072,
+          "peak_bytes": 9216000,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01611869999760529,
+          "peak_bytes": 9109504,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.01611869999760529,
+      "cold_s": 0.014242299999750685,
+      "warm_median_s": 0.016935399999056244,
+      "peak_mb": 8.7890625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "text_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.027020300000003772,
+          "peak_bytes": 11632640,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.024288600001455052,
+          "peak_bytes": 11616256,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.025705899999593385,
+          "peak_bytes": 11628544,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.025705899999593385,
+      "cold_s": 0.027020300000003772,
+      "warm_median_s": 0.024997250000524218,
+      "peak_mb": 11.09375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.014534199999616249,
+          "peak_bytes": 8519680,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.014680099997349316,
+          "peak_bytes": 8552448,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.015002799998910632,
+          "peak_bytes": 8491008,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.014680099997349316,
+      "cold_s": 0.014534199999616249,
+      "warm_median_s": 0.014841449998129974,
+      "peak_mb": 8.15625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.017625000000407454,
+          "peak_bytes": 9142272,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.014382900000782683,
+          "peak_bytes": 9158656,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.01482659999965108,
+          "peak_bytes": 9175040,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.01482659999965108,
+      "cold_s": 0.017625000000407454,
+      "warm_median_s": 0.014604750000216882,
+      "peak_mb": 8.75,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "text_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.026835799999389565,
+          "peak_bytes": 11624448,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03861640000104671,
+          "peak_bytes": 11616256,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02558349999890197,
+          "peak_bytes": 11587584,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.026835799999389565,
+      "cold_s": 0.026835799999389565,
+      "warm_median_s": 0.03209994999997434,
+      "peak_mb": 11.0859375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.025683599997137208,
+          "peak_bytes": 24432640,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.023925100002088584,
+          "peak_bytes": 24420352,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.026629700001649326,
+          "peak_bytes": 24494080,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.025683599997137208,
+      "cold_s": 0.025683599997137208,
+      "warm_median_s": 0.025277400001868955,
+      "peak_mb": 23.359375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.025101100000028964,
+          "peak_bytes": 24428544,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02558060000228579,
+          "peak_bytes": 24424448,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.03969819999838364,
+          "peak_bytes": 24428544,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02558060000228579,
+      "cold_s": 0.025101100000028964,
+      "warm_median_s": 0.03263940000033472,
+      "peak_mb": 23.296875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "render_page1",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.061625300000741845,
+          "peak_bytes": 23052288,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.06049419999908423,
+          "peak_bytes": 23076864,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.07326729999840609,
+          "peak_bytes": 23031808,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.061625300000741845,
+      "cold_s": 0.061625300000741845,
+      "warm_median_s": 0.06688074999874516,
+      "peak_mb": 22.0078125,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@1",
+      "runs": [
+        {
+          "time_s": 0.024289799999678507,
+          "peak_bytes": 24498176,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02312780000283965,
+          "peak_bytes": 24510464,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.02293419999841717,
+          "peak_bytes": 24506368,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.02312780000283965,
+      "cold_s": 0.024289799999678507,
+      "warm_median_s": 0.02303100000062841,
+      "peak_mb": 23.375,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "oxide",
+      "engine_label": "oxide@N",
+      "runs": [
+        {
+          "time_s": 0.024991999998746905,
+          "peak_bytes": 24514560,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.023724700000457233,
+          "peak_bytes": 24444928,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.022704999999405118,
+          "peak_bytes": 24473600,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.023724700000457233,
+      "cold_s": 0.024991999998746905,
+      "warm_median_s": 0.023214849999931175,
+      "peak_mb": 23.37890625,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    },
+    {
+      "case": "incremental_xfa",
+      "doc_class": "incremental/XFA form",
+      "file": "E:\\wellpdfsdk\\renderer-benchmark\\corpus\\real-world\\pdfjs-full\\xfa_filled_imm1344e.pdf",
+      "pages": 1,
+      "op": "render_all",
+      "engine": "poppler",
+      "engine_label": "poppler",
+      "runs": [
+        {
+          "time_s": 0.057120499997836305,
+          "peak_bytes": 23040000,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05840090000128839,
+          "peak_bytes": 23080960,
+          "rc": 0,
+          "timed_out": false
+        },
+        {
+          "time_s": 0.05772399999841582,
+          "peak_bytes": 23040000,
+          "rc": 0,
+          "timed_out": false
+        }
+      ],
+      "median_s": 0.05772399999841582,
+      "cold_s": 0.057120499997836305,
+      "warm_median_s": 0.058062449999852106,
+      "peak_mb": 22.01171875,
+      "rcs": [
+        0,
+        0,
+        0
+      ],
+      "timed_out": false
+    }
+  ],
+  "ratios": [
+    {
+      "case": "font_heavy",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.969579944129621,
+      "winner": "oxide"
+    },
+    {
+      "case": "font_heavy",
+      "op": "render_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.4944716169450432,
+      "winner": "poppler"
+    },
+    {
+      "case": "font_heavy",
+      "op": "render_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.5127110149435986,
+      "winner": "poppler"
+    },
+    {
+      "case": "font_heavy",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.5752724477874762,
+      "winner": "poppler"
+    },
+    {
+      "case": "font_heavy",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.5246229647459261,
+      "winner": "poppler"
+    },
+    {
+      "case": "font_heavy",
+      "op": "text_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.182568685352088,
+      "winner": "oxide"
+    },
+    {
+      "case": "font_heavy",
+      "op": "text_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.1958544718672937,
+      "winner": "oxide"
+    },
+    {
+      "case": "font_heavy",
+      "op": "text_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.169571674605457,
+      "winner": "oxide"
+    },
+    {
+      "case": "font_heavy",
+      "op": "text_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.197506970928975,
+      "winner": "oxide"
+    },
+    {
+      "case": "image_heavy",
+      "op": "images",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 10.449913079246533,
+      "winner": "oxide"
+    },
+    {
+      "case": "image_heavy",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.6947963627876586,
+      "winner": "oxide"
+    },
+    {
+      "case": "image_heavy",
+      "op": "render_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.8809083543451596,
+      "winner": "poppler"
+    },
+    {
+      "case": "image_heavy",
+      "op": "render_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.9533102717166578,
+      "winner": "poppler"
+    },
+    {
+      "case": "image_heavy",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.9126645188563426,
+      "winner": "poppler"
+    },
+    {
+      "case": "image_heavy",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.9190559277781402,
+      "winner": "poppler"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.9491258307056825,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "render_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 2.4958707698669316,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "render_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 2.4330760767176547,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 2.399402732000609,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 2.4090638998004437,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "text_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.8280393188217463,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "text_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.8099766635655579,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "text_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.7352671157218407,
+      "winner": "oxide"
+    },
+    {
+      "case": "incremental_xfa",
+      "op": "text_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.5947874210334851,
+      "winner": "oxide"
+    },
+    {
+      "case": "large_linearized",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.6552995698148025,
+      "winner": "oxide"
+    },
+    {
+      "case": "large_linearized",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.674632029975694,
+      "winner": "poppler"
+    },
+    {
+      "case": "large_linearized",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.7101258609691092,
+      "winner": "poppler"
+    },
+    {
+      "case": "large_linearized",
+      "op": "text_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.09610774439381889,
+      "winner": "poppler"
+    },
+    {
+      "case": "large_linearized",
+      "op": "text_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.58581593372415,
+      "winner": "poppler"
+    },
+    {
+      "case": "large_linearized",
+      "op": "text_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.6895534971063414,
+      "winner": "poppler"
+    },
+    {
+      "case": "large_linearized",
+      "op": "text_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.7261945900017283,
+      "winner": "poppler"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.6448860738141282,
+      "winner": "oxide"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "render_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.8143983813278942,
+      "winner": "poppler"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "render_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.7978223539492874,
+      "winner": "poppler"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.6814101445681124,
+      "winner": "oxide"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.720806126328496,
+      "winner": "oxide"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "text_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.09436290852741669,
+      "winner": "poppler"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "text_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.45804953862125075,
+      "winner": "poppler"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "text_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.4255845348688094,
+      "winner": "oxide"
+    },
+    {
+      "case": "multi_120p_text",
+      "op": "text_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.4755580450470318,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 2.1961679823647535,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "render_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 2.0527971318766465,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "render_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.8828701237604615,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 2.1021759917637732,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 2.1391845576884774,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "text_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.8004920894348846,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "text_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 2.06808813185418,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "text_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.8830382861221053,
+      "winner": "oxide"
+    },
+    {
+      "case": "small_1p_text",
+      "op": "text_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 1.7761361469170556,
+      "winner": "oxide"
+    },
+    {
+      "case": "vector_heavy",
+      "op": "info",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 1.6585049203788862,
+      "winner": "oxide"
+    },
+    {
+      "case": "vector_heavy",
+      "op": "render_all",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.47406476671766984,
+      "winner": "poppler"
+    },
+    {
+      "case": "vector_heavy",
+      "op": "render_all",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.4688827975409257,
+      "winner": "poppler"
+    },
+    {
+      "case": "vector_heavy",
+      "op": "render_page1",
+      "comparison": "oxide@1",
+      "speed_ratio_poppler_over_oxide": 0.4459189802978508,
+      "winner": "poppler"
+    },
+    {
+      "case": "vector_heavy",
+      "op": "render_page1",
+      "comparison": "oxide@N",
+      "speed_ratio_poppler_over_oxide": 0.4543172398991354,
+      "winner": "poppler"
+    }
+  ]
+}

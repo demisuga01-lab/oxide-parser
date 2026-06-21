@@ -30,7 +30,8 @@ parser, the stream filters, and the content-stream tokenizer.
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)
 workspace member (excluded from the stable workspace so `cargo build`/`cargo
-test` stay green without nightly). Six targets:
+test` stay green without nightly). Ten targets were built and run in the Prompt
+G safety pass:
 
 | Target              | Entry point                          | Subsystem |
 |---------------------|--------------------------------------|-----------|
@@ -40,6 +41,10 @@ test` stay green without nightly). Six targets:
 | `content_tokenizer` | `ContentParser::parse(bytes)`        | Content tokenizer + inline-image state machine + operand parser |
 | `image_decoders`    | `fuzz::fuzz_decode_image`            | CCITT G3/G4, JBIG2, JPEG2000 (JPX), DCT/JPEG decode paths (selector byte picks the codec) |
 | `fonts`             | `fuzz::fuzz_parse_font`              | Font-program parsing (TrueType / CFF / OpenType / bare-CFF) via the glyph-outline extractor |
+| `cmap`              | `fuzz::fuzz_parse_cmap`              | ToUnicode CMap parsing and lookup |
+| `crypto`            | `fuzz::fuzz_crypto`                  | Standard encryption dictionary parsing, password verification, key derivation, stream decrypt |
+| `functions`         | `fuzz::fuzz_functions`               | PDF Function Types 0/2/3/4, sampled-function bit reader, Type 4 PostScript calculator |
+| `writer`            | `fuzz::fuzz_writer`                  | Object serialization, string/name/stream escaping, tiny output-PDF generation |
 
 Seed corpora (valid objects, content streams, encoded filter data, bundled
 font programs) are under `fuzz/corpus/<target>/`. See
@@ -58,6 +63,9 @@ to the function and asserting `Err`.
 | 2 | Unbounded allocation (OOM) | `reader.rs` `parse_object_stream_data` | `Vec::with_capacity(n)` where `n` is the attacker-controlled `/N` object-stream count; a tiny stream declaring `/N 4000000000` reserves ~tens of GB before any per-entry validation | Capacity hint bounded by `n.min(first)` (a real entry needs ≥1 header byte, so the count cannot exceed the header length); the read loop still errors cleanly on a truncated header | `reader::tests::object_stream_huge_n_does_not_allocate_or_panic` |
 | 3 | Integer-overflow panic / size-field misvalidation | `filters.rs` `apply_predictor` | `columns * colors * bits_per_component` (all attacker-controlled via DecodeParms) multiplied without overflow check — panics under overflow checks, silently wraps to a bogus row length otherwise | Switched to `checked_mul`; overflow returns `MalformedPdf` | `filters::tests::predictor_row_dimensions_overflow_returns_err_not_panic` |
 | 4 | **Infinite loop (hang / CPU-DoS)** — *found by libFuzzer (`content_tokenizer`) this round* | `content/tokenizer.rs` `read_inline_image_data` + `content/parser.rs` `parse_tokens` | An inline image (`BI`/`ID`) with no `EI` terminator made `read_inline_image_data` return a token error **without advancing `pos` or leaving the `Data` state**; `ContentParser::parse` recovers from token errors with `continue`, so it called the tokenizer again at the same position, got the same error, and looped forever (100% CPU, no termination). | On no-`EI`, consume the remaining bytes as the (unterminated) inline-image payload, advance to EOF, and leave the inline-image state so iteration terminates. The previously-hanging libFuzzer input now executes in ~1 ms. | `content::tokenizer::tests::unterminated_inline_image_terminates_and_does_not_hang` (+ the minimized input saved as a corpus seed) |
+
+| 5 | Panic (malformed encryption dictionary) | `crypto.rs` `EncryptionInfo::from_dict` / `compute_encryption_key` | The new `crypto` fuzz target generated a legacy V1-V4 encryption dictionary with `/Length 256`. The parser accepted it, then key derivation tried to slice 32 bytes from a 16-byte MD5 digest. | Reject legacy `/Length` values outside 40..128 bits in 8-bit increments; `compute_encryption_key` also clamps defensively so direct internal calls cannot panic. | `crypto::tests::from_dict_rejects_invalid_legacy_key_length`, `crypto::tests::compute_encryption_key_defensively_caps_invalid_legacy_length` |
+| 6 | Resource cap too loose for a 1 GB render harness | `engine.rs` `DEFAULT_MAX_RENDER_PIXELS` | A real pdf.js image fixture (`issue19517.pdf`) declares a 12608x16806 pt page: 211,890,048 pixels at 72 DPI. The old 300 MP engine default admitted it, so the outer 1 GB harness memory cap killed both Oxide and Poppler. | Lowered the default engine/CLI render cap to 100 MP, matching the server default. The page now fails in 56 ms with a clean `ResourceLimit` and 3.1 MB peak RSS. | `render_resource_limits::oversized_real_world_page_is_capped_at_default_limit` |
 
 ### Audited and already robust (no change needed)
 
@@ -80,15 +88,18 @@ to the function and asserting `Err`.
 
 ## Current posture
 
-The parser, stream filters, content tokenizer, image decoders, and font parser
+The parser, stream filters, content tokenizer, image decoders, font parser,
+CMap parser, crypto primitives, function evaluator, and writer
 return cleanly — never panic, hang, or allocate unboundedly — on the malformed
-inputs exercised. **Four** distinct DoS bugs (one unbounded recursion, one
-unbounded allocation, one integer-overflow, and one inline-image infinite loop)
-were found and fixed, each guarded by a permanent regression test.
+inputs exercised. **Six** distinct robustness bugs or resource gaps have been
+found and fixed so far: unbounded recursion, unbounded allocation, integer
+overflow, an inline-image infinite loop, invalid legacy encryption key length,
+and an over-loose default render pixel cap. Each is guarded by a permanent
+regression test.
 
 ## Fuzzing runs actually executed (this round)
 
-All six targets were built and run on nightly + cargo-fuzz 0.13.1
+All ten targets were built and run on nightly + cargo-fuzz 0.13.1
 (x86_64-pc-windows-msvc), release with debug-assertions + overflow-checks on,
 seeded from the committed corpora:
 
@@ -100,30 +111,118 @@ seeded from the committed corpora:
 | `content_tokenizer` | (pre-fix) hung on 1 input → fixed → 740,817 | 121 s | **1 bug found+fixed** (finding #4), clean after fix |
 | `image_decoders` | 1,187,273 | 181 s | clean |
 | `fonts` | 503,991 | 181 s | clean |
+| `cmap` | 5,459 | 31 s | clean after adding a 65,536 mapping cap |
+| `crypto` | 26,473 | 61 s | **1 bug found+fixed** (finding #5), clean after fix |
+| `functions` | 182,612 | 61 s | clean |
+| `writer` | 384,711 | 61 s | clean |
 
-The single finding (the inline-image infinite loop) was minimized, fixed, and
-turned into a regression test; its minimized input is kept as a corpus seed.
+The new finding in this pass was the crypto `/Length` panic. The CMap run also
+motivated a hard per-CMap mapping cap; it did not crash, but without the cap a
+tiny malicious CMap could drive unnecessary map growth. Both changes are now
+covered by regression tests.
 
 ## Honest limitations
 
 - **These are short, bounded runs** (≈1–3 min per target), enough to confirm
   the harness works on this platform, to re-exercise the seeded corpora, and to
-  surface one real hang — but **not** the multi-hour coverage-guided campaigns
+  surface real bugs — but **not** the multi-hour coverage-guided campaigns
   that find deep bugs. The claim is "fuzzed clean for the durations above, with
-  one found bug fixed," not "fuzzed clean for N hours."
+  the findings listed here fixed," not "fuzzed clean for N hours."
 - **Coverage now includes** the parser, stream filters, predictor, content
-  tokenizer, **image decoders** (CCITT/JBIG2/JPX/DCT), and **font parsing**
-  (TrueType/CFF/bare-CFF) — the image and font subsystems flagged as gaps in the
-  prior round are now fuzzed.
-- **Still not fuzzed**: the **crypto** path (`crypto.rs` — malformed encryption
-  dictionaries / password handling) and the higher-level render pipeline. The
-  image/font decoders largely wrap third-party crates (`hayro-*`, `ttf-parser`,
-  `jpeg-decoder`); a crash inside a dependency would be an upstream bug, but
-  Oxide's wrappers are expected to guard sizes/return errors regardless — no
-  such dep-level crash surfaced in these runs.
+  tokenizer, image decoders (CCITT/JBIG2/JPX/DCT), font parsing,
+  ToUnicode CMaps, crypto dictionary/key/decrypt paths, PDF Functions, and writer serialization.
+- **Still not fuzzed directly**: the full raster render pipeline and the C API
+  FFI boundary. Rendering is covered by the isolated subprocess benchmark
+  harness; the C API is covered by unit tests, but a cargo-fuzz ASan target could
+  not be linked on MSVC because the crate also builds as `cdylib`.
+- The image/font/shaping paths wrap Rust dependency crates (`hayro-*`,
+  `ttf-parser`, `jpeg-decoder`, `rustybuzz`). A crash inside a dependency would
+  be an upstream bug, but Oxide's wrappers are expected to validate sizes and
+  return errors regardless; no dependency-level crash surfaced in these runs.
 - `cargo-fuzz` requires nightly Rust; the `fuzz/` crate is intentionally
   outside the stable workspace, so the stable `cargo build`/`cargo test` never
   sees it.
+
+## Prompt G CVE-class corpus run
+
+The Prompt G safety corpus is saved at
+[`renderer-benchmark/corpus/prompt-g-cve-class-manifest.json`](../renderer-benchmark/corpus/prompt-g-cve-class-manifest.json).
+It contains 751 files selected from the expanded pdf.js corpus plus generated
+hostile fixtures to mirror CVE-class input shapes: malformed/truncated streams,
+bad xrefs/object streams/startxref, resource bombs, malformed image codecs,
+malformed fonts/CMaps, malformed encryption/signature dictionaries, and inert
+active-content fixtures.
+
+Class counts from the manifest:
+
+| Class | Files |
+|---|---:|
+| Public suite fuzzed/bug-regression fixtures | 622 |
+| Hostile generated fixtures | 60 |
+| Image-codec fixtures | 28 |
+| Resource-bound fixtures | 27 |
+| Font/CMap fixtures | 23 |
+| Active-content fixtures | 18 |
+| Xref/object-stream/structure fixtures | 13 |
+| Crypto/signature fixtures | 7 |
+
+Run command:
+
+```powershell
+py renderer-benchmark\scripts\renderer_benchmark.py `
+  --manifest renderer-benchmark\corpus\prompt-g-cve-class-manifest.json `
+  --oxide-bin target\release\oxide.exe `
+  --poppler-bin-dir target\tools\poppler\poppler-26.02.0\Library\bin `
+  --output-dir renderer-benchmark\results\prompt-g-cve-class `
+  --dpi 72 --max-pages-per-file 1 --timeout-sec 15 --max-memory-mb 1024 `
+  --determinism-sample 0
+```
+
+Full run result:
+
+- Files processed: 751.
+- Hostile subset: 60/60 crash-free, timeout-safe, and memory-bounded.
+- All-file Oxide crashes/panics: 0.
+- Active-content fixtures: rendered as inert PDF content; Oxide has no
+  JavaScript/Launch execution path.
+- Initial all-file resource findings: 2.
+  - `pdfjs_full_issue19517`: both Oxide and Poppler crossed the 1 GB harness
+    memory cap on a 211.9 MP page. Fixed by lowering Oxide's default render cap
+    to 100 MP; targeted rerun returns a clean `ResourceLimit` in 56 ms with
+    3.08 MB peak RSS.
+  - `pdfjs_full_issue840`: timed out under the 15 s safety harness but completed
+    cleanly under a 30 s targeted rerun (12.4 s, 18.4 MB peak RSS). This is a
+    performance/visual-fidelity item, not a crash/hang/OOM.
+
+After the targeted fixes/reruns, the safety statement for the corpus is:
+0 Oxide panics/aborts, no unbounded memory growth, hostile fixtures bounded by
+the harness, and every discovered malformed-input panic/resource issue fixed or
+converted into a clean error.
+
+## AddressSanitizer and `unsafe`
+
+The core engine, CLI, and server have no workspace-owned `unsafe` blocks. The
+`oxide-capi` crate necessarily contains FFI `unsafe` around raw pointers and
+ownership transfer. `cargo test -p oxide-capi` passed, and an ASan libFuzzer
+replay of `parse_pdf` passed, but a direct `oxide-capi` fuzz target could not be
+linked on Windows/MSVC because the crate also emits `cdylib` and the fuzz link
+failed with an unresolved `main` symbol. Treat the C API FFI boundary as audited
+and unit-tested, but not yet ASan-fuzzed.
+
+## Poppler comparison framing
+
+Oxide's factual differentiator is class elimination, not perfection: safe Rust
+eliminates buffer-overflow, use-after-free, and out-of-bounds-write bugs in the
+core engine/CLI/server by construction, while Poppler is a C++ stack that must
+continue patching memory-safety and malformed-document crash classes. Public
+evidence used for this framing:
+
+- Poppler's 26.02.0 release notes include crash fixes for malformed documents:
+  <https://poppler.freedesktop.org/releases.html>
+- Public advisories document Poppler memory-safety vulnerabilities as a real
+  class, for example GitHub Security Lab's CVE-2025-52886 use-after-free
+  advisory:
+  <https://securitylab.github.com/advisories/GHSL-2025-054_poppler/>
 
 ## Resource safety: per-request timeout and limits (server)
 
@@ -259,4 +358,3 @@ for a future persistent backend.
   and decompression caps and the async backstop, but does not yet thread the
   `CancelToken` into per-image decode the way rendering does — a candidate for
   the next round.
-

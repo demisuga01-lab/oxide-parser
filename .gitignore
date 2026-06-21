@@ -19,6 +19,26 @@ _ox.txt
 crates/engine/tests/fixtures/tracemonkey*.html
 crates/engine/tests/fixtures/*.ppm
 
+# Renderer-benchmark heavy data: the input corpus (~332 MB of third-party /
+# real-world / CVE-class / hostile PDFs, regenerable from the manifests) and the
+# generated results (rendered PNGs, ZIPs, per-file JSON — ~tens of thousands of
+# files). The harness scripts, README, manifests, and expected/ summaries ARE
+# tracked so the benchmark is reproducible; only the bulk data is excluded.
+# (The small ~220 KB extraction-benchmark corpus IS committed — it is product
+# evidence, ground-truth-labeled, and tiny.)
+renderer-benchmark/corpus/
+renderer-benchmark/results/
+
+# Stray native build artifacts from compiling the C-ABI example locally.
+*.obj
+*.exp
+
+# wasm-bindgen / wasm-pack generated package for the browser demo. This is a
+# BUILD ARTIFACT (the compiled .wasm + JS glue + .d.ts), regenerated from
+# crates/oxide-wasm via the commands in examples/browser/README.md. Not tracked
+# (large, regenerable, and would otherwise drift from the Rust source).
+crates/oxide-wasm/examples/browser/pkg/
+
 # Fuzzing build/run outputs. Everything libFuzzer GENERATES at runtime
 # (mutated corpus entries, crash/timeout artifacts, lockfile, target dir) is
 # not tracked. Only the small hand-written SEED inputs under fuzz/corpus/ are

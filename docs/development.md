@@ -37,9 +37,11 @@ disposition is to `.gitignore` them (or move them under a clearly-labelled
 `dev/` area) so a public checkout contains only product + product docs. They are
 **deliberately left in place and untouched** here — removing or relocating a
 contributor's working materials is the repository owner's call; this note
-records the decision point rather than making it unilaterally. If you want them
-out of version control, add `skills/` and `references/` to `.gitignore` (no code
-change is required — nothing depends on them).
+records the decision point rather than making it unilaterally. These files are
+**currently tracked** (committed in the base history). To take them out of
+version control, run `git rm -r --cached skills references` and add them to
+`.gitignore` — `.gitignore` alone does not untrack already-committed files.
+Nothing depends on them, so this is purely a repository-hygiene choice.
 
 ## Scratch files
 

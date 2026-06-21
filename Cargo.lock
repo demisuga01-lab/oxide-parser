@@ -371,6 +371,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -709,8 +719,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -963,6 +975,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2025f20d7a4fa7785846e7b63d10a76d3f1cee98ee5cb79ea59703f95e42162"
 dependencies = [
  "cfg-if",
+ "futures-util",
  "wasm-bindgen",
 ]
 
@@ -1184,11 +1197,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oxide-capi"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "oxide-engine",
+ "serde_json",
+]
+
+[[package]]
 name = "oxide-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
  "oxide-engine",
+ "oxide-ocr-tesseract",
  "rayon",
  "serde_json",
  "zip",
@@ -1214,10 +1237,13 @@ dependencies = [
  "log",
  "md-5",
  "png 0.17.16",
+ "qcms",
  "rayon",
  "resvg",
  "rsa",
+ "rustybuzz",
  "serde",
+ "serde_json",
  "sha1",
  "sha2",
  "spki",
@@ -1226,6 +1252,13 @@ dependencies = [
  "unicode-bidi",
  "x509-cert",
  "zip",
+]
+
+[[package]]
+name = "oxide-ocr-tesseract"
+version = "0.1.0"
+dependencies = [
+ "oxide-engine",
 ]
 
 [[package]]
@@ -1248,6 +1281,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zip",
+]
+
+[[package]]
+name = "oxide-wasm"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "getrandom 0.2.17",
+ "oxide-engine",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1410,6 +1454,12 @@ checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "qcms"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edecfcd5d755a5e5d98e24cf43113e7cdaec5a070edd0f6b250c03a573da30fa"
 
 [[package]]
 name = "quick-error"

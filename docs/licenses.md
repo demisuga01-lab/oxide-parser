@@ -27,14 +27,14 @@ The full license texts ship in-repo as those licenses require.
 
 ## 3. Rust crate dependencies
 
-A `cargo metadata` scan of the **entire resolved dependency tree** (258
-third-party crates, excluding Oxide's own three) yields the following license
-distribution — **all permissive, no forced copyleft**:
+A `cargo metadata` scan of the **entire resolved dependency tree** (260
+third-party crates, excluding Oxide's own workspace crates) yields the following
+license distribution — **all permissive, no forced copyleft**:
 
 | Count | License (SPDX) |
 |---:|---|
 | 134 | MIT OR Apache-2.0 |
-| 46 | MIT |
+| 47 | MIT |
 | 31 | Apache-2.0 OR MIT |
 | 14 | MIT/Apache-2.0 |
 | 6 | Unlicense OR MIT |

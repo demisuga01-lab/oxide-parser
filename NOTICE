@@ -1,0 +1,61 @@
+Oxide PDF Toolkit
+Copyright (c) 2024-2026 the Oxide authors
+
+This product is licensed under the terms of MIT OR Apache-2.0 (at your option).
+See LICENSE-MIT and LICENSE-APACHE at the repository root.
+
+================================================================================
+THIRD-PARTY NOTICES
+================================================================================
+
+This software bundles and depends on third-party components. This NOTICE is the
+top-level summary; the COMPLETE, authoritative attribution — every dependency,
+its SPDX license, the bundled-font provenance, and the commercial-compatibility
+audit — lives in docs/licenses.md. Verbatim license texts ship in-tree at the
+locations referenced below.
+
+--------------------------------------------------------------------------------
+1. Bundled fonts (embedded into oxide-engine as fallback/substitution data)
+--------------------------------------------------------------------------------
+
+  DejaVu Sans (DejaVuSans.ttf)
+    License: DejaVu / Bitstream Vera (permissive, MIT-like) + Arev; the DejaVu
+             modifications are in the public domain.
+    Text:    crates/engine/fonts/LICENSE-DejaVu.txt
+    Source:  https://dejavu-fonts.github.io/
+
+  Liberation Sans / Serif / Mono (Liberation*.ttf, 12 files)
+    License: SIL Open Font License (OFL) 1.1 (Reserved Font Name: "Liberation")
+    Text:    crates/engine/fonts/LICENSE-Liberation.txt
+    Source:  https://github.com/liberationfonts/liberation-fonts
+
+  Both font families are permissive (non-copyleft); the fonts are shipped
+  unmodified with their license texts, satisfying the OFL and Bitstream Vera
+  redistribution terms. See crates/engine/fonts/README.md for full provenance.
+
+--------------------------------------------------------------------------------
+2. Rust crate dependencies
+--------------------------------------------------------------------------------
+
+  The resolved dependency tree comprises 260 third-party crates (excluding
+  Oxide's own workspace crates). A `cargo metadata` license audit finds the tree
+  is ENTIRELY PERMISSIVE: predominantly MIT OR Apache-2.0, with some MIT, BSD,
+  Zlib, Unicode-3.0, and IJG (libjpeg) components — all permissive.
+
+  No GPL / AGPL / LGPL / MPL / EUPL / CDDL / SSPL is FORCED anywhere in the tree.
+  The single crate whose license string mentions any GPL form is `r-efi`
+  (MIT OR Apache-2.0 OR LGPL-2.1-or-later) — a tri-licensed UEFI-target crate
+  from which the MIT/Apache option is taken (no copyleft forced) and which does
+  not compile on the primary targets.
+
+  COMMERCIAL-COMPATIBILITY VERDICT: the dependency tree and the bundled fonts are
+  fully compatible with redistributing and SELLING this SDK under MIT OR
+  Apache-2.0, including embedding in proprietary/closed-source software, with no
+  copyleft obligations. (Contrast Poppler's GPLv2-family licensing.)
+
+  NOTE: PyMuPDF (AGPL) is used ONLY as an external comparison/benchmark tool in
+  the dev-time benchmark harness; it is NOT a dependency of any Oxide crate and
+  is never linked or distributed with the SDK.
+
+  The full per-license breakdown, the audit method, and reproduction steps are
+  in docs/licenses.md.

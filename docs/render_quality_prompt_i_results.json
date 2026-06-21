@@ -1,0 +1,74 @@
+{
+  "generated_at": "2026-06-17T13:40:38.499406+00:00",
+  "oxide_bin": "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+  "poppler_bin_dir": "E:\\wellpdfsdk\\target\\tools\\poppler\\poppler-26.02.0\\Library\\bin",
+  "dpi": 72,
+  "supersample": 4,
+  "reference_dpi": 288,
+  "results": [
+    {
+      "case": "edge_vector_flate",
+      "class": "edge/vector",
+      "pdf": "crates\\engine\\tests\\fixtures\\flate.pdf",
+      "compat_psnr": 53.304220354996964,
+      "high_psnr": 95.44314455163641,
+      "poppler_psnr": 46.028598942055545,
+      "compat_ssim": 0.9951675222721696,
+      "high_ssim": 0.9999996993872114,
+      "poppler_ssim": 0.9730231798398384,
+      "verdict": "High wins"
+    },
+    {
+      "case": "text_basicapi",
+      "class": "text-heavy",
+      "pdf": "crates\\engine\\tests\\fixtures\\basicapi.pdf",
+      "compat_psnr": 31.463757999244958,
+      "high_psnr": 36.63440987688276,
+      "poppler_psnr": 27.858853199601224,
+      "compat_ssim": 0.8478261907002181,
+      "high_ssim": 0.9334341493055981,
+      "poppler_ssim": 0.7251526998293844,
+      "verdict": "High wins"
+    },
+    {
+      "case": "generated_vector_bars",
+      "class": "vector-heavy",
+      "pdf": "tests\\corpus\\pdfs\\generated\\generated_vector_bars.pdf",
+      "compat_psnr": 30.65592801959361,
+      "high_psnr": 37.65893704137963,
+      "poppler_psnr": 27.120946857937355,
+      "compat_ssim": 0.9964951578107821,
+      "high_ssim": 0.9992801468324354,
+      "poppler_ssim": 0.9921384412450788,
+      "verdict": "High wins"
+    },
+    {
+      "case": "synthetic_transparency",
+      "class": "transparency",
+      "pdf": "renderer-benchmark\\corpus\\synthetic\\synthetic_transparency_000.pdf",
+      "compat_psnr": 28.939505518963458,
+      "high_psnr": 51.48910395087885,
+      "poppler_psnr": 20.763555252559176,
+      "compat_ssim": 0.8657043316878086,
+      "high_ssim": 0.9986823758965617,
+      "poppler_ssim": 0.47273286312251245,
+      "verdict": "High wins"
+    }
+  ],
+  "summary": {
+    "cases": 4,
+    "high_psnr_wins_vs_poppler": 4,
+    "high_psnr_wins_vs_compat": 4,
+    "mean_psnr": {
+      "compat": 36.090852973199745,
+      "high": 55.306398855194416,
+      "poppler": 30.442988563038327
+    },
+    "mean_ssim": {
+      "compat": 0.9262983006177447,
+      "high": 0.9828490928554516,
+      "poppler": 0.7907617960092035
+    }
+  },
+  "verdict": "Measured verdict: HighQuality beats Poppler on PSNR for every measured case."
+}

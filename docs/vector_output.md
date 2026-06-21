@@ -10,7 +10,8 @@ oxide render in.pdf --format svg --dpi 150 -o pages.zip  # device scale
 ```
 
 Output follows the existing `render` convention: one `page-NNN.svg` per page
-inside the output ZIP. (PostScript / EPS are deferred — see the end.)
+inside the output ZIP. (PostScript / EPS output is also available — `--format ps`
+and `--format eps`; see `docs/postscript_output.md`.)
 
 ## Architecture (Part A finding)
 
@@ -88,13 +89,13 @@ parsed by `resvg` as a structural cross-check.
 
 ## Future enhancements (honest)
 
-- **PostScript / EPS** (`pdftops`, `pdftocairo -ps/-eps`) — **deferred this
-  round** per the spec's priority guidance (SVG first, fully). The sibling-sink
-  architecture and shared geometry/text helpers make a `PostScriptSink` a
-  follow-up that reuses the same seam: PS path construction + `fill`/`eofill`/
-  `stroke`, text-as-path-outlines, `image` operator for rasters, `shfill`
-  (PS L3) or rasterize-embed for shadings, DSC `%%Page`/`%%BoundingBox`
-  comments, and an EPS single-page variant.
+- **PostScript / EPS** (`pdftops`, `pdftocairo -ps/-eps`) — **implemented**
+  (Mega-24) as a sibling of this SVG sink. It reuses the same seam (PS path
+  construction + `fill`/`eofill`/`stroke`, text-as-path-outlines, `colorimage`
+  for the rasterize-embed fallback, DSC `%%Page`/`%%BoundingBox` comments, and an
+  EPSF single-page variant). See `docs/postscript_output.md`. Remaining PS
+  follow-ups: selectable text via embedded fonts, native `shfill` shadings, and
+  `DCTDecode` JPEG passthrough.
 - **Selectable text** via embedded/subset fonts in the SVG (`<text>`/`@font-face`).
 - **Native axial/radial SVG gradients** (`<linearGradient>`/`<radialGradient>`)
   for ShadingType 2/3 instead of the whole-page fallback; mesh shadings (4–7)
