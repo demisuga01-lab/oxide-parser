@@ -20,6 +20,8 @@
 //! derivation only) uses `md-5`. SHA-256/384/512 (R5/R6 key derivation) use
 //! `sha2`.
 
+use std::collections::HashMap;
+
 use crate::error::{OxideError, Result};
 use crate::object::{PdfDictionary, PdfObject};
 
@@ -450,8 +452,18 @@ pub struct EncryptionInfo {
     pub p: i32,
     /// `/EncryptMetadata` (default true).
     pub encrypt_metadata: bool,
-    /// For V4: the crypt-filter method applied to streams and strings.
+    /// Legacy/default crypt-filter method retained for callers that only need
+    /// the ordinary-stream method.
     pub cf_method: CryptMethod,
+    /// Crypt-filter method applied to ordinary streams (`/StmF`).
+    pub stream_method: CryptMethod,
+    /// Crypt-filter method applied to strings (`/StrF`).
+    pub string_method: CryptMethod,
+    /// Crypt-filter method applied to embedded-file streams (`/EFF`).
+    pub embedded_file_method: CryptMethod,
+    /// Named crypt filters from `/CF`, used by explicit `/Filter /Crypt`
+    /// stream filters.
+    pub crypt_filters: HashMap<String, CryptMethod>,
     /// V5-specific fields (present only when v == 5).
     pub v5: Option<V5Fields>,
 }
@@ -484,6 +496,11 @@ impl EncryptionInfo {
         } else {
             dict.get_integer("Length").unwrap_or(128) as usize
         };
+        if !(40..=128).contains(&key_length) || key_length % 8 != 0 {
+            return Err(OxideError::MalformedPdf(format!(
+                "V{v} encryption /Length must be 40..128 bits in 8-bit increments, got {key_length}"
+            )));
+        }
 
         let o = extract_bytes(dict, "O")?;
         let u = extract_bytes(dict, "U")?;
@@ -493,11 +510,13 @@ impl EncryptionInfo {
             .and_then(PdfObject::as_bool)
             .unwrap_or(true);
 
-        let cf_method = if v == 4 {
-            resolve_v4_method(dict)?
+        let crypt_filters = collect_crypt_filters(dict);
+        let (stream_method, string_method, embedded_file_method) = if v == 4 {
+            resolve_crypt_methods(dict, "Identity", CryptMethod::V2)?
         } else {
-            CryptMethod::V2
+            (CryptMethod::V2, CryptMethod::V2, CryptMethod::V2)
         };
+        let cf_method = stream_method.clone();
 
         Ok(EncryptionInfo {
             v,
@@ -508,6 +527,10 @@ impl EncryptionInfo {
             p,
             encrypt_metadata,
             cf_method,
+            stream_method,
+            string_method,
+            embedded_file_method,
+            crypt_filters,
             v5: None,
         })
     }
@@ -566,6 +589,11 @@ impl EncryptionInfo {
             .and_then(PdfObject::as_bool)
             .unwrap_or(true);
 
+        let crypt_filters = collect_crypt_filters(dict);
+        let (stream_method, string_method, embedded_file_method) =
+            resolve_crypt_methods(dict, "StdCF", CryptMethod::AesV3)?;
+        let cf_method = stream_method.clone();
+
         Ok(EncryptionInfo {
             v: 5,
             r,
@@ -574,7 +602,11 @@ impl EncryptionInfo {
             u,
             p,
             encrypt_metadata,
-            cf_method: CryptMethod::AesV3,
+            cf_method,
+            stream_method,
+            string_method,
+            embedded_file_method,
+            crypt_filters,
             v5: Some(V5Fields { oe, ue, perms }),
         })
     }
@@ -590,16 +622,36 @@ impl EncryptionInfo {
     }
 }
 
-/// Resolve the V4 crypt-filter method from `/StmF` + `/CF`.
-fn resolve_v4_method(dict: &PdfDictionary) -> Result<CryptMethod> {
-    let stm_f = dict.get_name("StmF").unwrap_or("Identity");
-    if stm_f == "Identity" {
-        return Ok(CryptMethod::None);
-    }
+/// Resolve stream/string/embedded-file crypt-filter methods from `/StmF`,
+/// `/StrF`, `/EFF`, and `/CF`. PDF 2.0 files commonly use `/StmF /Identity`
+/// and `/StrF /Identity` while encrypting only embedded files via `/EFF`.
+fn resolve_crypt_methods(
+    dict: &PdfDictionary,
+    default_filter: &str,
+    default_unknown_method: CryptMethod,
+) -> Result<(CryptMethod, CryptMethod, CryptMethod)> {
+    let stream_filter = dict.get_name("StmF").unwrap_or(default_filter);
+    let string_filter = dict.get_name("StrF").unwrap_or(stream_filter);
+    let embedded_filter = dict.get_name("EFF").unwrap_or(stream_filter);
 
+    Ok((
+        resolve_named_crypt_method(dict, stream_filter, default_unknown_method.clone()),
+        resolve_named_crypt_method(dict, string_filter, default_unknown_method.clone()),
+        resolve_named_crypt_method(dict, embedded_filter, default_unknown_method),
+    ))
+}
+
+fn resolve_named_crypt_method(
+    dict: &PdfDictionary,
+    filter_name: &str,
+    default_unknown_method: CryptMethod,
+) -> CryptMethod {
+    if filter_name == "Identity" {
+        return CryptMethod::None;
+    }
     if let Some(cf) = dict.get_dict("CF") {
-        if let Some(filter) = cf.get_dict(stm_f) {
-            return Ok(match filter.get_name("CFM") {
+        if let Some(filter) = cf.get_dict(filter_name) {
+            return match filter.get_name("CFM") {
                 Some("AESV2") => CryptMethod::AesV2,
                 Some("AESV3") => CryptMethod::AesV3,
                 Some("V2") => CryptMethod::V2,
@@ -608,15 +660,39 @@ fn resolve_v4_method(dict: &PdfDictionary) -> Result<CryptMethod> {
                     log::warn!("unknown crypt filter method /CFM /{other}; assuming RC4");
                     CryptMethod::V2
                 }
-            });
+            };
         }
     }
 
-    Ok(match stm_f {
+    match filter_name {
         "AESV2" => CryptMethod::AesV2,
         "AESV3" => CryptMethod::AesV3,
-        _ => CryptMethod::V2,
-    })
+        _ => default_unknown_method,
+    }
+}
+
+fn collect_crypt_filters(dict: &PdfDictionary) -> HashMap<String, CryptMethod> {
+    let mut out = HashMap::new();
+    let Some(cf) = dict.get_dict("CF") else {
+        return out;
+    };
+    for (name, obj) in cf.iter() {
+        let Some(filter) = obj.as_dict() else {
+            continue;
+        };
+        let method = match filter.get_name("CFM") {
+            Some("AESV2") => CryptMethod::AesV2,
+            Some("AESV3") => CryptMethod::AesV3,
+            Some("V2") => CryptMethod::V2,
+            Some("Identity") | None => CryptMethod::None,
+            Some(other) => {
+                log::warn!("unknown crypt filter method /CFM /{other}; assuming RC4");
+                CryptMethod::V2
+            }
+        };
+        out.insert(name.clone(), method);
+    }
+    out
 }
 
 /// Read a required PDF string entry as raw bytes.
@@ -661,7 +737,7 @@ pub fn pad_password(password: &[u8]) -> [u8; 32] {
 ///   3. For `R >= 3`, repeat MD5 over the first `n` bytes 50 more times.
 ///   4. Take the first `key_length / 8` bytes as the key.
 pub fn compute_encryption_key(password: &[u8], info: &EncryptionInfo, file_id: &[u8]) -> Vec<u8> {
-    let key_len = info.key_length / 8;
+    let key_len = (info.key_length / 8).clamp(1, 16);
     let mut input = Vec::with_capacity(128);
     input.extend_from_slice(&pad_password(password));
     input.extend_from_slice(&info.o);
@@ -812,9 +888,7 @@ pub fn derive_v5_file_key_from_user(password: &[u8], info: &EncryptionInfo) -> R
 /// then file_key = AES-256-CBC-decrypt(key=intermediate_key, iv=zero, data=OE).
 pub fn derive_v5_file_key_from_owner(password: &[u8], info: &EncryptionInfo) -> Result<Vec<u8>> {
     let v5 = info.v5.as_ref().ok_or_else(|| {
-        OxideError::MalformedPdf(
-            "derive_v5_file_key_from_owner called on non-V5 info".to_string(),
-        )
+        OxideError::MalformedPdf("derive_v5_file_key_from_owner called on non-V5 info".to_string())
     })?;
     let pwd = truncate_v5_password(password);
     // /O layout: [40..48] = key_salt
@@ -971,7 +1045,11 @@ mod tests {
             let data = b"test data";
             let enc = Rc4::apply(&key, data);
             let dec = Rc4::apply(&key, &enc);
-            assert_eq!(dec, data.to_vec(), "RC4 round-trip failed for key len {len}");
+            assert_eq!(
+                dec,
+                data.to_vec(),
+                "RC4 round-trip failed for key len {len}"
+            );
         }
     }
 
@@ -1062,6 +1140,10 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            stream_method: CryptMethod::V2,
+            string_method: CryptMethod::V2,
+            embedded_file_method: CryptMethod::V2,
+            crypt_filters: HashMap::new(),
             v5: None,
         };
         let file_id = vec![0x42u8; 16];
@@ -1082,11 +1164,37 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            stream_method: CryptMethod::V2,
+            string_method: CryptMethod::V2,
+            embedded_file_method: CryptMethod::V2,
+            crypt_filters: HashMap::new(),
             v5: None,
         };
         let fid = vec![0u8; 16];
         assert_eq!(compute_encryption_key(b"", &make_info(40), &fid).len(), 5);
         assert_eq!(compute_encryption_key(b"", &make_info(128), &fid).len(), 16);
+    }
+
+    #[test]
+    fn compute_encryption_key_defensively_caps_invalid_legacy_length() {
+        let info = EncryptionInfo {
+            v: 4,
+            r: 4,
+            key_length: 256,
+            o: vec![0u8; 32],
+            u: vec![0u8; 32],
+            p: -4,
+            encrypt_metadata: true,
+            cf_method: CryptMethod::V2,
+            stream_method: CryptMethod::V2,
+            string_method: CryptMethod::V2,
+            embedded_file_method: CryptMethod::V2,
+            crypt_filters: HashMap::new(),
+            v5: None,
+        };
+
+        let key = compute_encryption_key(b"", &info, b"short-id");
+        assert_eq!(key.len(), 16);
     }
 
     #[test]
@@ -1100,6 +1208,10 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            stream_method: CryptMethod::V2,
+            string_method: CryptMethod::V2,
+            embedded_file_method: CryptMethod::V2,
+            crypt_filters: HashMap::new(),
             v5: None,
         };
         let fid = vec![0xABu8; 16];
@@ -1342,6 +1454,10 @@ mod tests {
             p,
             encrypt_metadata: true,
             cf_method: CryptMethod::AesV3,
+            stream_method: CryptMethod::AesV3,
+            string_method: CryptMethod::AesV3,
+            embedded_file_method: CryptMethod::AesV3,
+            crypt_filters: HashMap::new(),
             v5: Some(V5Fields { oe, ue, perms }),
         }
     }
@@ -1351,13 +1467,25 @@ mod tests {
         let password = b"userpass";
         let info = make_v5_info(6, password);
 
-        assert!(verify_v5_user_password(password, &info), "user password should verify");
-        assert!(!verify_v5_user_password(b"wrongpass", &info), "wrong password should fail");
+        assert!(
+            verify_v5_user_password(password, &info),
+            "user password should verify"
+        );
+        assert!(
+            !verify_v5_user_password(b"wrongpass", &info),
+            "wrong password should fail"
+        );
 
         let file_key = derive_v5_file_key_from_user(password, &info).unwrap();
         assert_eq!(file_key.len(), 32);
-        assert!(verify_v5_perms(&file_key, &info), "perms should verify with correct file key");
-        assert!(!verify_v5_perms(&[0u8; 32], &info), "perms should fail with wrong key");
+        assert!(
+            verify_v5_perms(&file_key, &info),
+            "perms should verify with correct file key"
+        );
+        assert!(
+            !verify_v5_perms(&[0u8; 32], &info),
+            "perms should fail with wrong key"
+        );
     }
 
     #[test]
@@ -1365,8 +1493,14 @@ mod tests {
         let password = b"";
         let info = make_v5_info(5, password);
 
-        assert!(verify_v5_user_password(password, &info), "empty user password should verify for R5");
-        assert!(!verify_v5_user_password(b"wrong", &info), "wrong password should fail for R5");
+        assert!(
+            verify_v5_user_password(password, &info),
+            "empty user password should verify for R5"
+        );
+        assert!(
+            !verify_v5_user_password(b"wrong", &info),
+            "wrong password should fail for R5"
+        );
 
         let file_key = derive_v5_file_key_from_user(password, &info).unwrap();
         assert_eq!(file_key.len(), 32);
@@ -1378,12 +1512,21 @@ mod tests {
         let password = b"ownerpass";
         let info = make_v5_info(6, password);
 
-        assert!(verify_v5_owner_password(password, &info), "owner password should verify");
-        assert!(!verify_v5_owner_password(b"wrong", &info), "wrong owner password should fail");
+        assert!(
+            verify_v5_owner_password(password, &info),
+            "owner password should verify"
+        );
+        assert!(
+            !verify_v5_owner_password(b"wrong", &info),
+            "wrong owner password should fail"
+        );
 
         let file_key = derive_v5_file_key_from_owner(password, &info).unwrap();
         assert_eq!(file_key.len(), 32);
-        assert!(verify_v5_perms(&file_key, &info), "perms should verify via owner key");
+        assert!(
+            verify_v5_perms(&file_key, &info),
+            "perms should verify via owner key"
+        );
     }
 
     #[test]
@@ -1423,6 +1566,10 @@ mod tests {
             p: -4,
             encrypt_metadata: true,
             cf_method: CryptMethod::V2,
+            stream_method: CryptMethod::V2,
+            string_method: CryptMethod::V2,
+            embedded_file_method: CryptMethod::V2,
+            crypt_filters: HashMap::new(),
             v5: None,
         };
         let file_id = vec![0x01u8; 16];
@@ -1545,6 +1692,24 @@ mod tests {
         assert_eq!(info.cf_method, CryptMethod::V2);
         assert!(!info.is_aes());
         assert!(!info.is_v5());
+    }
+
+    #[test]
+    fn from_dict_rejects_invalid_legacy_key_length() {
+        let d = dict(&[
+            ("Filter", PdfObject::Name("Standard".to_string())),
+            ("V", PdfObject::Integer(4)),
+            ("R", PdfObject::Integer(4)),
+            ("Length", PdfObject::Integer(256)),
+            ("O", PdfObject::String(vec![1u8; 32])),
+            ("U", PdfObject::String(vec![2u8; 32])),
+            ("P", PdfObject::Integer(-4)),
+        ]);
+
+        assert!(matches!(
+            EncryptionInfo::from_dict(&d),
+            Err(OxideError::MalformedPdf(_))
+        ));
     }
 
     #[test]

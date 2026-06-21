@@ -344,8 +344,11 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
 
     // Only RSA PKCS#1 v1.5 is supported this round.
     let sig_alg = signer.signature_algorithm.oid;
-    if sig_alg != OID_RSA_ENCRYPTION && sig_alg != OID_SHA256_RSA && sig_alg != OID_SHA1_RSA
-        && sig_alg != OID_SHA384_RSA && sig_alg != OID_SHA512_RSA
+    if sig_alg != OID_RSA_ENCRYPTION
+        && sig_alg != OID_SHA256_RSA
+        && sig_alg != OID_SHA1_RSA
+        && sig_alg != OID_SHA384_RSA
+        && sig_alg != OID_SHA512_RSA
     {
         return Ok(CmsResult {
             validity: SignatureValidity::UnsupportedAlgorithm,
@@ -354,7 +357,12 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
         });
     }
 
-    let validity = match verify_rsa(&cert, &digest_oid, &signed_payload_digest_input, signer.signature.as_bytes()) {
+    let validity = match verify_rsa(
+        &cert,
+        &digest_oid,
+        &signed_payload_digest_input,
+        signer.signature.as_bytes(),
+    ) {
         Ok(true) => SignatureValidity::Valid,
         Ok(false) => SignatureValidity::Invalid,
         Err(_) => SignatureValidity::Invalid,
@@ -396,19 +404,27 @@ fn verify_rsa(
     let ok = match *digest_oid {
         OID_SHA256 => {
             let h = Sha256::digest(payload);
-            pubkey.verify(Pkcs1v15Sign::new::<Sha256>(), &h, signature).is_ok()
+            pubkey
+                .verify(Pkcs1v15Sign::new::<Sha256>(), &h, signature)
+                .is_ok()
         }
         OID_SHA384 => {
             let h = Sha384::digest(payload);
-            pubkey.verify(Pkcs1v15Sign::new::<Sha384>(), &h, signature).is_ok()
+            pubkey
+                .verify(Pkcs1v15Sign::new::<Sha384>(), &h, signature)
+                .is_ok()
         }
         OID_SHA512 => {
             let h = Sha512::digest(payload);
-            pubkey.verify(Pkcs1v15Sign::new::<Sha512>(), &h, signature).is_ok()
+            pubkey
+                .verify(Pkcs1v15Sign::new::<Sha512>(), &h, signature)
+                .is_ok()
         }
         OID_SHA1 => {
             let h = Sha1::digest(payload);
-            pubkey.verify(Pkcs1v15Sign::new::<Sha1>(), &h, signature).is_ok()
+            pubkey
+                .verify(Pkcs1v15Sign::new::<Sha1>(), &h, signature)
+                .is_ok()
         }
         _ => return Err("unsupported digest".to_string()),
     };
@@ -525,9 +541,8 @@ fn parse_byte_range(sig: &PdfDictionary) -> Option<ByteRange> {
     if arr.len() != 4 {
         return None;
     }
-    let n = |i: usize| -> Option<usize> {
-        arr[i].as_integer().filter(|v| *v >= 0).map(|v| v as usize)
-    };
+    let n =
+        |i: usize| -> Option<usize> { arr[i].as_integer().filter(|v| *v >= 0).map(|v| v as usize) };
     Some(ByteRange {
         a: n(0)?,
         b: n(1)?,

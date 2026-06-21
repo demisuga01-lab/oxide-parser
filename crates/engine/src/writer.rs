@@ -455,11 +455,7 @@ impl<'a> DocCopier<'a> {
 /// [`PdfReader::get_object`] (which yields decrypted bytes); direct sub-objects
 /// are walked in place. References that fail to resolve are left as references
 /// and later rewritten to `null` if their target was never copied.
-fn copy_closure(
-    copier: &mut DocCopier,
-    roots: &[(u32, u16)],
-    next_number: &mut u32,
-) -> Result<()> {
+fn copy_closure(copier: &mut DocCopier, roots: &[(u32, u16)], next_number: &mut u32) -> Result<()> {
     // Work list of source object numbers to copy. We assign a new number when
     // first enqueuing so cycles terminate.
     let mut stack: Vec<u32> = Vec::new();
@@ -487,7 +483,9 @@ fn copy_closure(
                 // A missing/broken dependency is non-fatal: record a null in
                 // its place so references to it resolve to null rather than
                 // dangling. This mirrors the reader's lenient page walking.
-                log::warn!("writer closure: object {old_number} 0 unreadable ({err}); writing null");
+                log::warn!(
+                    "writer closure: object {old_number} 0 unreadable ({err}); writing null"
+                );
                 copier.copied.insert(new_number, PdfObject::Null);
                 continue;
             }
@@ -634,7 +632,10 @@ fn build_merged_internal(inputs: &[(&PdfDocument, Vec<usize>)]) -> Result<Vec<u8
         for sel in &selected {
             // Fetch the source page dict to find its /Contents and /Annots.
             let page_obj = reader.get_object(sel.source_number, 0)?;
-            let page_dict = page_obj.as_dict().cloned().unwrap_or_else(PdfDictionary::empty);
+            let page_dict = page_obj
+                .as_dict()
+                .cloned()
+                .unwrap_or_else(PdfDictionary::empty);
 
             // Contents: copy the stream(s) closure.
             if let Some(contents) = page_dict.get("Contents") {
@@ -661,7 +662,10 @@ fn build_merged_internal(inputs: &[(&PdfDocument, Vec<usize>)]) -> Result<Vec<u8
             page_new_numbers.push(new_page_number);
 
             let page_obj = reader.get_object(sel.source_number, 0)?;
-            let page_dict = page_obj.as_dict().cloned().unwrap_or_else(PdfDictionary::empty);
+            let page_dict = page_obj
+                .as_dict()
+                .cloned()
+                .unwrap_or_else(PdfDictionary::empty);
 
             let mut new_page = PdfDictionary::empty();
             new_page.insert("Type", PdfObject::Name("Page".to_string()));
@@ -683,10 +687,8 @@ fn build_merged_internal(inputs: &[(&PdfDocument, Vec<usize>)]) -> Result<Vec<u8
             }
             // Resolve inherited /Resources onto the page (rewriting references
             // into the new numbering).
-            let resources = rewrite_references(
-                PdfObject::Dictionary(sel.resources.clone()),
-                &copier.remap,
-            );
+            let resources =
+                rewrite_references(PdfObject::Dictionary(sel.resources.clone()), &copier.remap);
             new_page.insert("Resources", resources);
 
             // Carry /Contents, rewriting its references into the new numbering.
@@ -823,7 +825,9 @@ pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
     }
 
     let new_root = remap[&root.0];
-    let info_number = reader.info_reference().and_then(|(n, _)| remap.get(&n).copied());
+    let info_number = reader
+        .info_reference()
+        .and_then(|(n, _)| remap.get(&n).copied());
 
     let writer = PdfWriter::new(objects, new_root)
         .with_info(info_number)

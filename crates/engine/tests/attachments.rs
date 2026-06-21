@@ -107,7 +107,10 @@ fn lists_and_extracts_annotation_attachment() {
     // The generator's annot payload is range(0..256) twice = 512 bytes.
     let expected: Vec<u8> = (0u16..256).chain(0u16..256).map(|b| b as u8).collect();
     assert_eq!(bytes.len(), 512);
-    assert_eq!(bytes, expected, "annotation payload must extract byte-exact");
+    assert_eq!(
+        bytes, expected,
+        "annotation payload must extract byte-exact"
+    );
 }
 
 #[test]
@@ -127,7 +130,10 @@ fn path_traversal_name_is_sanitized_on_extraction() {
 
     // Sanitization must collapse it to a single safe component.
     let safe = sanitize_filename(&atts[0].name);
-    assert_eq!(safe, "evil.txt", "traversal must be stripped to the base name");
+    assert_eq!(
+        safe, "evil.txt",
+        "traversal must be stripped to the base name"
+    );
     assert!(!safe.contains('/') && !safe.contains('\\') && !safe.contains(".."));
 
     // And actually writing it into a temp dir must stay inside that dir.
@@ -175,7 +181,11 @@ fn cross_check_pdfdetach_list_and_bytes() {
     ] {
         let path = fixture(fix);
         // -list: first line is "N embedded files".
-        let out = Command::new(&tool).arg("-list").arg(&path).output().unwrap();
+        let out = Command::new(&tool)
+            .arg("-list")
+            .arg(&path)
+            .output()
+            .unwrap();
         let listing = String::from_utf8_lossy(&out.stdout);
         let poppler_count: usize = listing
             .lines()

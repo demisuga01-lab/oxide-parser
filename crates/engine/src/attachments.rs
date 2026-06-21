@@ -271,10 +271,7 @@ pub fn extract_attachment(doc: &PdfDocument, attachment: &Attachment) -> Result<
 pub fn sanitize_filename(name: &str) -> String {
     // PDF paths use '/' as the separator (PDF 32000-1 §7.11.2); also defend
     // against backslashes (Windows) and drive/colon components.
-    let last_component = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(name);
+    let last_component = name.rsplit(['/', '\\']).next().unwrap_or(name);
 
     let mut cleaned: String = last_component
         .chars()
@@ -323,9 +320,10 @@ pub fn walk_name_tree(
     }
 
     // Leaf data: /Names array [key value key value …].
-    if let Some(PdfObject::Array(names)) = node.get("Names").map(|n| {
-        reader.resolve(n.clone()).unwrap_or_else(|_| n.clone())
-    }) {
+    if let Some(PdfObject::Array(names)) = node
+        .get("Names")
+        .map(|n| reader.resolve(n.clone()).unwrap_or_else(|_| n.clone()))
+    {
         let mut i = 0;
         while i + 1 < names.len() {
             let key = match &names[i] {
@@ -398,7 +396,10 @@ mod tests {
     #[test]
     fn sanitize_strips_path_traversal() {
         assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("..\\..\\windows\\system32\\evil.dll"), "evil.dll");
+        assert_eq!(
+            sanitize_filename("..\\..\\windows\\system32\\evil.dll"),
+            "evil.dll"
+        );
         assert_eq!(sanitize_filename("/absolute/path/file.txt"), "file.txt");
         assert_eq!(sanitize_filename("C:\\Users\\x\\secret.dat"), "secret.dat");
         assert_eq!(sanitize_filename("normal.pdf"), "normal.pdf");

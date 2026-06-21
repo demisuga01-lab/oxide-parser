@@ -106,10 +106,7 @@ fn poppler_page_count(bytes: &[u8], label: &str) -> Option<usize> {
     let tool = poppler_tool("pdfinfo")?;
     let tmp = std::env::temp_dir().join(format!("oxide_writer_test_{label}.pdf"));
     std::fs::write(&tmp, bytes).expect("write temp pdf");
-    let output = Command::new(&tool)
-        .arg(&tmp)
-        .output()
-        .expect("run pdfinfo");
+    let output = Command::new(&tool).arg(&tmp).output().expect("run pdfinfo");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let _ = std::fs::remove_file(&tmp);
@@ -174,8 +171,7 @@ fn roundtrip_preserves_page_count_sizes_and_text() {
         );
         for (i, (o, n)) in orig_pages.iter().zip(new_pages.iter()).enumerate() {
             assert_eq!(
-                o.media_box,
-                n.media_box,
+                o.media_box, n.media_box,
                 "{name}: page {i} media box changed"
             );
         }
@@ -184,7 +180,10 @@ fn roundtrip_preserves_page_count_sizes_and_text() {
         for page in 1..=orig_count {
             let before = norm(&original.get_page_text(page).unwrap_or_default());
             let after = norm(&rewritten.get_page_text(page).unwrap_or_default());
-            assert_eq!(before, after, "{name}: page {page} text changed in round-trip");
+            assert_eq!(
+                before, after,
+                "{name}: page {page} text changed in round-trip"
+            );
         }
     }
 }
@@ -323,7 +322,10 @@ fn roundtrip_real_document_preserves_text_and_poppler_agrees() {
 
     // External: Poppler page count and whole-document text must match.
     if let Some(pages) = poppler_page_count(&written, "rt_tracemonkey") {
-        assert_eq!(pages, orig_count, "Poppler page count changed in round-trip");
+        assert_eq!(
+            pages, orig_count,
+            "Poppler page count changed in round-trip"
+        );
     }
     let rt_text = poppler_text(&written, "rt_tm_text");
     let orig_text = poppler_text(&fixture_bytes(name), "orig_tm_text");
@@ -351,7 +353,9 @@ fn encrypted_input_produces_unencrypted_openable_output() {
     ];
     let mut chosen: Option<(Vec<u8>, ContentEngine)> = None;
     for rel in candidates {
-        let Some(path) = corpus_path(rel) else { continue };
+        let Some(path) = corpus_path(rel) else {
+            continue;
+        };
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(_) => continue,

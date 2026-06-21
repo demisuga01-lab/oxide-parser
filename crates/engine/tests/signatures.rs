@@ -49,7 +49,11 @@ fn valid_signature_is_cryptographically_valid_with_cert_details() {
     );
     assert_eq!(cert.serial_hex, "1234ABCD");
     // Honest-scope note must be present.
-    assert!(r.note.contains("NOT checked"), "scope note missing: {}", r.note);
+    assert!(
+        r.note.contains("NOT checked"),
+        "scope note missing: {}",
+        r.note
+    );
 }
 
 #[test]
@@ -115,7 +119,10 @@ fn unsigned_document_reports_no_signatures() {
     // A normal PDF with no signature fields lists empty (not an error).
     let e = ContentEngine::open_bytes(fixture_bytes("minimal.pdf")).unwrap();
     let reports = e.verify_signatures().unwrap();
-    assert!(reports.is_empty(), "unsigned document must report no signatures");
+    assert!(
+        reports.is_empty(),
+        "unsigned document must report no signatures"
+    );
 }
 
 #[test]
