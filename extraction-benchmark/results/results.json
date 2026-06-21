@@ -14,7 +14,7 @@
       "mode": "digital",
       "tools": {
         "oxide_text": {
-          "time_s": 0.0212,
+          "time_s": 0.015,
           "cer": 0.4019607843137255,
           "char_accuracy": 0.5980392156862745,
           "wer": 0.5,
@@ -22,14 +22,14 @@
           "reading_order": 1.0
         },
         "pymupdf_text": {
-          "time_s": 0.0149,
+          "time_s": 0.0065,
           "cer": 0.00980392156862745,
           "char_accuracy": 0.9901960784313726,
           "wer": 0.0,
           "word_accuracy": 1.0
         },
         "pdftotext_text": {
-          "time_s": 0.0148,
+          "time_s": 0.0115,
           "cer": 0.06862745098039216,
           "char_accuracy": 0.9313725490196079,
           "wer": 0.0,
@@ -45,17 +45,17 @@
       "mode": "digital",
       "tools": {
         "oxide_tables": {
-          "time_s": 0.0205,
+          "time_s": 0.016,
           "table_cell_f1": 0.0,
           "table_teds": 0.0
         },
         "pymupdf_tables": {
-          "time_s": 0.0135,
+          "time_s": 0.0067,
           "table_cell_f1": 0.0,
           "table_teds": 0.0
         },
         "oxide_fields": {
-          "time_s": 0.0238,
+          "time_s": 0.0157,
           "field_precision": 1.0,
           "field_recall": 1.0,
           "field_f1": 1.0
@@ -67,17 +67,17 @@
       "mode": "scanned",
       "tools": {
         "oxide_tables": {
-          "time_s": 5.6371,
+          "time_s": 3.6005,
           "table_cell_f1": 0.0,
           "table_teds": 0.0
         },
         "pymupdf_tables": {
-          "time_s": 0.0031,
+          "time_s": 0.0014,
           "table_cell_f1": 0.0,
           "table_teds": 0.0
         },
         "oxide_fields": {
-          "time_s": 5.9351,
+          "time_s": 3.6731,
           "field_precision": 0.375,
           "field_recall": 0.42857142857142855,
           "field_f1": 0.39999999999999997
@@ -89,7 +89,7 @@
       "mode": "digital",
       "tools": {
         "oxide_text": {
-          "time_s": 0.0209,
+          "time_s": 0.017,
           "cer": 0.006993006993006993,
           "char_accuracy": 0.993006993006993,
           "wer": 0.0,
@@ -97,14 +97,14 @@
           "reading_order": 1.0
         },
         "pymupdf_text": {
-          "time_s": 0.0038,
+          "time_s": 0.0019,
           "cer": 0.002331002331002331,
           "char_accuracy": 0.9976689976689976,
           "wer": 0.0,
           "word_accuracy": 1.0
         },
         "pdftotext_text": {
-          "time_s": 0.015,
+          "time_s": 0.0113,
           "cer": 0.04895104895104895,
           "char_accuracy": 0.951048951048951,
           "wer": 0.0,
@@ -120,7 +120,7 @@
       "mode": "scanned",
       "tools": {
         "oxide_text": {
-          "time_s": 5.6059,
+          "time_s": 4.33,
           "cer": 0.05827505827505827,
           "char_accuracy": 0.9417249417249417,
           "wer": 0.08064516129032258,
@@ -128,14 +128,14 @@
           "reading_order": 1.0
         },
         "pymupdf_text": {
-          "time_s": 0.0025,
+          "time_s": 0.0013,
           "cer": 1.0,
           "char_accuracy": 0.0,
           "wer": 1.0,
           "word_accuracy": 0.0
         },
         "pdftotext_text": {
-          "time_s": 0.0138,
+          "time_s": 0.0113,
           "cer": 1.0,
           "char_accuracy": 0.0,
           "wer": 1.0,
@@ -151,7 +151,7 @@
       "mode": "digital",
       "tools": {
         "oxide_fields": {
-          "time_s": 0.0214,
+          "time_s": 0.0184,
           "field_precision": 1.0,
           "field_recall": 0.6,
           "field_f1": 0.7499999999999999
@@ -163,7 +163,7 @@
       "mode": "digital",
       "tools": {
         "oxide_text": {
-          "time_s": 0.0212,
+          "time_s": 0.0167,
           "cer": 0.39490445859872614,
           "char_accuracy": 0.6050955414012739,
           "wer": 0.4716981132075472,
@@ -171,14 +171,14 @@
           "reading_order": 1.0
         },
         "pymupdf_text": {
-          "time_s": 0.0026,
+          "time_s": 0.0024,
           "cer": 0.33121019108280253,
           "char_accuracy": 0.6687898089171975,
           "wer": 0.4339622641509434,
           "word_accuracy": 0.5660377358490566
         },
         "pdftotext_text": {
-          "time_s": 0.0147,
+          "time_s": 0.0113,
           "cer": 0.6528662420382165,
           "char_accuracy": 0.3471337579617835,
           "wer": 0.5471698113207547,
@@ -194,7 +194,7 @@
       "mode": "digital",
       "tools": {
         "oxide_text": {
-          "time_s": 0.0195,
+          "time_s": 0.0137,
           "cer": 0.0,
           "char_accuracy": 1.0,
           "wer": 0.0,
@@ -202,26 +202,26 @@
           "reading_order": 1.0
         },
         "pymupdf_text": {
-          "time_s": 0.0041,
+          "time_s": 0.0018,
           "cer": 0.12280701754385964,
           "char_accuracy": 0.8771929824561404,
           "wer": 0.0,
           "word_accuracy": 1.0
         },
         "pdftotext_text": {
-          "time_s": 0.0137,
+          "time_s": 0.0108,
           "cer": 0.7017543859649122,
           "char_accuracy": 0.29824561403508776,
           "wer": 0.0,
           "word_accuracy": 1.0
         },
         "oxide_tables": {
-          "time_s": 0.0183,
+          "time_s": 0.0125,
           "table_cell_f1": 1.0,
           "table_teds": 1.0
         },
         "pymupdf_tables": {
-          "time_s": 0.0159,
+          "time_s": 0.0063,
           "table_cell_f1": 1.0,
           "table_teds": 1.0
         },
@@ -235,7 +235,7 @@
       "mode": "scanned",
       "tools": {
         "oxide_text": {
-          "time_s": 5.5009,
+          "time_s": 3.8902,
           "cer": 0.3684210526315789,
           "char_accuracy": 0.631578947368421,
           "wer": 0.3,
@@ -243,26 +243,26 @@
           "reading_order": 1.0
         },
         "pymupdf_text": {
-          "time_s": 0.0024,
+          "time_s": 0.001,
           "cer": 1.0,
           "char_accuracy": 0.0,
           "wer": 1.0,
           "word_accuracy": 0.0
         },
         "pdftotext_text": {
-          "time_s": 0.0142,
+          "time_s": 0.0105,
           "cer": 1.0,
           "char_accuracy": 0.0,
           "wer": 1.0,
           "word_accuracy": 0.0
         },
         "oxide_tables": {
-          "time_s": 5.405,
+          "time_s": 3.5042,
           "table_cell_f1": 0.0,
           "table_teds": 0.0
         },
         "pymupdf_tables": {
-          "time_s": 0.0027,
+          "time_s": 0.0012,
           "table_cell_f1": 0.0,
           "table_teds": 0.0
         },
@@ -273,15 +273,15 @@
     }
   },
   "structural_ops": {
-    "oxide_info_time_s": 0.0159,
+    "oxide_info_time_s": 0.0137,
     "oxide_page_count": 14,
     "qpdf_linearize_ok": true,
-    "qpdf_linearize_time_s": 0.0988,
+    "qpdf_linearize_time_s": 0.0792,
     "qpdf_check_linearized_ok": true,
     "qpdf_page_count": 14,
     "page_count_agree": true,
     "oxide_split_ok": true,
-    "oxide_split_time_s": 0.1233,
+    "oxide_split_time_s": 0.0707,
     "oxide_split_parts": 14,
     "qpdf_validated_oxide_parts_of_5": 5
   }
