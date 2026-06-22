@@ -81,8 +81,11 @@ extraction, OCR'd-text recovery where PyMuPDF/Poppler do nothing, embeddability
 `docs/oxide_vs_poppler.md`), and the breadth of ML-model understanding on exotic
 layouts (Docling head-to-head not measured locally). Structural write operations
 are available for encrypt, rotate, optimize, repair, and qpdf-validated
-linearization for the supported structural subset; decrypt-as-write and
-linearized object-stream packing remain documented follow-ups.
+linearization for the supported structural subset. New PDFs can be authored
+from scratch with `PdfBuilder` (pages, text, and vector graphics; see
+`docs/authoring.md`). Decrypt-as-write, linearized object-stream packing, image
+authoring, custom font subsetting, and table/layout helpers remain documented
+follow-ups.
 
 All claims are reproducible via the benchmark in `extraction-benchmark/`.
 

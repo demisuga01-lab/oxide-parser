@@ -64,6 +64,7 @@
 pub mod analysis;
 pub mod analyzer;
 pub mod attachments;
+pub mod authoring;
 pub mod cancel;
 pub mod chunk;
 pub mod classify;
@@ -104,6 +105,10 @@ pub use analysis::graphics::{
 pub use analyzer::{PdfAnalyzer, TextLayerAnalysis, TextLayerRecommendation};
 pub use attachments::{
     extract_attachment, list_attachments, sanitize_filename, Attachment, AttachmentSource,
+};
+pub use authoring::{
+    FontFace, GraphicsStyle, Margins, PageSize as AuthorPageSize, ParagraphStyle, PathBuilder,
+    PdfBuilder, PdfMetadata, PdfPageBuilder, StandardFont, TextAlign, TextStyle,
 };
 pub use cancel::CancelToken;
 pub use chunk::{chunk, estimate_tokens, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
@@ -218,6 +223,10 @@ pub use writer::{
 /// [`ExtractOptions::ocr`]. Everything here works **without** the CLI, the
 /// server, or any non-Rust binding.
 pub mod prelude {
+    pub use crate::authoring::{
+        FontFace, GraphicsStyle, Margins, PageSize as AuthorPageSize, ParagraphStyle, PathBuilder,
+        PdfBuilder, PdfMetadata, PdfPageBuilder, StandardFont, TextAlign, TextStyle,
+    };
     pub use crate::chunk::{chunk, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
     pub use crate::engine::ContentEngine;
     pub use crate::error::{OxideError, Result};
