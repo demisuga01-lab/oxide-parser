@@ -68,6 +68,7 @@ pub mod authoring;
 pub mod cancel;
 pub mod chunk;
 pub mod classify;
+pub mod compliance;
 pub mod content;
 pub mod crypto;
 pub mod docmodel;
@@ -117,6 +118,11 @@ pub use cancel::CancelToken;
 pub use chunk::{chunk, estimate_tokens, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
 pub use classify::{
     classify_document, classify_page, ClassifyConfig, PageClassification, PageSource,
+};
+pub use compliance::{
+    convert_to_pdfa, convert_to_pdfa_checked, improve_pdfua_best_effort, validate_pdfa,
+    validate_pdfua, ComplianceSeverity, ComplianceViolation, PdfAConversionReport, PdfAProfile,
+    PdfAValidationReport, PdfUaValidationReport,
 };
 pub use content::{
     concat_matrix, BlendMode, Color, ColorSpace, ContentOperation, ContentParser, GraphicsState,
@@ -237,6 +243,11 @@ pub mod prelude {
         TextAlign, TextStyle,
     };
     pub use crate::chunk::{chunk, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
+    pub use crate::compliance::{
+        convert_to_pdfa, convert_to_pdfa_checked, improve_pdfua_best_effort, validate_pdfa,
+        validate_pdfua, ComplianceSeverity, ComplianceViolation, PdfAConversionReport, PdfAProfile,
+        PdfAValidationReport, PdfUaValidationReport,
+    };
     pub use crate::editing::{
         AnnotationOptions, EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect,
         ImageStampOptions, OverlayLayer, PdfEditor, RedactionOptions, WatermarkOptions,

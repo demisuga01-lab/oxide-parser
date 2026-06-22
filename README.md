@@ -64,6 +64,7 @@ guidance.
 | [`docs/parser_positioning.md`](docs/parser_positioning.md) | Honest positioning vs Docling / PyMuPDF / qpdf — wins **and** trails. |
 | [`docs/parser_benchmark.md`](docs/parser_benchmark.md) | The reproducible extraction-quality benchmark + numbers. |
 | [`docs/document_parsing.md`](docs/document_parsing.md) | The canonical `Document` model and the `parse` surface. |
+| [`docs/compliance.md`](docs/compliance.md) | PDF/A-1b/PDF/A-2b validation and bounded conversion, plus PDF/UA basic checks. |
 | [`docs/bindings.md`](docs/bindings.md) | C ABI and WebAssembly embedding. |
 | [`docs/security.md`](docs/security.md) | Server security posture + deploy checklist. |
 | [`docs/jobs.md`](docs/jobs.md) | The async job API and its limitations. |
@@ -88,6 +89,9 @@ see `docs/authoring.md`). Existing PDFs can be edited additively with
 watermarks, headers/footers, overlays/underlays, image stamps, and append-only
 incremental updates that preserve the original byte prefix, plus full-rewrite
 redaction, annotation writes, and AcroForm fill/flatten (see `docs/editing.md`).
+PDF/A-1b/PDF/A-2b validation, bounded PDF/A conversion for embedded-font
+documents, and PDF/UA basic validation/best-effort tagging are available through
+the compliance API (see `docs/compliance.md`).
 Decrypt-as-write, linearized object-stream packing, custom font subsetting,
 CFF/OpenType embedding, and advanced multi-column layout remain documented
 follow-ups.
