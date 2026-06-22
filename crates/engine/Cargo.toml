@@ -28,9 +28,9 @@ serde_json = "1"
 thiserror = "1"
 ttf-parser = "0.21"
 unicode-bidi = "0.3"
-cms = "0.2"
+cms = { version = "0.2", features = ["builder"] }
 x509-cert = "0.2"
-rsa = "0.9"
+rsa = { version = "0.9", features = ["sha2"] }
 sha1 = { version = "0.10", features = ["oid"] }
 const-oid = "0.9"
 der = { version = "0.7", features = ["oid"] }

@@ -64,6 +64,12 @@ pub struct IncrementalObject {
     pub object: PdfObject,
 }
 
+pub struct RawIncrementalObject {
+    pub number: u32,
+    pub generation: u16,
+    pub body: Vec<u8>,
+}
+
 /// Low-level serializer: turns a set of [`OutputObject`]s plus a root reference
 /// (and optional `/Info`) into PDF file bytes.
 ///
@@ -1424,6 +1430,29 @@ pub fn write_incremental_update(
     reader: &PdfReader,
     changed_objects: Vec<IncrementalObject>,
 ) -> Result<Vec<u8>> {
+    let mut raw_objects = Vec::with_capacity(changed_objects.len());
+    for obj in changed_objects {
+        let mut body = Vec::new();
+        serialize_object(&obj.object, &mut body);
+        raw_objects.push(RawIncrementalObject {
+            number: obj.number,
+            generation: obj.generation,
+            body,
+        });
+    }
+    write_incremental_update_raw(reader, raw_objects)
+}
+
+/// Append an incremental update revision with pre-serialized object bodies.
+///
+/// This is intentionally low-level. Normal callers should use
+/// [`write_incremental_update`]. Digital signing needs fixed-width
+/// `/ByteRange` and hex `/Contents` placeholders, which cannot be represented
+/// safely by the generic [`PdfObject`] serializer without losing byte-stability.
+pub fn write_incremental_update_raw(
+    reader: &PdfReader,
+    changed_objects: Vec<RawIncrementalObject>,
+) -> Result<Vec<u8>> {
     if reader.is_encrypted() {
         return Err(OxideError::UnsupportedFeature(
             "incremental writer: encrypted inputs require encrypted appended objects".to_string(),
@@ -1461,7 +1490,7 @@ pub fn write_incremental_update(
         let offset = out.len();
         offsets.push((obj.number, obj.generation, offset));
         out.extend_from_slice(format!("{} {} obj\n", obj.number, obj.generation).as_bytes());
-        serialize_object(&obj.object, &mut out);
+        out.extend_from_slice(&obj.body);
         out.extend_from_slice(b"\nendobj\n");
     }
 
@@ -1475,7 +1504,12 @@ pub fn write_incremental_update(
     }
 
     out.extend_from_slice(b"trailer\n");
-    let trailer = incremental_trailer_dict(reader, &objects)?;
+    let max_changed = objects
+        .iter()
+        .map(|obj| i64::from(obj.number))
+        .max()
+        .unwrap_or(0);
+    let trailer = incremental_trailer_dict(reader, max_changed)?;
     serialize_dictionary(&trailer, &mut out);
     out.extend_from_slice(b"\nstartxref\n");
     out.extend_from_slice(format!("{xref_offset}\n").as_bytes());
@@ -1526,16 +1560,8 @@ fn contiguous_xref_groups(entries: &[(u32, u16, usize)]) -> Vec<XrefGroup<'_>> {
     groups
 }
 
-fn incremental_trailer_dict(
-    reader: &PdfReader,
-    changed_objects: &[IncrementalObject],
-) -> Result<PdfDictionary> {
+fn incremental_trailer_dict(reader: &PdfReader, max_changed: i64) -> Result<PdfDictionary> {
     let mut trailer = PdfDictionary::empty();
-    let max_changed = changed_objects
-        .iter()
-        .map(|obj| i64::from(obj.number))
-        .max()
-        .unwrap_or(0);
     let existing_size = reader.size().unwrap_or(0);
     trailer.insert(
         "Size",

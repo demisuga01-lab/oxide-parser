@@ -630,6 +630,16 @@ impl ContentEngine {
         crate::signature::verify_signatures(&self.doc)
     }
 
+    /// Apply an RSA/SHA-256 detached CMS digital signature as an incremental
+    /// update, preserving the original file bytes as an exact prefix.
+    pub fn sign(
+        &self,
+        signer: &crate::signature::PdfSigner,
+        options: &crate::signature::SignatureOptions,
+    ) -> Result<Vec<u8>> {
+        crate::signature::sign_document(&self.doc, signer, options)
+    }
+
     /// Export the given 1-based pages to a single self-contained HTML or XML
     /// document (the `to-html` tool — `pdftohtml`-equivalent). See
     /// [`crate::html`] for the modes (complex / simple / xml).

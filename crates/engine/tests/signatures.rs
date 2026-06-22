@@ -17,7 +17,7 @@
 
 use std::path::PathBuf;
 
-use oxide_engine::{ContentEngine, Coverage, SignatureValidity};
+use oxide_engine::{ContentEngine, Coverage, PdfSigner, SignatureOptions, SignatureValidity};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -28,6 +28,73 @@ fn fixture(name: &str) -> PathBuf {
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
     std::fs::read(fixture(name)).expect("fixture present (run make_signature_fixtures.py)")
+}
+
+fn fixture_pem(name: &str) -> String {
+    let raw = std::fs::read_to_string(fixture(name)).expect("PEM fixture present");
+    let mut pem = raw
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    pem.push('\n');
+    pem
+}
+
+fn test_signer() -> PdfSigner {
+    PdfSigner::from_pem(
+        &fixture_pem("sign_test_rsa_key.pem"),
+        &fixture_pem("sign_test_rsa_cert.pem"),
+        &[],
+    )
+    .expect("test signer parses")
+}
+
+#[test]
+fn rsa_signing_appends_valid_incremental_signature() {
+    let original = fixture_bytes("minimal.pdf");
+    let e = ContentEngine::open_bytes(original.clone()).unwrap();
+    let options = SignatureOptions {
+        field_name: "OxideSig1".to_string(),
+        signer_name: Some("Oxide SDK Signing Test".to_string()),
+        reason: Some("integration test".to_string()),
+        location: Some("test suite".to_string()),
+        signing_time: Some("D:20260622000000Z".to_string()),
+        rect: Some([36.0, 36.0, 260.0, 96.0]),
+        ..SignatureOptions::default()
+    };
+
+    let signed = e.sign(&test_signer(), &options).unwrap();
+    assert!(
+        signed.starts_with(&original),
+        "incremental signing must preserve the original bytes as a prefix"
+    );
+    assert!(signed.len() > original.len());
+
+    let signed_engine = ContentEngine::open_bytes(signed.clone()).unwrap();
+    let reports = signed_engine.verify_signatures().unwrap();
+    assert_eq!(reports.len(), 1);
+    let r = &reports[0];
+    assert_eq!(r.field_name.as_deref(), Some("OxideSig1"));
+    assert_eq!(r.signer_name.as_deref(), Some("Oxide SDK Signing Test"));
+    assert_eq!(r.reason.as_deref(), Some("integration test"));
+    assert_eq!(r.location.as_deref(), Some("test suite"));
+    assert_eq!(r.validity, SignatureValidity::Valid);
+    assert_eq!(r.coverage, Coverage::WholeFile);
+    assert_eq!(r.digest_algorithm.as_deref(), Some("SHA-256"));
+    let cert = r.certificate.as_ref().expect("signer cert reported");
+    assert!(cert.subject.contains("Oxide SDK Signing Test"));
+    assert_eq!(cert.serial_hex, "20260801");
+
+    let mut tampered = signed;
+    let pos = tampered
+        .windows(2)
+        .position(|w| w == b"Hi")
+        .expect("page content marker present");
+    tampered[pos] = b'X';
+    let tampered_engine = ContentEngine::open_bytes(tampered).unwrap();
+    let tampered_report = &tampered_engine.verify_signatures().unwrap()[0];
+    assert_eq!(tampered_report.validity, SignatureValidity::Invalid);
 }
 
 #[test]

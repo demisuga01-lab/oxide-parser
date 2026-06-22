@@ -1,7 +1,9 @@
-# Digital Signature Verification (`verify-sig`, `pdfsig`-equivalent)
+# Digital Signatures (`sign` API + `verify-sig`, `pdfsig`-equivalent)
 
-`oxide verify-sig` reports and cryptographically verifies the digital
-signatures in a PDF. Read/verify only — no signing, no PDF writing.
+Oxide can apply a standard RSA/SHA-256 detached CMS signature and can report
+and cryptographically verify digital signatures in a PDF. Signing is exposed as
+the Rust API `ContentEngine::sign` / `sign_document`; verification is exposed as
+`oxide verify-sig`.
 
 ```
 oxide verify-sig signed.pdf            # human-readable, pdfsig-style
@@ -9,7 +11,47 @@ oxide verify-sig signed.pdf --json     # machine-readable
 oxide verify-sig signed.pdf --password p   # encrypted+signed PDF
 ```
 
-## Pipeline
+## Signing API
+
+```rust
+use oxide_engine::{ContentEngine, PdfSigner, SignatureOptions};
+
+# fn main() -> oxide_engine::Result<()> {
+let input = std::fs::read("input.pdf")?;
+let key_pem = std::fs::read_to_string("signer-key.pem")?;
+let cert_pem = std::fs::read_to_string("signer-cert.pem")?;
+
+let engine = ContentEngine::open_bytes(input)?;
+let signer = PdfSigner::from_pem(&key_pem, &cert_pem, &[])?;
+let signed = engine.sign(
+    &signer,
+    &SignatureOptions {
+        field_name: "ApprovalSig1".to_string(),
+        signer_name: Some("Example Signer".to_string()),
+        reason: Some("approved".to_string()),
+        location: Some("HQ".to_string()),
+        rect: Some([36.0, 36.0, 280.0, 96.0]),
+        ..SignatureOptions::default()
+    },
+)?;
+std::fs::write("signed.pdf", signed)?;
+# Ok(())
+# }
+```
+
+Signing is incremental: the original file bytes remain an exact prefix, a
+signature form field/widget is appended, `/ByteRange` is patched around a fixed
+hex `/Contents` placeholder, and the placeholder is filled with DER CMS
+`SignedData`.
+
+The committed example `crates/engine/examples/sign_document.rs` signs a PDF from
+PEM key/cert files:
+
+```
+cargo run -p oxide-engine --example sign_document -- input.pdf key.pem cert.pem signed.pdf
+```
+
+## Verification Pipeline
 
 1. **Discovery** — walk the catalog `/AcroForm /Fields` for `/FT /Sig` fields
    (inherited `/FT` and nested `/Kids` handled) carrying a `/V` signature
@@ -39,11 +81,10 @@ oxide verify-sig signed.pdf --password p   # encrypted+signed PDF
 
 ## Crates
 
-All pure-Rust (RustCrypto), no C toolchain — Mega-Prompt 9's "public-key crypto"
-turned out **not** to have been added, so these were introduced this round:
-`cms` 0.2, `x509-cert` 0.2, `rsa` 0.9, `der`/`spki` 0.7, `const-oid` 0.9, plus
-`sha1` (with `oid`) and `sha2` (with `oid`, for the PKCS#1 v1.5 DigestInfo
-prefix). No `ring`/`openssl`/`-sys` crates were pulled in.
+All pure-Rust (RustCrypto), no C toolchain: `cms` 0.2 with its builder,
+`x509-cert` 0.2, `rsa` 0.9 with `sha2`, `der`/`spki` 0.7, `const-oid` 0.9,
+plus `sha1` (with `oid`) and `sha2` (with `oid`). No `ring`/`openssl`/`-sys`
+crates are pulled in.
 
 ## What "valid" means — and what is NOT checked (honest scope)
 
@@ -61,9 +102,10 @@ details.
 - **Revocation** (OCSP / CRL).
 - **Certificate validity-period enforcement** — the dates are reported, not
   used as a pass/fail gate.
-- **Timestamp tokens** (RFC 3161).
-- **ECDSA / EdDSA / RSA-PSS** signatures — only RSA PKCS#1 v1.5 is verified;
-  others are reported as `unsupported_algorithm`.
+- **Timestamp tokens** (RFC 3161) and PAdES/LTV DSS revocation embedding.
+- **ECDSA / EdDSA / RSA-PSS** verification — only RSA PKCS#1 v1.5 is verified;
+  others are reported as `unsupported_algorithm`. The signer currently applies
+  RSA/SHA-256.
 
 ## Reported fields
 
@@ -90,18 +132,20 @@ error`; `coverage` ∈ `whole_file | modified_after_signing`.
   appended after it), the later one covers the whole file — exactly the
   distinction `pdfsig` draws.
 - **Unsigned**: a normal PDF reports no signatures (not an error).
+- **Signing**: `minimal.pdf` signed with the committed test-only RSA key/cert
+  → original bytes preserved as a prefix, the produced signature verifies,
+  covers the whole file, reports signer metadata, and tampering is detected.
 
-**Cross-check note:** Poppler's `pdfsig` is **not bundled** in this environment,
-so the cross-check is against the **known ground truth** (controlled cert/key +
-independent pyHanko confirmation) rather than `pdfsig` directly. The objective
-findings a `pdfsig` cross-check would compare — cryptographic validity,
-coverage, and signer details — are exactly what these tests assert.
+**Cross-check note:** Poppler was installed for this prompt, but the Windows
+package does not include `pdfsig`. The generated signed sample was therefore
+cross-checked with `qpdf --check`, Oxide verification, and Poppler render/text
+tools (`pdftoppm`, `pdftotext`). Existing verification fixtures remain grounded
+in independent pyHanko output.
 
 ## Future enhancements
 
 - Trust-chain validation against a configurable trust store; revocation
   (OCSP/CRL); validity-period enforcement as a verdict gate.
-- ECDSA / EdDSA / RSA-PSS signature algorithms.
-- PAdES/CAdES specifics and RFC 3161 timestamp-token verification.
-- Signature **creation** (would need the Mega-Prompt 16 writer).
+- ECDSA / EdDSA / RSA-PSS verification and ECDSA signing.
+- PAdES/CAdES specifics, RFC 3161 timestamp-token verification, and LTV/DSS.
 - Server endpoint (`POST /api/v1/verify-sig`) — deferred; the CLI is complete.

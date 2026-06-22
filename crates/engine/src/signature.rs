@@ -1,6 +1,8 @@
-//! Digital signature verification (`pdfsig`-equivalent).
+//! Digital signature creation and verification (`pdfsig`-equivalent).
 //!
-//! Read/verify only — no PDF writing. For each signature field this:
+//! Signing appends a signature field and detached CMS `SignedData` in an
+//! incremental-update revision, preserving the original file bytes as an exact
+//! prefix. Verification of each signature field:
 //!   1. reads the `/ByteRange` and hashes those exact original file bytes,
 //!   2. parses `/Contents` as a PKCS#7 / CMS `SignedData` (RFC 5652),
 //!   3. verifies the signer's RSA signature over the signed attributes (or the
@@ -20,19 +22,26 @@
 //! supported; ECDSA/EdDSA and RSA-PSS are not yet (reported as
 //! `unsupported_algorithm`). Timestamp tokens (RFC 3161) are not verified.
 
-use cms::cert::x509::Certificate;
+use cms::builder::{create_signing_time_attribute, SignedDataBuilder, SignerInfoBuilder};
+use cms::cert::{x509::Certificate, CertificateChoices, IssuerAndSerialNumber};
 use cms::content_info::ContentInfo;
-use cms::signed_data::{SignedData, SignerInfo};
+use cms::signed_data::{EncapsulatedContentInfo, SignedData, SignerIdentifier, SignerInfo};
 use const_oid::ObjectIdentifier;
-use der::{Decode, Encode};
+use der::{Decode, DecodePem, Encode};
+use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::RsaPrivateKey;
 use serde::Serialize;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
+use spki::AlgorithmIdentifierOwned;
 
 use crate::document::PdfDocument;
-use crate::error::Result;
+use crate::error::{OxideError, Result};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
+use crate::writer::{serialize_object, write_incremental_update_raw, RawIncrementalObject};
 
 // OIDs we care about.
 const OID_MESSAGE_DIGEST: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.4");
@@ -41,6 +50,114 @@ const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26")
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
+
+const BYTE_RANGE_PLACEHOLDER: &[u8] = b"[9999999999 9999999999 9999999999 9999999999]";
+const DEFAULT_CONTENTS_RESERVED_BYTES: usize = 16 * 1024;
+
+/// RSA signing identity used by [`sign_document`].
+///
+/// The first certificate is the signer certificate; remaining certificates are
+/// embedded as chain material for validators. The current writer applies RSA
+/// PKCS#1 v1.5 with SHA-256.
+#[derive(Clone)]
+pub struct PdfSigner {
+    private_key: RsaPrivateKey,
+    certificates: Vec<Certificate>,
+}
+
+impl PdfSigner {
+    /// Build a signer from DER-encoded RSA private key and X.509 certificates.
+    ///
+    /// `private_key_der` may be PKCS#8 or PKCS#1. `certificate_der` is the
+    /// signer certificate; `chain_der` are optional issuer certificates.
+    pub fn from_der(
+        private_key_der: &[u8],
+        certificate_der: &[u8],
+        chain_der: &[&[u8]],
+    ) -> Result<Self> {
+        let private_key = RsaPrivateKey::from_pkcs8_der(private_key_der)
+            .or_else(|_| RsaPrivateKey::from_pkcs1_der(private_key_der))
+            .map_err(|e| OxideError::UnsupportedFeature(format!("signature RSA key: {e}")))?;
+        let mut certificates = Vec::with_capacity(chain_der.len() + 1);
+        certificates.push(
+            Certificate::from_der(certificate_der)
+                .map_err(|e| OxideError::MalformedPdf(format!("signature certificate: {e}")))?,
+        );
+        for cert in chain_der {
+            certificates.push(Certificate::from_der(cert).map_err(|e| {
+                OxideError::MalformedPdf(format!("signature chain certificate: {e}"))
+            })?);
+        }
+        Ok(Self {
+            private_key,
+            certificates,
+        })
+    }
+
+    /// Build a signer from PEM-encoded RSA private key and X.509 certificates.
+    pub fn from_pem(
+        private_key_pem: &str,
+        certificate_pem: &str,
+        chain_pem: &[&str],
+    ) -> Result<Self> {
+        let private_key = RsaPrivateKey::from_pkcs8_pem(private_key_pem)
+            .or_else(|_| RsaPrivateKey::from_pkcs1_pem(private_key_pem))
+            .map_err(|e| OxideError::UnsupportedFeature(format!("signature RSA key: {e}")))?;
+        let mut certificates = Vec::with_capacity(chain_pem.len() + 1);
+        certificates.push(
+            Certificate::from_pem(certificate_pem.as_bytes())
+                .map_err(|e| OxideError::MalformedPdf(format!("signature certificate PEM: {e}")))?,
+        );
+        for cert in chain_pem {
+            certificates.push(Certificate::from_pem(cert.as_bytes()).map_err(|e| {
+                OxideError::MalformedPdf(format!("signature chain certificate PEM: {e}"))
+            })?);
+        }
+        Ok(Self {
+            private_key,
+            certificates,
+        })
+    }
+
+    pub fn signer_certificate(&self) -> &Certificate {
+        &self.certificates[0]
+    }
+}
+
+/// Options for [`sign_document`].
+#[derive(Debug, Clone)]
+pub struct SignatureOptions {
+    /// Signature field name (`/T`). Defaults to `Sig1`.
+    pub field_name: String,
+    /// 1-based page for the visible widget. Defaults to page 1.
+    pub page: usize,
+    /// Widget rectangle `[x0, y0, x1, y1]`. `None` creates an invisible field.
+    pub rect: Option<[f64; 4]>,
+    pub signer_name: Option<String>,
+    pub reason: Option<String>,
+    pub location: Option<String>,
+    pub contact_info: Option<String>,
+    /// Raw PDF date string for `/M`, e.g. `D:20260622000000Z`.
+    pub signing_time: Option<String>,
+    /// Reserved CMS size in bytes. The DER CMS must fit in this placeholder.
+    pub contents_reserved_bytes: usize,
+}
+
+impl Default for SignatureOptions {
+    fn default() -> Self {
+        Self {
+            field_name: "Sig1".to_string(),
+            page: 1,
+            rect: None,
+            signer_name: None,
+            reason: None,
+            location: None,
+            contact_info: None,
+            signing_time: None,
+            contents_reserved_bytes: DEFAULT_CONTENTS_RESERVED_BYTES,
+        }
+    }
+}
 
 /// Overall cryptographic verdict for one signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -116,6 +233,179 @@ pub fn verify_signatures(doc: &PdfDocument) -> Result<Vec<SignatureReport>> {
         reports.push(verify_one(&field, file, idx + 1));
     }
     Ok(reports)
+}
+
+/// Apply an RSA/SHA-256 detached CMS signature as an incremental update.
+///
+/// The returned bytes preserve the original input as an exact prefix, append a
+/// signature field/widget plus signature dictionary, patch `/ByteRange`, and
+/// fill the `/Contents` placeholder with DER CMS. Trust-chain validation,
+/// timestamps, and revocation/LTV data are intentionally separate from this
+/// core signing primitive.
+pub fn sign_document(
+    doc: &PdfDocument,
+    signer: &PdfSigner,
+    options: &SignatureOptions,
+) -> Result<Vec<u8>> {
+    let reader = doc.reader();
+    if reader.is_encrypted() {
+        return Err(OxideError::UnsupportedFeature(
+            "digital signing encrypted inputs is not yet supported".to_string(),
+        ));
+    }
+    if signer.certificates.is_empty() {
+        return Err(OxideError::MalformedPdf(
+            "digital signing requires a signer certificate".to_string(),
+        ));
+    }
+    if options.contents_reserved_bytes == 0 {
+        return Err(OxideError::MalformedPdf(
+            "signature /Contents placeholder must reserve at least one byte".to_string(),
+        ));
+    }
+
+    let page_index = options.page.checked_sub(1).ok_or_else(|| {
+        OxideError::MalformedPdf("signature page numbers are 1-based".to_string())
+    })?;
+    let pages = doc.get_pages()?;
+    let page = pages.get(page_index).ok_or_else(|| {
+        OxideError::MalformedPdf(format!(
+            "signature target page {} is out of range",
+            options.page
+        ))
+    })?;
+
+    let (root_number, root_generation) = reader.root_reference().ok_or_else(|| {
+        OxideError::MalformedPdf("signature writer: trailer is missing /Root".to_string())
+    })?;
+    let mut catalog = reader
+        .get_object(root_number, root_generation)?
+        .as_dict()
+        .cloned()
+        .ok_or_else(|| OxideError::MalformedPdf("/Root is not a dictionary".to_string()))?;
+    let mut page_dict = reader
+        .get_object(page.object_number, page.generation_number)?
+        .as_dict()
+        .cloned()
+        .ok_or_else(|| OxideError::MalformedPdf("target page is not a dictionary".to_string()))?;
+
+    let next = next_free_object_number(reader);
+    let sig_number = next;
+    let field_number = next + 1;
+    let appearance_number = options.rect.map(|_| next + 2);
+    let acroform_number = match catalog.get_reference("AcroForm") {
+        Some((number, _)) => number,
+        None => appearance_number.map_or(next + 2, |n| n + 1),
+    };
+
+    let sig_ref = reference(sig_number, 0);
+    let field_ref = reference(field_number, 0);
+    let page_ref = reference(page.object_number, page.generation_number);
+
+    let (mut acroform, acroform_ref) = match catalog.get("AcroForm") {
+        Some(PdfObject::Reference { number, generation }) => {
+            let dict = reader
+                .get_object(*number, *generation)?
+                .as_dict()
+                .cloned()
+                .ok_or_else(|| OxideError::MalformedPdf("/AcroForm is not a dictionary".into()))?;
+            (dict, reference(*number, *generation))
+        }
+        Some(PdfObject::Dictionary(dict)) => (dict.clone(), reference(acroform_number, 0)),
+        Some(_) | None => (PdfDictionary::empty(), reference(acroform_number, 0)),
+    };
+
+    let mut fields = resolve_array(acroform.get("Fields"), reader).unwrap_or_default();
+    fields.push(field_ref.clone());
+    acroform.insert("Fields", PdfObject::Array(fields));
+    acroform.insert("SigFlags", PdfObject::Integer(3));
+    catalog.insert("AcroForm", acroform_ref.clone());
+
+    let mut annots = resolve_array(page_dict.get("Annots"), reader).unwrap_or_default();
+    annots.push(field_ref.clone());
+    page_dict.insert("Annots", PdfObject::Array(annots));
+
+    let rect = options.rect.unwrap_or([0.0, 0.0, 0.0, 0.0]);
+    let mut field = PdfDictionary::empty();
+    field.insert("Type", PdfObject::Name("Annot".to_string()));
+    field.insert("Subtype", PdfObject::Name("Widget".to_string()));
+    field.insert("FT", PdfObject::Name("Sig".to_string()));
+    field.insert(
+        "T",
+        PdfObject::String(options.field_name.as_bytes().to_vec()),
+    );
+    field.insert("F", PdfObject::Integer(132));
+    field.insert("Rect", rect_object(rect));
+    field.insert("P", page_ref);
+    field.insert("V", sig_ref.clone());
+    if let Some(ap_number) = appearance_number {
+        let mut ap = PdfDictionary::empty();
+        ap.insert("N", reference(ap_number, 0));
+        field.insert("AP", PdfObject::Dictionary(ap));
+    }
+
+    let mut raw_objects = vec![
+        raw_object(
+            root_number,
+            root_generation,
+            &PdfObject::Dictionary(catalog),
+        ),
+        raw_object(
+            page.object_number,
+            page.generation_number,
+            &PdfObject::Dictionary(page_dict),
+        ),
+        raw_object(
+            acroform_ref.as_reference().unwrap().0,
+            acroform_ref.as_reference().unwrap().1,
+            &PdfObject::Dictionary(acroform),
+        ),
+        raw_object(field_number, 0, &PdfObject::Dictionary(field)),
+        RawIncrementalObject {
+            number: sig_number,
+            generation: 0,
+            body: signature_dictionary_body(options, options.contents_reserved_bytes),
+        },
+    ];
+
+    if let (Some(ap_number), Some(rect)) = (appearance_number, options.rect) {
+        raw_objects.push(raw_object(ap_number, 0, &appearance_stream(options, rect)));
+    }
+
+    let mut staged = write_incremental_update_raw(reader, raw_objects)?;
+    let byte_range_start = find_unique(&staged, BYTE_RANGE_PLACEHOLDER)?;
+    let contents_marker = contents_placeholder(options.contents_reserved_bytes);
+    let contents_marker_start = find_unique(&staged, &contents_marker)?;
+    let contents_hex_start = contents_marker_start + 1;
+    let contents_after = contents_marker_start + contents_marker.len();
+    let byte_range = ByteRange {
+        a: 0,
+        b: contents_marker_start,
+        c: contents_after,
+        d: staged.len().saturating_sub(contents_after),
+    };
+    patch_byte_range(&mut staged, byte_range_start, &byte_range)?;
+
+    let signed_bytes = extract_signed_bytes(&staged, &byte_range).ok_or_else(|| {
+        OxideError::MalformedPdf("signature writer produced an invalid /ByteRange".to_string())
+    })?;
+    let digest = Sha256::digest(&signed_bytes);
+    let cms = build_detached_cms(signer, &digest)?;
+    if cms.len() > options.contents_reserved_bytes {
+        return Err(OxideError::ResourceLimit(format!(
+            "CMS signature is {} bytes but /Contents reserved only {} bytes",
+            cms.len(),
+            options.contents_reserved_bytes
+        )));
+    }
+    patch_contents_hex(
+        &mut staged,
+        contents_hex_start,
+        options.contents_reserved_bytes,
+        &cms,
+    );
+
+    Ok(staged)
 }
 
 /// A located signature field with its signature dictionary.
@@ -522,6 +812,242 @@ fn cert_to_info(cert: &Certificate) -> CertInfo {
         not_before: tbs.validity.not_before.to_string(),
         not_after: tbs.validity.not_after.to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Signing helpers
+// ---------------------------------------------------------------------------
+
+fn next_free_object_number(reader: &PdfReader) -> u32 {
+    let max_seen = reader
+        .object_ids()
+        .into_iter()
+        .map(|(number, _)| number)
+        .max()
+        .unwrap_or(0);
+    let trailer_size = reader.size().unwrap_or(0).max(0) as u32;
+    max_seen.max(trailer_size.saturating_sub(1)) + 1
+}
+
+fn reference(number: u32, generation: u16) -> PdfObject {
+    PdfObject::Reference { number, generation }
+}
+
+fn raw_object(number: u32, generation: u16, object: &PdfObject) -> RawIncrementalObject {
+    let mut body = Vec::new();
+    serialize_object(object, &mut body);
+    RawIncrementalObject {
+        number,
+        generation,
+        body,
+    }
+}
+
+fn rect_object(rect: [f64; 4]) -> PdfObject {
+    PdfObject::Array(rect.into_iter().map(PdfObject::Real).collect::<Vec<_>>())
+}
+
+fn signature_dictionary_body(options: &SignatureOptions, reserved_bytes: usize) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(b"<<\n");
+    body.extend_from_slice(b"/Type /Sig\n");
+    body.extend_from_slice(b"/Filter /Adobe.PPKLite\n");
+    body.extend_from_slice(b"/SubFilter /adbe.pkcs7.detached\n");
+    body.extend_from_slice(b"/ByteRange ");
+    body.extend_from_slice(BYTE_RANGE_PLACEHOLDER);
+    body.extend_from_slice(b"\n/Contents ");
+    body.extend_from_slice(&contents_placeholder(reserved_bytes));
+    body.extend_from_slice(b"\n");
+    push_optional_pdf_string(&mut body, "Name", options.signer_name.as_deref());
+    push_optional_pdf_string(&mut body, "Reason", options.reason.as_deref());
+    push_optional_pdf_string(&mut body, "Location", options.location.as_deref());
+    push_optional_pdf_string(&mut body, "ContactInfo", options.contact_info.as_deref());
+    push_optional_pdf_string(&mut body, "M", options.signing_time.as_deref());
+    body.extend_from_slice(b">>");
+    body
+}
+
+fn push_optional_pdf_string(out: &mut Vec<u8>, key: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        out.extend_from_slice(format!("/{key} ").as_bytes());
+        out.extend_from_slice(pdf_literal_string(value).as_bytes());
+        out.extend_from_slice(b"\n");
+    }
+}
+
+fn pdf_literal_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('(');
+    for byte in value.as_bytes() {
+        match *byte {
+            b'(' => out.push_str("\\("),
+            b')' => out.push_str("\\)"),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(*byte as char),
+            b => out.push_str(&format!("\\{b:03o}")),
+        }
+    }
+    out.push(')');
+    out
+}
+
+fn appearance_stream(options: &SignatureOptions, rect: [f64; 4]) -> PdfObject {
+    let width = (rect[2] - rect[0]).abs().max(1.0);
+    let height = (rect[3] - rect[1]).abs().max(1.0);
+    let signer = options
+        .signer_name
+        .as_deref()
+        .unwrap_or(options.field_name.as_str());
+    let reason = options.reason.as_deref().unwrap_or("Signed");
+    let raw = format!(
+        "q\n1 1 1 rg 0 0 {} {} re f\n0 0 0 RG 0.75 w 0 0 {} {} re S\nBT /Helv 10 Tf 8 {} Td {} Tj\n0 -14 Td {} Tj\nET\nQ",
+        pdf_number(width),
+        pdf_number(height),
+        pdf_number(width),
+        pdf_number(height),
+        pdf_number((height - 16.0).max(8.0)),
+        pdf_literal_string(&format!("Digitally signed by {signer}")),
+        pdf_literal_string(reason),
+    )
+    .into_bytes();
+
+    let mut font = PdfDictionary::empty();
+    font.insert("Type", PdfObject::Name("Font".to_string()));
+    font.insert("Subtype", PdfObject::Name("Type1".to_string()));
+    font.insert("BaseFont", PdfObject::Name("Helvetica".to_string()));
+
+    let mut fonts = PdfDictionary::empty();
+    fonts.insert("Helv", PdfObject::Dictionary(font));
+
+    let mut resources = PdfDictionary::empty();
+    resources.insert("Font", PdfObject::Dictionary(fonts));
+
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Type", PdfObject::Name("XObject".to_string()));
+    dict.insert("Subtype", PdfObject::Name("Form".to_string()));
+    dict.insert("BBox", rect_object([0.0, 0.0, width, height]));
+    dict.insert("Resources", PdfObject::Dictionary(resources));
+    PdfObject::Stream { dict, raw }
+}
+
+fn pdf_number(value: f64) -> String {
+    if !value.is_finite() {
+        return "0".to_string();
+    }
+    let mut s = format!("{value:.3}");
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    if s == "-0" {
+        s = "0".to_string();
+    }
+    s
+}
+
+fn contents_placeholder(reserved_bytes: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(reserved_bytes * 2 + 2);
+    out.push(b'<');
+    out.resize(reserved_bytes * 2 + 1, b'0');
+    out.push(b'>');
+    out
+}
+
+fn find_unique(haystack: &[u8], needle: &[u8]) -> Result<usize> {
+    let mut found = None;
+    for (idx, window) in haystack.windows(needle.len()).enumerate() {
+        if window == needle {
+            if found.is_some() {
+                return Err(OxideError::MalformedPdf(
+                    "signature writer found a non-unique placeholder".to_string(),
+                ));
+            }
+            found = Some(idx);
+        }
+    }
+    found.ok_or_else(|| {
+        OxideError::MalformedPdf("signature writer placeholder was not found".to_string())
+    })
+}
+
+fn patch_byte_range(out: &mut [u8], start: usize, br: &ByteRange) -> Result<()> {
+    for value in [br.a, br.b, br.c, br.d] {
+        if value > 9_999_999_999 {
+            return Err(OxideError::ResourceLimit(
+                "signature ByteRange exceeds fixed 10-digit placeholder".to_string(),
+            ));
+        }
+    }
+    let replacement = format!("[{:>10} {:>10} {:>10} {:>10}]", br.a, br.b, br.c, br.d);
+    debug_assert_eq!(replacement.len(), BYTE_RANGE_PLACEHOLDER.len());
+    out[start..start + BYTE_RANGE_PLACEHOLDER.len()].copy_from_slice(replacement.as_bytes());
+    Ok(())
+}
+
+fn patch_contents_hex(out: &mut [u8], hex_start: usize, reserved_bytes: usize, cms: &[u8]) {
+    let hex_len = reserved_bytes * 2;
+    for byte in &mut out[hex_start..hex_start + hex_len] {
+        *byte = b'0';
+    }
+    for (idx, byte) in cms.iter().enumerate() {
+        out[hex_start + idx * 2] = b"0123456789ABCDEF"[(byte >> 4) as usize];
+        out[hex_start + idx * 2 + 1] = b"0123456789ABCDEF"[(byte & 0x0f) as usize];
+    }
+}
+
+fn build_detached_cms(signer: &PdfSigner, content_digest: &[u8]) -> Result<Vec<u8>> {
+    let content = EncapsulatedContentInfo {
+        econtent_type: const_oid::db::rfc5911::ID_DATA,
+        econtent: None,
+    };
+    let digest_algorithm = AlgorithmIdentifierOwned {
+        oid: OID_SHA256,
+        parameters: None,
+    };
+    let signing_key = SigningKey::<Sha256>::new(signer.private_key.clone());
+    let cert = signer.signer_certificate();
+    let sid = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
+        issuer: cert.tbs_certificate.issuer.clone(),
+        serial_number: cert.tbs_certificate.serial_number.clone(),
+    });
+    let mut signer_info = SignerInfoBuilder::new(
+        &signing_key,
+        sid,
+        digest_algorithm.clone(),
+        &content,
+        Some(content_digest),
+    )
+    .map_err(|e| OxideError::MalformedPdf(format!("CMS signer info: {e}")))?;
+    signer_info
+        .add_signed_attribute(
+            create_signing_time_attribute()
+                .map_err(|e| OxideError::MalformedPdf(format!("CMS signing time: {e}")))?,
+        )
+        .map_err(|e| OxideError::MalformedPdf(format!("CMS signed attribute: {e}")))?;
+
+    let mut builder = SignedDataBuilder::new(&content);
+    builder
+        .add_digest_algorithm(digest_algorithm)
+        .map_err(|e| OxideError::MalformedPdf(format!("CMS digest algorithm: {e}")))?;
+    for cert in &signer.certificates {
+        builder
+            .add_certificate(CertificateChoices::Certificate(cert.clone()))
+            .map_err(|e| OxideError::MalformedPdf(format!("CMS certificate: {e}")))?;
+    }
+    builder
+        .add_signer_info::<SigningKey<Sha256>, rsa::pkcs1v15::Signature>(signer_info)
+        .map_err(|e| OxideError::MalformedPdf(format!("CMS signature: {e}")))?;
+    let content_info = builder
+        .build()
+        .map_err(|e| OxideError::MalformedPdf(format!("CMS build: {e}")))?;
+    content_info
+        .to_der()
+        .map_err(|e| OxideError::MalformedPdf(format!("CMS encode: {e}")))
 }
 
 // ---------------------------------------------------------------------------
