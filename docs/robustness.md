@@ -36,6 +36,11 @@ Continuous private-CI fuzzing is configured in `.github/workflows/fuzz.yml`.
 See [`continuous_fuzzing.md`](continuous_fuzzing.md) for the persistent corpus,
 regression gate, and crash triage workflow.
 
+Differential fuzzing is configured in
+`.github/workflows/differential-fuzz.yml`. See
+[`differential_fuzzing.md`](differential_fuzzing.md) for the qpdf/Poppler
+wrong-output gate.
+
 ## What was set up
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)
