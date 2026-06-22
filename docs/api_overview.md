@@ -18,7 +18,7 @@ and may move while the crate is `0.x`.
 | Authoring | `PdfBuilder`, `PdfPageBuilder`, `FlowDocument`, `TextStyle`, `GraphicsStyle` |
 | Editing | `PdfEditor`, `WatermarkOptions`, `HeaderFooterOptions`, `RedactionOptions` |
 | Structural ops | `build_subset`, `build_merged`, `rotate_pages`, `optimize`, `repair`, `encrypt`, `linearize` |
-| PDF/A and PDF/UA | `validate_pdfa`, `convert_to_pdfa`, `validate_pdfua`, `PdfAProfile` |
+| PDF/A and PDF/UA | `validate_pdfa`, `convert_to_pdfa`, `convert_to_pdfa_checked`, `validate_pdfua`, `PdfAProfile::{PdfA1B,PdfA2B,PdfA2A,PdfA3B,PdfA3A}` |
 | Signatures | `ContentEngine::sign`, `ContentEngine::add_ltv_material`, `sign_document`, `add_ltv_material`, `PdfSigner`, `verify_signatures` |
 | Errors | `Result<T>`, `OxideError`, `ErrorKind`, `OxideError::code()` |
 

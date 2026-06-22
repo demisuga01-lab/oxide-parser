@@ -26,25 +26,50 @@ pub enum PdfAProfile {
     PdfA1B,
     /// PDF/A-2b: basic visual archival preservation, transparency allowed.
     PdfA2B,
+    /// PDF/A-2a: visual archival preservation plus tagged structure.
+    PdfA2A,
+    /// PDF/A-3b: PDF/A-2b plus associated embedded files.
+    PdfA3B,
+    /// PDF/A-3a: PDF/A-3b plus tagged structure.
+    PdfA3A,
 }
 
 impl PdfAProfile {
     pub fn part(self) -> i32 {
         match self {
             Self::PdfA1B => 1,
-            Self::PdfA2B => 2,
+            Self::PdfA2B | Self::PdfA2A => 2,
+            Self::PdfA3B | Self::PdfA3A => 3,
         }
     }
 
     pub fn conformance(self) -> &'static str {
-        "B"
+        match self {
+            Self::PdfA1B | Self::PdfA2B | Self::PdfA3B => "B",
+            Self::PdfA2A | Self::PdfA3A => "A",
+        }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::PdfA1B => "PDF/A-1b",
             Self::PdfA2B => "PDF/A-2b",
+            Self::PdfA2A => "PDF/A-2a",
+            Self::PdfA3B => "PDF/A-3b",
+            Self::PdfA3A => "PDF/A-3a",
         }
+    }
+
+    fn is_pdfa1(self) -> bool {
+        matches!(self, Self::PdfA1B)
+    }
+
+    fn is_level_a(self) -> bool {
+        matches!(self, Self::PdfA2A | Self::PdfA3A)
+    }
+
+    fn allows_embedded_files(self) -> bool {
+        matches!(self, Self::PdfA3B | Self::PdfA3A)
     }
 }
 
@@ -121,7 +146,7 @@ pub fn validate_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<PdfAVali
             "PDF/A documents must not be encrypted",
         ));
     }
-    if profile == PdfAProfile::PdfA1B && pdf_version_gt(reader.version(), "1.4") {
+    if profile.is_pdfa1() && pdf_version_gt(reader.version(), "1.4") {
         violations.push(ComplianceViolation::error(
             "pdfa1.version",
             "header",
@@ -144,6 +169,10 @@ pub fn validate_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<PdfAVali
     validate_xmp(&catalog, reader, profile, &mut violations);
     validate_fonts(doc, &mut violations)?;
     validate_disallowed_objects(reader, profile, &mut violations)?;
+    validate_embedded_file_rules(reader, profile, &mut violations)?;
+    if profile.is_level_a() {
+        validate_level_a_structure(&catalog, reader, &mut violations);
+    }
 
     Ok(PdfAValidationReport {
         profile,
@@ -176,6 +205,7 @@ pub fn convert_to_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<Vec<u8
 
     let (mut objects, root, info) = rewrite_document_objects(doc.reader(), &mut |_, object| {
         strip_disallowed_actions(object);
+        ensure_pdfa3_associated_file_relationship(object, profile);
     })?;
     drop_copied_structural_artifacts(&mut objects);
     let mut document_info = DocumentInfo::gather(doc)?;
@@ -185,7 +215,12 @@ pub fn convert_to_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<Vec<u8
     let metadata_number = next;
     let icc_number = next + 1;
     let output_intent_number = next + 2;
-    let info_number = info.unwrap_or(next + 3);
+    let level_a_structure = profile.is_level_a().then_some((next + 3, next + 4));
+    let info_number = info.unwrap_or(if level_a_structure.is_some() {
+        next + 5
+    } else {
+        next + 3
+    });
 
     upsert_catalog_compliance(
         &mut objects,
@@ -193,6 +228,7 @@ pub fn convert_to_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<Vec<u8
         metadata_number,
         output_intent_number,
         profile,
+        level_a_structure,
     )?;
     upsert_info(&mut objects, info_number);
     objects.push(OutputObject {
@@ -242,47 +278,7 @@ pub fn validate_pdfua(doc: &PdfDocument) -> Result<PdfUaValidationReport> {
     let reader = doc.reader();
     let mut violations = Vec::new();
 
-    if !catalog.contains_key("Lang") {
-        violations.push(ComplianceViolation::error(
-            "pdfua.lang",
-            "Catalog",
-            "PDF/UA documents must declare a document language",
-        ));
-    }
-    let marked = catalog
-        .get("MarkInfo")
-        .and_then(|obj| reader.resolve(obj.clone()).ok())
-        .and_then(|obj| obj.as_dict().cloned())
-        .and_then(|dict| dict.get_bool("Marked"))
-        .unwrap_or(false);
-    if !marked {
-        violations.push(ComplianceViolation::error(
-            "pdfua.marked",
-            "Catalog/MarkInfo",
-            "PDF/UA documents must be marked/tagged",
-        ));
-    }
-    let Some(root_obj) = catalog.get("StructTreeRoot") else {
-        violations.push(ComplianceViolation::error(
-            "pdfua.structure",
-            "Catalog",
-            "PDF/UA documents require a StructTreeRoot",
-        ));
-        return Ok(PdfUaValidationReport {
-            compliant: false,
-            violations,
-        });
-    };
-    let root = reader.resolve(root_obj.clone())?;
-    if root.as_dict().is_none() {
-        violations.push(ComplianceViolation::error(
-            "pdfua.structure",
-            "StructTreeRoot",
-            "StructTreeRoot must resolve to a dictionary",
-        ));
-    } else if let Some(root_dict) = root.as_dict() {
-        validate_structure_alt_text(reader, root_dict, &mut violations, &mut BTreeSet::new(), 0);
-    }
+    validate_tagged_structure_basics(&catalog, reader, "pdfua", "PDF/UA", &mut violations);
 
     Ok(PdfUaValidationReport {
         compliant: !violations
@@ -298,7 +294,9 @@ pub fn validate_pdfua(doc: &PdfDocument) -> Result<PdfUaValidationReport> {
 /// guarantee because human-reviewed reading order and alt text are still needed.
 pub fn improve_pdfua_best_effort(doc: &PdfDocument, lang: &str) -> Result<Vec<u8>> {
     let (mut objects, root, info) = rewrite_document_objects(doc.reader(), &mut |_, _| {})?;
-    let struct_number = objects.iter().map(|obj| obj.number).max().unwrap_or(0) + 1;
+    let struct_root_number = objects.iter().map(|obj| obj.number).max().unwrap_or(0) + 1;
+    let document_element_number = struct_root_number + 1;
+    let mut append_structure = false;
     let root_obj = objects
         .iter_mut()
         .find(|obj| obj.number == root)
@@ -314,14 +312,18 @@ pub fn improve_pdfua_best_effort(doc: &PdfDocument, lang: &str) -> Result<Vec<u8
         PdfObject::Dictionary(dict(&[("Marked", PdfObject::Boolean(true))])),
     );
     if !catalog.contains_key("StructTreeRoot") {
-        catalog.insert("StructTreeRoot", reference(struct_number));
-        objects.push(OutputObject {
-            number: struct_number,
-            object: PdfObject::Dictionary(dict(&[
-                ("Type", PdfObject::Name("StructTreeRoot".to_string())),
-                ("K", PdfObject::Array(Vec::new())),
-            ])),
-        });
+        catalog.insert("StructTreeRoot", reference(struct_root_number));
+        append_structure = true;
+    }
+    if append_structure {
+        objects.push(level_a_struct_tree_root(
+            struct_root_number,
+            document_element_number,
+        ));
+        objects.push(level_a_document_struct_elem(
+            struct_root_number,
+            document_element_number,
+        ));
     }
     objects.sort_by_key(|obj| obj.number);
     PdfWriter::new(objects, root)
@@ -329,6 +331,133 @@ pub fn improve_pdfua_best_effort(doc: &PdfDocument, lang: &str) -> Result<Vec<u8
         .with_id(doc.reader().first_file_id())
         .with_mode(WriterMode::XrefStreamWithObjStm)
         .write()
+}
+
+fn validate_level_a_structure(
+    catalog: &PdfDictionary,
+    reader: &PdfReader,
+    violations: &mut Vec<ComplianceViolation>,
+) {
+    validate_tagged_structure_basics(catalog, reader, "pdfa.level_a", "PDF/A Level A", violations);
+}
+
+fn validate_tagged_structure_basics(
+    catalog: &PdfDictionary,
+    reader: &PdfReader,
+    rule_prefix: &str,
+    label: &str,
+    violations: &mut Vec<ComplianceViolation>,
+) {
+    if !catalog.contains_key("Lang") {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.lang"),
+            "Catalog",
+            format!("{label} documents must declare a document language"),
+        ));
+    }
+    let marked = catalog
+        .get("MarkInfo")
+        .and_then(|obj| reader.resolve(obj.clone()).ok())
+        .and_then(|obj| obj.as_dict().cloned())
+        .and_then(|dict| dict.get_bool("Marked"))
+        .unwrap_or(false);
+    if !marked {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.marked"),
+            "Catalog/MarkInfo",
+            format!("{label} documents must be marked/tagged"),
+        ));
+    }
+    let Some(root_obj) = catalog.get("StructTreeRoot") else {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.structure"),
+            "Catalog",
+            format!("{label} documents require a StructTreeRoot"),
+        ));
+        return;
+    };
+    let Ok(root) = reader.resolve(root_obj.clone()) else {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.structure"),
+            "StructTreeRoot",
+            "StructTreeRoot could not be resolved",
+        ));
+        return;
+    };
+    let Some(root_dict) = root.as_dict() else {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.structure"),
+            "StructTreeRoot",
+            "StructTreeRoot must resolve to a dictionary",
+        ));
+        return;
+    };
+    validate_structure_root_k(
+        reader,
+        root_dict,
+        rule_prefix,
+        violations,
+        &mut BTreeSet::new(),
+    );
+    validate_structure_alt_text(
+        reader,
+        root_dict,
+        rule_prefix,
+        violations,
+        &mut BTreeSet::new(),
+        0,
+    );
+}
+
+fn validate_structure_root_k(
+    reader: &PdfReader,
+    root_dict: &PdfDictionary,
+    rule_prefix: &str,
+    violations: &mut Vec<ComplianceViolation>,
+    visited: &mut BTreeSet<(u32, u16)>,
+) {
+    let Some(kids) = root_dict.get("K") else {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.structure.k"),
+            "StructTreeRoot/K",
+            "Tagged documents require an explicit structure tree root /K entry",
+        ));
+        return;
+    };
+    if structure_k_is_empty(reader, kids, visited, 0) {
+        violations.push(ComplianceViolation::error(
+            &format!("{rule_prefix}.structure.k"),
+            "StructTreeRoot/K",
+            "Tagged documents require a non-empty structure tree",
+        ));
+    }
+}
+
+fn structure_k_is_empty(
+    reader: &PdfReader,
+    object: &PdfObject,
+    visited: &mut BTreeSet<(u32, u16)>,
+    depth: usize,
+) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    match object {
+        PdfObject::Array(items) => items.is_empty(),
+        PdfObject::Null => true,
+        PdfObject::Reference { number, generation } => {
+            if !visited.insert((*number, *generation)) {
+                return false;
+            }
+            let empty = reader
+                .get_and_resolve(*number, *generation)
+                .map(|resolved| structure_k_is_empty(reader, &resolved, visited, depth + 1))
+                .unwrap_or(false);
+            visited.remove(&(*number, *generation));
+            empty
+        }
+        _ => false,
+    }
 }
 
 fn validate_output_intent(
@@ -546,6 +675,128 @@ fn validate_disallowed_objects(
     Ok(())
 }
 
+#[derive(Default)]
+struct EmbeddedFileRuleScan {
+    embedded_file_streams: usize,
+    associated_file_specs: usize,
+}
+
+fn validate_embedded_file_rules(
+    reader: &PdfReader,
+    profile: PdfAProfile,
+    violations: &mut Vec<ComplianceViolation>,
+) -> Result<()> {
+    let mut scan = EmbeddedFileRuleScan::default();
+    for (number, generation) in reader.object_ids() {
+        let object = reader.get_object(number, generation)?;
+        scan_embedded_file_rules(
+            &object,
+            &format!("object {number} {generation}"),
+            profile,
+            violations,
+            &mut scan,
+            0,
+        );
+    }
+    if profile.allows_embedded_files()
+        && scan.embedded_file_streams > 0
+        && scan.associated_file_specs == 0
+    {
+        violations.push(ComplianceViolation::error(
+            "pdfa3.embedded_file.afrelationship",
+            "EmbeddedFiles",
+            "PDF/A-3 embedded files must be associated through a FileSpec with /AFRelationship",
+        ));
+    }
+    Ok(())
+}
+
+fn scan_embedded_file_rules(
+    object: &PdfObject,
+    location: &str,
+    profile: PdfAProfile,
+    violations: &mut Vec<ComplianceViolation>,
+    scan: &mut EmbeddedFileRuleScan,
+    depth: usize,
+) {
+    if depth > 64 {
+        return;
+    }
+    match object {
+        PdfObject::Dictionary(dict) => {
+            if dict.get_name("Type") == Some("EmbeddedFile") {
+                scan.embedded_file_streams += 1;
+            }
+            if is_file_spec_dict(dict) {
+                match dict.get_name("AFRelationship") {
+                    Some(name) if valid_af_relationship(name) => {
+                        scan.associated_file_specs += 1;
+                    }
+                    Some(name) if profile.allows_embedded_files() => {
+                        violations.push(ComplianceViolation::error(
+                            "pdfa3.embedded_file.afrelationship",
+                            format!("{location}/AFRelationship"),
+                            format!("'{name}' is not a valid PDF/A-3 AFRelationship"),
+                        ));
+                    }
+                    None if profile.allows_embedded_files() => {
+                        violations.push(ComplianceViolation::error(
+                            "pdfa3.embedded_file.afrelationship",
+                            location,
+                            "PDF/A-3 FileSpec dictionaries for embedded files require /AFRelationship",
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            for (key, value) in dict.entries() {
+                scan_embedded_file_rules(
+                    value,
+                    &format!("{location}/{key}"),
+                    profile,
+                    violations,
+                    scan,
+                    depth + 1,
+                );
+            }
+        }
+        PdfObject::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                scan_embedded_file_rules(
+                    item,
+                    &format!("{location}[{idx}]"),
+                    profile,
+                    violations,
+                    scan,
+                    depth + 1,
+                );
+            }
+        }
+        PdfObject::Stream { dict, .. } => {
+            scan_embedded_file_rules(
+                &PdfObject::Dictionary(dict.clone()),
+                location,
+                profile,
+                violations,
+                scan,
+                depth + 1,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn is_file_spec_dict(dict: &PdfDictionary) -> bool {
+    matches!(dict.get_name("Type"), Some("Filespec" | "FileSpec")) || dict.contains_key("EF")
+}
+
+fn valid_af_relationship(name: &str) -> bool {
+    matches!(
+        name,
+        "Source" | "Data" | "Alternative" | "Supplement" | "Unspecified"
+    )
+}
+
 fn scan_disallowed(
     object: &PdfObject,
     location: &str,
@@ -567,14 +818,14 @@ fn scan_disallowed(
                     ));
                 }
             }
-            if dict.get_name("Type") == Some("EmbeddedFile") {
+            if dict.get_name("Type") == Some("EmbeddedFile") && !profile.allows_embedded_files() {
                 violations.push(ComplianceViolation::error(
                     "pdfa.embedded_file",
                     location,
-                    "PDF/A-1/2 conversion profile does not allow EmbeddedFile streams",
+                    "This PDF/A profile does not allow EmbeddedFile streams",
                 ));
             }
-            if profile == PdfAProfile::PdfA1B {
+            if profile.is_pdfa1() {
                 if matches!(dict.get_name("Type"), Some("ObjStm" | "XRef")) {
                     violations.push(ComplianceViolation::error(
                         "pdfa1.xref_structure",
@@ -664,7 +915,9 @@ fn is_pdf15_structural_artifact(object: &PdfObject) -> bool {
 fn writer_for_profile(profile: PdfAProfile) -> (WriterMode, &'static str) {
     match profile {
         PdfAProfile::PdfA1B => (WriterMode::ClassicXref, "1.4"),
-        PdfAProfile::PdfA2B => (WriterMode::XrefStreamWithObjStm, "1.7"),
+        PdfAProfile::PdfA2B | PdfAProfile::PdfA2A | PdfAProfile::PdfA3B | PdfAProfile::PdfA3A => {
+            (WriterMode::XrefStreamWithObjStm, "1.7")
+        }
     }
 }
 
@@ -686,28 +939,86 @@ fn parse_pdf_version(version: &str) -> (u16, u16) {
 }
 
 fn upsert_catalog_compliance(
-    objects: &mut [OutputObject],
+    objects: &mut Vec<OutputObject>,
     root: u32,
     metadata_number: u32,
     output_intent_number: u32,
-    _profile: PdfAProfile,
+    profile: PdfAProfile,
+    level_a_structure: Option<(u32, u32)>,
 ) -> Result<()> {
-    let root_obj = objects
-        .iter_mut()
-        .find(|obj| obj.number == root)
+    let root_index = objects
+        .iter()
+        .position(|obj| obj.number == root)
         .ok_or_else(|| OxideError::MalformedPdf("PDF/A conversion: missing catalog".to_string()))?;
-    let PdfObject::Dictionary(catalog) = &mut root_obj.object else {
-        return Err(OxideError::MalformedPdf(
-            "PDF/A conversion: catalog is not a dictionary".to_string(),
+    let mut append_level_a_structure = None;
+    {
+        let root_obj = &mut objects[root_index];
+        let PdfObject::Dictionary(catalog) = &mut root_obj.object else {
+            return Err(OxideError::MalformedPdf(
+                "PDF/A conversion: catalog is not a dictionary".to_string(),
+            ));
+        };
+        catalog.insert("Metadata", reference(metadata_number));
+        catalog.insert(
+            "OutputIntents",
+            PdfObject::Array(vec![reference(output_intent_number)]),
+        );
+        if profile.is_level_a() {
+            if !catalog.contains_key("Lang") {
+                catalog.insert("Lang", PdfObject::String(b"en-US".to_vec()));
+            }
+            catalog.insert(
+                "MarkInfo",
+                PdfObject::Dictionary(dict(&[("Marked", PdfObject::Boolean(true))])),
+            );
+            if !catalog.contains_key("StructTreeRoot") {
+                append_level_a_structure = level_a_structure;
+            }
+            if let Some((struct_root_number, _)) = append_level_a_structure {
+                catalog.insert("StructTreeRoot", reference(struct_root_number));
+            }
+        }
+        strip_disallowed_actions(&mut root_obj.object);
+    }
+    if let Some((struct_root_number, document_element_number)) = append_level_a_structure {
+        objects.push(level_a_struct_tree_root(
+            struct_root_number,
+            document_element_number,
         ));
-    };
-    catalog.insert("Metadata", reference(metadata_number));
-    catalog.insert(
-        "OutputIntents",
-        PdfObject::Array(vec![reference(output_intent_number)]),
-    );
-    strip_disallowed_actions(&mut root_obj.object);
+        objects.push(level_a_document_struct_elem(
+            struct_root_number,
+            document_element_number,
+        ));
+    }
     Ok(())
+}
+
+fn level_a_struct_tree_root(struct_root_number: u32, document_element_number: u32) -> OutputObject {
+    OutputObject {
+        number: struct_root_number,
+        object: PdfObject::Dictionary(dict(&[
+            ("Type", PdfObject::Name("StructTreeRoot".to_string())),
+            (
+                "K",
+                PdfObject::Array(vec![reference(document_element_number)]),
+            ),
+        ])),
+    }
+}
+
+fn level_a_document_struct_elem(
+    struct_root_number: u32,
+    document_element_number: u32,
+) -> OutputObject {
+    OutputObject {
+        number: document_element_number,
+        object: PdfObject::Dictionary(dict(&[
+            ("Type", PdfObject::Name("StructElem".to_string())),
+            ("S", PdfObject::Name("Document".to_string())),
+            ("P", reference(struct_root_number)),
+            ("K", PdfObject::Array(Vec::new())),
+        ])),
+    }
 }
 
 fn upsert_info(objects: &mut Vec<OutputObject>, info_number: u32) {
@@ -789,6 +1100,39 @@ fn strip_disallowed_actions(object: &mut PdfObject) {
         PdfObject::Stream { dict, .. } => {
             let mut wrapper = PdfObject::Dictionary(dict.clone());
             strip_disallowed_actions(&mut wrapper);
+            if let PdfObject::Dictionary(clean) = wrapper {
+                *dict = clean;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ensure_pdfa3_associated_file_relationship(object: &mut PdfObject, profile: PdfAProfile) {
+    if !profile.allows_embedded_files() {
+        return;
+    }
+    match object {
+        PdfObject::Dictionary(dict) => {
+            if is_file_spec_dict(dict) && !dict.contains_key("AFRelationship") {
+                dict.insert("AFRelationship", PdfObject::Name("Unspecified".to_string()));
+            }
+            let keys: Vec<String> = dict.entries().map(|(key, _)| key.clone()).collect();
+            for key in keys {
+                if let Some(mut value) = dict.get(&key).cloned() {
+                    ensure_pdfa3_associated_file_relationship(&mut value, profile);
+                    dict.insert(key, value);
+                }
+            }
+        }
+        PdfObject::Array(items) => {
+            for item in items {
+                ensure_pdfa3_associated_file_relationship(item, profile);
+            }
+        }
+        PdfObject::Stream { dict, .. } => {
+            let mut wrapper = PdfObject::Dictionary(dict.clone());
+            ensure_pdfa3_associated_file_relationship(&mut wrapper, profile);
             if let PdfObject::Dictionary(clean) = wrapper {
                 *dict = clean;
             }
@@ -1007,6 +1351,7 @@ fn write_icc_s15_fixed(profile: &mut [u8], offset: usize, value: f32) {
 fn validate_structure_alt_text(
     reader: &PdfReader,
     dict: &PdfDictionary,
+    rule_prefix: &str,
     violations: &mut Vec<ComplianceViolation>,
     visited: &mut BTreeSet<(u32, u16)>,
     depth: usize,
@@ -1014,21 +1359,39 @@ fn validate_structure_alt_text(
     if depth > 128 {
         return;
     }
-    if dict.get_name("S") == Some("Figure") && !dict.contains_key("Alt") {
-        violations.push(ComplianceViolation::error(
-            "pdfua.figure.alt",
-            "StructElem/Figure",
-            "Figure structure elements require alternate text",
-        ));
+    if dict.get_name("Type") == Some("StructElem") {
+        if let Some(tag) = dict.get_name("S") {
+            if !standard_structure_tag(tag) {
+                violations.push(ComplianceViolation::error(
+                    &format!("{rule_prefix}.structure.tag"),
+                    "StructElem/S",
+                    format!("'{tag}' is not a standard logical structure tag"),
+                ));
+            }
+            if tag == "Figure" && !dict.contains_key("Alt") {
+                violations.push(ComplianceViolation::error(
+                    &format!("{rule_prefix}.figure.alt"),
+                    "StructElem/Figure",
+                    "Figure structure elements require alternate text",
+                ));
+            }
+        } else {
+            violations.push(ComplianceViolation::error(
+                &format!("{rule_prefix}.structure.tag"),
+                "StructElem/S",
+                "Structure elements require an /S role",
+            ));
+        }
     }
     if let Some(kids) = dict.get("K") {
-        validate_structure_kids(reader, kids, violations, visited, depth + 1);
+        validate_structure_kids(reader, kids, rule_prefix, violations, visited, depth + 1);
     }
 }
 
 fn validate_structure_kids(
     reader: &PdfReader,
     object: &PdfObject,
+    rule_prefix: &str,
     violations: &mut Vec<ComplianceViolation>,
     visited: &mut BTreeSet<(u32, u16)>,
     depth: usize,
@@ -1039,20 +1402,82 @@ fn validate_structure_kids(
                 return;
             }
             if let Ok(resolved) = reader.get_and_resolve(*number, *generation) {
-                validate_structure_kids(reader, &resolved, violations, visited, depth + 1);
+                validate_structure_kids(
+                    reader,
+                    &resolved,
+                    rule_prefix,
+                    violations,
+                    visited,
+                    depth + 1,
+                );
             }
             visited.remove(&(*number, *generation));
         }
         PdfObject::Dictionary(dict) => {
-            validate_structure_alt_text(reader, dict, violations, visited, depth + 1)
+            validate_structure_alt_text(reader, dict, rule_prefix, violations, visited, depth + 1)
         }
         PdfObject::Array(items) => {
             for item in items {
-                validate_structure_kids(reader, item, violations, visited, depth + 1);
+                validate_structure_kids(reader, item, rule_prefix, violations, visited, depth + 1);
             }
         }
         _ => {}
     }
+}
+
+fn standard_structure_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "Document"
+            | "Part"
+            | "Art"
+            | "Sect"
+            | "Div"
+            | "BlockQuote"
+            | "Caption"
+            | "TOC"
+            | "TOCI"
+            | "Index"
+            | "NonStruct"
+            | "Private"
+            | "P"
+            | "H"
+            | "H1"
+            | "H2"
+            | "H3"
+            | "H4"
+            | "H5"
+            | "H6"
+            | "L"
+            | "LI"
+            | "Lbl"
+            | "LBody"
+            | "Table"
+            | "TR"
+            | "TH"
+            | "TD"
+            | "THead"
+            | "TBody"
+            | "TFoot"
+            | "Span"
+            | "Quote"
+            | "Note"
+            | "Reference"
+            | "BibEntry"
+            | "Code"
+            | "Link"
+            | "Annot"
+            | "Ruby"
+            | "RB"
+            | "RT"
+            | "RP"
+            | "Warichu"
+            | "WT"
+            | "WP"
+            | "Figure"
+            | "Formula"
+            | "Form"
+    )
 }
 
 fn pdf_text(value: &str) -> PdfObject {

@@ -120,6 +120,85 @@ fn pdfa1_conversion_uses_classic_pdf14_output() {
 }
 
 #[test]
+fn pdfa_matrix_conversion_sets_profile_metadata_and_level_a_tags() {
+    let doc = PdfDocument::open_bytes(embedded_font_pdf()).unwrap();
+    for (profile, part, conformance) in [
+        (PdfAProfile::PdfA2A, "2", "A"),
+        (PdfAProfile::PdfA3B, "3", "B"),
+        (PdfAProfile::PdfA3A, "3", "A"),
+    ] {
+        let (bytes, conversion) = convert_to_pdfa_checked(&doc, profile).unwrap();
+        assert!(
+            conversion.validation.compliant,
+            "{}: {:?}",
+            profile.label(),
+            conversion.validation
+        );
+        let converted = PdfDocument::open_bytes(bytes).unwrap();
+        let catalog = converted.get_catalog().unwrap();
+        let metadata = converted
+            .reader()
+            .resolve(catalog.get("Metadata").unwrap().clone())
+            .unwrap();
+        let (_, xmp) = metadata.as_stream().unwrap();
+        let xmp = String::from_utf8_lossy(xmp);
+        assert!(xmp.contains(&format!("<pdfaid:part>{part}</pdfaid:part>")));
+        assert!(xmp.contains(&format!(
+            "<pdfaid:conformance>{conformance}</pdfaid:conformance>"
+        )));
+        if profile.conformance() == "A" {
+            assert!(catalog.contains_key("Lang"));
+            assert!(catalog.contains_key("MarkInfo"));
+            assert!(catalog.contains_key("StructTreeRoot"));
+            assert!(validate_pdfua(&converted).unwrap().compliant);
+        }
+    }
+}
+
+#[test]
+fn pdfa3_allows_only_associated_embedded_files() {
+    let bytes = std::fs::read("tests/fixtures/attach_nametree.pdf").unwrap();
+    let doc = PdfDocument::open_bytes(bytes).unwrap();
+
+    let pdfa2 = validate_pdfa(&doc, PdfAProfile::PdfA2B).unwrap();
+    assert!(pdfa2
+        .violations
+        .iter()
+        .any(|violation| violation.rule == "pdfa.embedded_file"));
+
+    let pdfa3 = validate_pdfa(&doc, PdfAProfile::PdfA3B).unwrap();
+    assert!(!pdfa3
+        .violations
+        .iter()
+        .any(|violation| violation.rule == "pdfa.embedded_file"));
+    assert!(pdfa3
+        .violations
+        .iter()
+        .any(|violation| violation.rule == "pdfa3.embedded_file.afrelationship"));
+}
+
+#[test]
+fn pdfa3_conversion_repairs_embedded_file_relationships() {
+    let bytes = std::fs::read("tests/fixtures/attach_nametree.pdf").unwrap();
+    let doc = PdfDocument::open_bytes(bytes).unwrap();
+    let (converted, report) = convert_to_pdfa_checked(&doc, PdfAProfile::PdfA3B).unwrap();
+    assert!(report.validation.compliant, "{:?}", report.validation);
+
+    let converted = PdfDocument::open_bytes(converted).unwrap();
+    let mut saw_associated_file = false;
+    for (number, generation) in converted.reader().object_ids() {
+        let object = converted.reader().get_object(number, generation).unwrap();
+        if let Some(dict) = object.as_dict() {
+            if dict.get_name("Type") == Some("Filespec") || dict.contains_key("EF") {
+                saw_associated_file = true;
+                assert_eq!(dict.get_name("AFRelationship"), Some("Unspecified"));
+            }
+        }
+    }
+    assert!(saw_associated_file);
+}
+
+#[test]
 fn pdfua_validation_and_best_effort_improvement_are_scoped() {
     let doc = PdfDocument::open_bytes(standard_font_pdf()).unwrap();
     let report = validate_pdfua(&doc).unwrap();

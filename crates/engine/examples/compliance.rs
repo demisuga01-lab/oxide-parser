@@ -44,6 +44,26 @@ fn main() -> oxide_engine::Result<()> {
         conversion1.validation.compliant
     );
 
+    for profile in [
+        PdfAProfile::PdfA2A,
+        PdfAProfile::PdfA3B,
+        PdfAProfile::PdfA3A,
+    ] {
+        let (bytes, conversion) = convert_to_pdfa_checked(&source_doc, profile)?;
+        let path = out_dir.join(format!(
+            "compliance-pdfa-{}{}.pdf",
+            profile.part(),
+            profile.conformance().to_ascii_lowercase()
+        ));
+        std::fs::write(&path, &bytes)?;
+        println!(
+            "{} after conversion compliant: {}",
+            conversion.profile.label(),
+            conversion.validation.compliant
+        );
+        println!("wrote {}", path.display());
+    }
+
     let ua = improve_pdfua_best_effort(&PdfDocument::open_bytes(pdfa)?, "en-US")?;
     let ua_path = out_dir.join("compliance-ua-best-effort.pdf");
     std::fs::write(&ua_path, &ua)?;

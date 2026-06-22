@@ -60,8 +60,12 @@ library.
 | Output | External check | Result |
 | --- | --- | --- |
 | Authored PDF | `qpdf --check`, Poppler render/extract | Clean. Poppler emitted font-substitution warnings for Symbol/ArialUnicode but exited successfully and extracted text. |
-| PDF/A-2b conversion | veraPDF 1.30.2 | PASS |
 | PDF/A-1b conversion | veraPDF 1.30.2 | PASS |
+| PDF/A-2b conversion | veraPDF 1.30.2 | PASS |
+| PDF/A-2a conversion | veraPDF 1.30.2 | PASS after GA Prompt 3 |
+| PDF/A-3b conversion | veraPDF 1.30.2 | PASS after GA Prompt 3 |
+| PDF/A-3a conversion | veraPDF 1.30.2 | PASS after GA Prompt 3 |
+| PDF/UA best-effort improvement | veraPDF 1.30.2 UA-1 | Not claimed compliant; veraPDF still reports semantic tagging/PDF-UA metadata requirements |
 | Signed PDF | `qpdf --check`, Oxide verify-sig | Clean. One RSA/SHA-256 signature reported cryptographically valid with whole-file coverage. |
 | Optimized PDF | `qpdf --check` | Clean |
 | AES-256 encrypted PDF | `qpdf --check --password=capstone` | Clean, AESv3 reported |
@@ -88,6 +92,13 @@ During capstone validation, veraPDF initially rejected PDF/A output because
 the converted file did not have a non-empty trailer `/ID`. The conversion path
 now writes a deterministic trailer ID when the source lacks one, and the PDF/A
 validator reports missing or empty IDs as violations.
+
+GA Prompt 3 broadened `PdfAProfile` to PDF/A-2a, PDF/A-3b, and PDF/A-3a. The
+generated compliance example passes qpdf and bundled veraPDF 1.30.2 for
+1b/2b/2a/3b/3a. PDF/A-3 FileSpecs are preserved and repaired with
+`/AFRelationship` when missing. PDF/UA remains assistive best-effort rather
+than a certification claim; veraPDF UA-1 still catches content-tagging and
+metadata requirements that require richer semantic tagging.
 
 ## Extraction Benchmark
 
