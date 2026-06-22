@@ -6,21 +6,28 @@
 //! `#[cfg(feature = "fuzzing")]`) and add no behavior to the shipped library.
 //!
 //! The contract every wrapped path must satisfy: for ANY input it returns
-//! (Ok/Err/None) — never panics, hangs, or allocates unboundedly.
+//! (Ok/Err/None) -- never panics, hangs, or allocates unboundedly.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use crate::compliance::{convert_to_pdfa, validate_pdfa, PdfAProfile};
 use crate::crypto::{
     compute_encryption_key, decrypt_stream, derive_v5_file_key_from_owner,
     derive_v5_file_key_from_user, verify_user_password, verify_v5_owner_password, verify_v5_perms,
     verify_v5_user_password, EncryptionInfo,
 };
+use crate::editing::{
+    EditMode, EditRectStyle, EditTextStyle, ImageRect, OverlayLayer, PdfEditor, RedactionOptions,
+};
+use crate::engine::ContentEngine;
 use crate::fonts::cmap::{parse_to_unicode_cmap, ToUnicodeCMap};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::parser::PdfParser;
 use crate::reader::PdfReader;
-use crate::writer::{serialize_object, OutputObject, PdfWriter};
+use crate::writer::{
+    rewrite_document_with_mode, serialize_object, OutputObject, PdfWriter, WriterMode,
+};
 
 /// Drive the image decoders with arbitrary bytes. The first input byte selects
 /// the codec; the remainder is the encoded stream payload. Covers the
@@ -228,6 +235,113 @@ pub fn fuzz_writer(data: &[u8]) {
     }
 }
 
+/// Parse attacker-controlled input and exercise the full-document writer modes.
+///
+/// This complements `fuzz_writer`, which serializes one parsed object. The
+/// document-level path reaches xref streams, object streams, object remapping,
+/// and reader-to-writer traversal. Malformed PDFs are expected to return `Err`.
+pub fn fuzz_document_rewrite(data: &[u8]) {
+    let Ok(engine) = ContentEngine::open_bytes(data.to_vec()) else {
+        return;
+    };
+    for mode in [
+        WriterMode::ClassicXref,
+        WriterMode::XrefStream,
+        WriterMode::XrefStreamWithObjStm,
+    ] {
+        if let Ok(bytes) = rewrite_document_with_mode(engine.document().reader(), mode, |_, _| {}) {
+            let _ = std::hint::black_box(ContentEngine::open_bytes(bytes));
+        }
+    }
+}
+
+/// Fuzz linearization from arbitrary successfully-parsed documents.
+///
+/// The contract is intentionally conservative: unsupported inputs must return
+/// `Err`; successful outputs must re-open without panicking.
+pub fn fuzz_linearize(data: &[u8]) {
+    let Ok(engine) = ContentEngine::open_bytes(data.to_vec()) else {
+        return;
+    };
+    if let Ok(bytes) = crate::structural::linearize::linearize(&engine) {
+        let _ = std::hint::black_box(ContentEngine::open_bytes(bytes));
+    }
+}
+
+/// Fuzz PDF/A validation and conversion on untrusted parsed documents.
+///
+/// Conversion has many expected blockers (encryption, unembedded fonts, broken
+/// structure). The safety property is that all cases return normally.
+pub fn fuzz_pdfa(data: &[u8]) {
+    let Ok(engine) = ContentEngine::open_bytes(data.to_vec()) else {
+        return;
+    };
+    for profile in [
+        PdfAProfile::PdfA1B,
+        PdfAProfile::PdfA2B,
+        PdfAProfile::PdfA2A,
+        PdfAProfile::PdfA3B,
+        PdfAProfile::PdfA3A,
+    ] {
+        let _ = std::hint::black_box(validate_pdfa(engine.document(), profile));
+        if let Ok(bytes) = convert_to_pdfa(engine.document(), profile) {
+            let _ = std::hint::black_box(ContentEngine::open_bytes(bytes));
+        }
+    }
+}
+
+/// Fuzz additive editing, redaction, and form handling on malformed documents.
+///
+/// Operations are bounded to one small page rectangle. Redactions use full
+/// rewrite because incremental redaction is intentionally rejected.
+pub fn fuzz_editing(data: &[u8]) {
+    let Ok(mut editor) = PdfEditor::open_bytes(data.to_vec()) else {
+        return;
+    };
+    let page_count = editor
+        .document()
+        .get_pages()
+        .map(|pages| pages.len())
+        .unwrap_or(0)
+        .min(8);
+    if page_count == 0 {
+        return;
+    }
+    let page = 1 + usize::from(data.first().copied().unwrap_or(0)) % page_count;
+    let x = f64::from(data.get(1).copied().unwrap_or(10) % 128);
+    let y = f64::from(data.get(2).copied().unwrap_or(10) % 128);
+    let w = 1.0 + f64::from(data.get(3).copied().unwrap_or(32) % 64);
+    let h = 1.0 + f64::from(data.get(4).copied().unwrap_or(24) % 64);
+    let rect = ImageRect::new(x, y, w, h);
+
+    let _ = editor.draw_text(
+        page,
+        "fuzz",
+        x,
+        y,
+        EditTextStyle::new(8.0),
+        OverlayLayer::Overlay,
+    );
+    let _ = editor.draw_rect(page, rect, EditRectStyle::default(), OverlayLayer::Overlay);
+    let _ = editor.redact(page, rect, RedactionOptions::default());
+    editor.flatten_forms();
+    if let Ok(bytes) = editor.save_to_bytes(EditMode::FullRewrite) {
+        let _ = std::hint::black_box(ContentEngine::open_bytes(bytes));
+    }
+}
+
+/// Fuzz signature validation and DSS/LTV material parsing from untrusted PDFs.
+///
+/// The CMS/X.509/OCSP/CRL/TSP payloads are attacker-controlled inside a signed
+/// PDF. This target drives the validator through whatever signature-like
+/// structures are present and expects structured reports/errors, never panics.
+pub fn fuzz_signature_validation(data: &[u8]) {
+    let Ok(engine) = ContentEngine::open_bytes(data.to_vec()) else {
+        return;
+    };
+    let _ = std::hint::black_box(engine.verify_signatures());
+}
+
 /// Drive the font-program parsers with arbitrary bytes (TrueType / CFF /
 /// OpenType / bare-CFF paths via the glyph-outline extractor). Font parsing is
 /// a classic crash source; this exercises `ttf-parser` + the bare-CFF fallback
@@ -240,7 +354,7 @@ pub fn fuzz_parse_font(data: &[u8]) {
     // byte (when present) varies the gid/char so the corpus explores different
     // glyph table entries without an unbounded loop.
     let seed = data.first().copied().unwrap_or(0);
-    for ch in ['A', 'g', '中', '\u{0}'] {
+    for ch in ['A', 'g', '\u{4E2D}', '\u{0}'] {
         let _ = std::hint::black_box(crate::render::glyph_outline::extract_glyph_path(data, ch));
     }
     for gid_base in [0u16, 1, 0xFFFF] {

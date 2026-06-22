@@ -219,6 +219,21 @@ slice. GA4 raised the preview/OCR-grade visual pass materially, but Oxide still
 is not Poppler/MuPDF/PDFium fidelity class. Rendering remains a known gap for
 commercial visual-proof workflows.
 
+## GA5 Whole-SDK Hardening
+
+GA5 added fuzz targets for the post-capstone attack surfaces: signature
+validation, full-document rewrite, linearization, PDF/A validation/conversion,
+and editing/redaction/form flattening. See
+`docs/ga5_release_hardening.md`.
+
+The 265-file cross-pillar corpus run used a 60-second per-operation cap across
+`info`, `parse`, `verify-sig`, first-page `render`, `optimize`, and
+`linearize`. It ran 1,590 subprocessed operations with 0 crashes and 0
+timeouts. qpdf was available: 213 inputs were qpdf-clean and 52 were already
+damaged or warning-repaired by qpdf. Of 475 transformed-output qpdf checks,
+458 passed and 17 inherited source damage from inputs that were not qpdf-clean;
+no qpdf-clean source produced an invalid `optimize` or `linearize` output.
+
 ## SDK Operation Benchmarks
 
 Full raw data: `docs/capstone_sdk_operation_benchmarks.json`.

@@ -97,3 +97,38 @@ path = "fuzz_targets/writer.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "document_rewrite"
+path = "fuzz_targets/document_rewrite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "linearize"
+path = "fuzz_targets/linearize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdfa"
+path = "fuzz_targets/pdfa.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "editing"
+path = "fuzz_targets/editing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signature_validation"
+path = "fuzz_targets/signature_validation.rs"
+test = false
+doc = false
+bench = false

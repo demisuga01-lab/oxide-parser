@@ -26,6 +26,12 @@ eliminate the denial-of-service class that survives in safe code:
 This document records what has been hardened against those classes in the
 parser, the stream filters, and the content-stream tokenizer.
 
+GA Prompt 5 extends this posture to the whole SDK surface introduced by the
+enterprise prompts: modern writer modes, linearization, PDF/A conversion,
+editing/redaction/forms, and signature validation. See
+[`ga5_release_hardening.md`](ga5_release_hardening.md) for the new fuzz targets
+and 265-file cross-pillar corpus run.
+
 ## What was set up
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)
