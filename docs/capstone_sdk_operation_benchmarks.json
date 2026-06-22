@@ -1,0 +1,410 @@
+{
+  "commit": "60b8f60",
+  "dirty": true,
+  "platform": "Windows-11-10.0.26200-SP0",
+  "cpu_count": 20,
+  "python": "3.14.3",
+  "tool_versions": {
+    "oxide": "oxide 0.1.0\nengine: 0.1.0\nocr: compiled-in (Tesseract backend available)\nfeatures: [ocr]",
+    "qpdf": "qpdf version 12.3.2\nRun qpdf --copyright to see copyright and license information.",
+    "pdftoppm": "pdftoppm version 26.02.0\nCopyright 2005-2026 The Poppler Developers - http://poppler.freedesktop.org\nCopyright 1996-2011, 2022 Glyph & Cog, LLC",
+    "verapdf": "veraPDF 1.30.2\nBuilt: Wed Jun 03 10:55:00 IST 2026\nDeveloped and released by the veraPDF Consortium.\nFunded by the PREFORMA project.\nReleased under the GNU General Public License v3\nand the Mozilla Public License v2 or later."
+  },
+  "operations": [
+    {
+      "label": "parse_json_cli",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+        "parse",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\basicapi.pdf",
+        "--format",
+        "json",
+        "--output",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\parse.json"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 117.0,
+      "max_peak_mb": 18.98,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 119.0,
+          "peak_mb": 18.87,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Parsed: 5 body block(s) across 3 page(s) (DigitalBorn source, schema 1.1)\n"
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 117.0,
+          "peak_mb": 18.98,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Parsed: 5 body block(s) across 3 page(s) (DigitalBorn source, schema 1.1)\n"
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 121.5,
+          "peak_mb": 18.84,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Parsed: 5 body block(s) across 3 page(s) (DigitalBorn source, schema 1.1)\n"
+        }
+      ]
+    },
+    {
+      "label": "extract_text_cli",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+        "extract-text",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\basicapi.pdf",
+        "--output",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\text.txt"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 41.0,
+      "max_peak_mb": 19.85,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 44.5,
+          "peak_mb": 19.85,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 54.8,
+          "peak_mb": 19.84,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 41.0,
+          "peak_mb": 19.77,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "label": "render_png_cli",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+        "render",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\basicapi.pdf",
+        "--format",
+        "png",
+        "--dpi",
+        "100",
+        "--output",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\render.zip"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 67.9,
+      "max_peak_mb": 18.56,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 68.4,
+          "peak_mb": 18.12,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Rendered 3 page(s) at 100 DPI -> E:\\wellpdfsdk\\target\\capstone-op-bench\\render.zip\n"
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 67.9,
+          "peak_mb": 18.5,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Rendered 3 page(s) at 100 DPI -> E:\\wellpdfsdk\\target\\capstone-op-bench\\render.zip\n"
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 69.2,
+          "peak_mb": 18.56,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Rendered 3 page(s) at 100 DPI -> E:\\wellpdfsdk\\target\\capstone-op-bench\\render.zip\n"
+        }
+      ]
+    },
+    {
+      "label": "authoring_example",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\examples\\authoring.exe",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\authored.pdf"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 28.8,
+      "max_peak_mb": 7.62,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 28.8,
+          "peak_mb": 7.62,
+          "timed_out": false,
+          "stdout": "wrote E:\\wellpdfsdk\\target\\capstone-op-bench\\authored.pdf\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 31.8,
+          "peak_mb": 7.46,
+          "timed_out": false,
+          "stdout": "wrote E:\\wellpdfsdk\\target\\capstone-op-bench\\authored.pdf\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 30.8,
+          "peak_mb": 7.5,
+          "timed_out": false,
+          "stdout": "wrote E:\\wellpdfsdk\\target\\capstone-op-bench\\authored.pdf\n",
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "label": "pdfa_conversion_example",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\examples\\compliance.exe",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 20.1,
+      "max_peak_mb": 8.91,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 21.6,
+          "peak_mb": 8.91,
+          "timed_out": false,
+          "stdout": "PDF/A-2b before conversion compliant: false (3 findings)\nPDF/A-2b after conversion compliant: true\nPDF/A-1b after conversion compliant: true\nPDF/UA basic validation after best-effort tagging: true (0 findings)\nround-trip text: Embedded-font document converted to PDF/A-2b.\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-source.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-pdfa-2b.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-pdfa-1b.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-ua-best-effort.pdf\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 20.1,
+          "peak_mb": 8.89,
+          "timed_out": false,
+          "stdout": "PDF/A-2b before conversion compliant: false (3 findings)\nPDF/A-2b after conversion compliant: true\nPDF/A-1b after conversion compliant: true\nPDF/UA basic validation after best-effort tagging: true (0 findings)\nround-trip text: Embedded-font document converted to PDF/A-2b.\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-source.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-pdfa-2b.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-pdfa-1b.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-ua-best-effort.pdf\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 24.4,
+          "peak_mb": 8.89,
+          "timed_out": false,
+          "stdout": "PDF/A-2b before conversion compliant: false (3 findings)\nPDF/A-2b after conversion compliant: true\nPDF/A-1b after conversion compliant: true\nPDF/UA basic validation after best-effort tagging: true (0 findings)\nround-trip text: Embedded-font document converted to PDF/A-2b.\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-source.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-pdfa-2b.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-pdfa-1b.pdf\nwrote E:\\wellpdfsdk\\target\\capstone-op-bench\\compliance\\compliance-ua-best-effort.pdf\n",
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "label": "sign_rsa_example",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\examples\\sign_document.exe",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\basicapi.pdf",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\sign_test_rsa_key.pem",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\sign_test_rsa_cert.pem",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\signed.pdf"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 13.1,
+      "max_peak_mb": 4.97,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 14.7,
+          "peak_mb": 4.96,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 13.1,
+          "peak_mb": 4.96,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 13.3,
+          "peak_mb": 4.97,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "label": "optimize_cli",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+        "optimize",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\multi_stream.pdf",
+        "--output",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\optimized.pdf",
+        "--json"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 12.5,
+      "max_peak_mb": 6.04,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 14.8,
+          "peak_mb": 5.98,
+          "timed_out": false,
+          "stdout": "{\"input_bytes\":722,\"op\":\"optimize\",\"output\":\"E:\\\\wellpdfsdk\\\\target\\\\capstone-op-bench\\\\optimized.pdf\",\"output_bytes\":667,\"saved_bytes\":55,\"streams_recompressed\":0}\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 13.5,
+          "peak_mb": 6.04,
+          "timed_out": false,
+          "stdout": "{\"input_bytes\":722,\"op\":\"optimize\",\"output\":\"E:\\\\wellpdfsdk\\\\target\\\\capstone-op-bench\\\\optimized.pdf\",\"output_bytes\":667,\"saved_bytes\":55,\"streams_recompressed\":0}\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 12.5,
+          "peak_mb": 6.04,
+          "timed_out": false,
+          "stdout": "{\"input_bytes\":722,\"op\":\"optimize\",\"output\":\"E:\\\\wellpdfsdk\\\\target\\\\capstone-op-bench\\\\optimized.pdf\",\"output_bytes\":667,\"saved_bytes\":55,\"streams_recompressed\":0}\n",
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "label": "linearize_cli",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+        "linearize",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\basicapi.pdf",
+        "--output",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\linearized.pdf"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 12.7,
+      "max_peak_mb": 6.8,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 21.4,
+          "peak_mb": 6.8,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Linearized -> E:\\wellpdfsdk\\target\\capstone-op-bench\\linearized.pdf (105515 bytes)\n"
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 12.7,
+          "peak_mb": 6.77,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Linearized -> E:\\wellpdfsdk\\target\\capstone-op-bench\\linearized.pdf (105515 bytes)\n"
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 16.9,
+          "peak_mb": 6.8,
+          "timed_out": false,
+          "stdout": "",
+          "stderr": "Linearized -> E:\\wellpdfsdk\\target\\capstone-op-bench\\linearized.pdf (105515 bytes)\n"
+        }
+      ]
+    },
+    {
+      "label": "encrypt_aes256_cli",
+      "command": [
+        "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+        "encrypt",
+        "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\basicapi.pdf",
+        "--output",
+        "E:\\wellpdfsdk\\target\\capstone-op-bench\\encrypted.pdf",
+        "--user-pw",
+        "capstone",
+        "--owner-pw",
+        "owner",
+        "--algo",
+        "aes256",
+        "--json"
+      ],
+      "repeats": 3,
+      "best_elapsed_ms": 20.3,
+      "max_peak_mb": 6.56,
+      "all_ok": true,
+      "runs": [
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 24.4,
+          "peak_mb": 6.54,
+          "timed_out": false,
+          "stdout": "{\"algorithm\":\"aes256\",\"bytes\":108639,\"op\":\"encrypt\",\"output\":\"E:\\\\wellpdfsdk\\\\target\\\\capstone-op-bench\\\\encrypted.pdf\"}\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 23.7,
+          "peak_mb": 6.56,
+          "timed_out": false,
+          "stdout": "{\"algorithm\":\"aes256\",\"bytes\":108639,\"op\":\"encrypt\",\"output\":\"E:\\\\wellpdfsdk\\\\target\\\\capstone-op-bench\\\\encrypted.pdf\"}\n",
+          "stderr": ""
+        },
+        {
+          "ok": true,
+          "exit_code": 0,
+          "elapsed_ms": 20.3,
+          "peak_mb": 6.53,
+          "timed_out": false,
+          "stdout": "{\"algorithm\":\"aes256\",\"bytes\":108639,\"op\":\"encrypt\",\"output\":\"E:\\\\wellpdfsdk\\\\target\\\\capstone-op-bench\\\\encrypted.pdf\"}\n",
+          "stderr": ""
+        }
+      ]
+    }
+  ]
+}

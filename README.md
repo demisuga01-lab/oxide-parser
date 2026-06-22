@@ -61,6 +61,7 @@ guidance.
 | Doc | What it covers |
 | --- | --- |
 | [`docs/self_hosting.md`](docs/self_hosting.md) | Running Oxide yourself: CLI, server, OCR, Docker, WASM, config. |
+| [`docs/oxide_sdk.md`](docs/oxide_sdk.md) | Capstone integration, fresh benchmarks, capability matrix, and release-readiness verdict. |
 | [`docs/api_overview.md`](docs/api_overview.md) | Stable Rust/API entry points and capability map. |
 | [`docs/stability.md`](docs/stability.md) | SemVer, MSRV, stable-vs-experimental policy, API drift checks. |
 | [`docs/packaging.md`](docs/packaging.md) | Feature flags, publishing dry-runs, license audit, artifacts, release checklist. |
@@ -85,9 +86,10 @@ extraction, OCR'd-text recovery where PyMuPDF/Poppler do nothing, embeddability
 (bounded by Tesseract), pixel-faithful rendering (use Poppler/PDFium — see
 `docs/oxide_vs_poppler.md`), and the breadth of ML-model understanding on exotic
 layouts (Docling head-to-head not measured locally). Structural write operations
-are available for encrypt, rotate, optimize, repair, and qpdf-validated
-linearization for the supported structural subset. New PDFs can be authored
-from scratch with `PdfBuilder` and `FlowDocument` (pages, text, vector graphics,
+are available for encrypt, rotate, optimize, repair, and linearization, though
+the capstone qpdf run still reports linearization hint-table warnings. New PDFs
+can be authored from scratch with `PdfBuilder` and `FlowDocument` (pages, text,
+vector graphics,
 images, whole TrueType font embedding, tables, and single-column flow layout;
 see `docs/authoring.md`). Existing PDFs can be edited additively with
 watermarks, headers/footers, overlays/underlays, image stamps, and append-only

@@ -75,6 +75,10 @@ fn pdfa_conversion_adds_xmp_output_intent_and_validates_clean() {
     );
     let converted = PdfDocument::open_bytes(bytes.clone()).unwrap();
     assert!(
+        converted.reader().first_file_id().is_some(),
+        "PDF/A conversion must write a trailer ID for veraPDF"
+    );
+    assert!(
         validate_pdfa(&converted, PdfAProfile::PdfA2B)
             .unwrap()
             .compliant

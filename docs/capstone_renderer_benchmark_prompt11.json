@@ -1,0 +1,448 @@
+{
+  "generated_at": "2026-06-22T16:09:31.372049+00:00",
+  "mode": "0A-renderer-compatibility",
+  "dpi": 144,
+  "max_pages_per_file": 3,
+  "threshold_profile": "renderer",
+  "backends": {
+    "oxide_bin": "target\\release\\oxide.exe",
+    "poppler": {
+      "pdfinfo": "pdfinfo version 26.02.0\nCopyright 2005-2026 The Poppler Developers - http://poppler.freedesktop.org\nCopyright 1996-2011, 2022 Glyph & Cog, LLC",
+      "pdftoppm": "pdftoppm version 26.02.0\nCopyright 2005-2026 The Poppler Developers - http://poppler.freedesktop.org\nCopyright 1996-2011, 2022 Glyph & Cog, LLC"
+    },
+    "pdfium": {
+      "available": false,
+      "path": null,
+      "version": null
+    }
+  },
+  "oxide_cli_reconciliation": {
+    "info": "adapted existing `oxide info --json`",
+    "render": "adapted existing `oxide render --format png` ZIP output; no product CLI change",
+    "timeout_memory": "enforced by benchmark subprocess monitor, not product CLI flags",
+    "disable_javascript": "Oxide has no JavaScript execution path; active content fixtures are rendered as inert PDF objects"
+  },
+  "scale": {
+    "files": 265,
+    "normal_files": 205,
+    "hostile_files": 60,
+    "real_world_files": 75,
+    "visual_pages_compared": 245,
+    "visual_pages_passed": 192,
+    "oxide_rendered_pages": 277,
+    "poppler_rendered_pages": 287,
+    "total_backend_page_images": 564,
+    "full_spec_real_world_files": 1000,
+    "full_spec_rendered_pages": 10000
+  },
+  "results": {
+    "file_pass_percent": 82.64,
+    "visual_pass_percent": 78.37,
+    "safety": {
+      "hostile_crash_free_percent": 100.0,
+      "hostile_timeout_safe_percent": 100.0,
+      "hostile_memory_bounded_percent": 100.0
+    },
+    "performance": {
+      "median_oxide_speed_ratio_vs_poppler": 2.7069,
+      "ratio_definition": "poppler_total_ms / oxide_total_ms; >1 means Oxide faster",
+      "peak_oxide_memory_mb_max": 66.0
+    },
+    "determinism": {
+      "sampled_files": 24,
+      "stable_files": 24,
+      "stable_percent": 100.0,
+      "unstable": []
+    },
+    "failure_breakdown": {
+      "page:pixel_difference": 18,
+      "page:perceptual_hash_distance": 14,
+      "perceptual_hash_distance": 14,
+      "pixel_difference": 12,
+      "blank_page_mismatch": 9,
+      "page:blank_page_mismatch": 9,
+      "page:large_region_difference": 6,
+      "low_ssim": 5,
+      "page:low_ssim": 5,
+      "large_region_difference": 4,
+      "poppler_render_failed": 4,
+      "oxide_render_failed": 2,
+      "page:rendered_page_missing": 2,
+      "rendered_page_missing": 2,
+      "edge_or_text_shift": 1,
+      "page:edge_or_text_shift": 1
+    },
+    "category_breakdown": {
+      "hostile-bad-filter": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-huge-length": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-huge-page": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-launch-action": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-missing-eof": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-openaction-js": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-random": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-truncated": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-uri-action": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "hostile-wrong-startxref": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 0,
+        "visual_pass_percent": null
+      },
+      "large-files": {
+        "files": 10,
+        "file_pass_percent": 100.0,
+        "visual_pages": 30,
+        "visual_pass_percent": 100.0
+      },
+      "real-cjk-text": {
+        "files": 10,
+        "file_pass_percent": 50.0,
+        "visual_pages": 13,
+        "visual_pass_percent": 61.54
+      },
+      "real-complex-vector": {
+        "files": 12,
+        "file_pass_percent": 16.67,
+        "visual_pages": 15,
+        "visual_pass_percent": 13.33
+      },
+      "real-encrypted": {
+        "files": 6,
+        "file_pass_percent": 50.0,
+        "visual_pages": 4,
+        "visual_pass_percent": 75.0
+      },
+      "real-forms": {
+        "files": 12,
+        "file_pass_percent": 58.33,
+        "visual_pages": 14,
+        "visual_pass_percent": 57.14
+      },
+      "real-jpeg2000": {
+        "files": 2,
+        "file_pass_percent": 0.0,
+        "visual_pages": 1,
+        "visual_pass_percent": 0.0
+      },
+      "real-large-multipage": {
+        "files": 3,
+        "file_pass_percent": 100.0,
+        "visual_pages": 9,
+        "visual_pass_percent": 100.0
+      },
+      "real-multi-column": {
+        "files": 10,
+        "file_pass_percent": 40.0,
+        "visual_pages": 17,
+        "visual_pass_percent": 29.41
+      },
+      "real-rtl-text": {
+        "files": 5,
+        "file_pass_percent": 40.0,
+        "visual_pages": 5,
+        "visual_pass_percent": 40.0
+      },
+      "real-scanned": {
+        "files": 9,
+        "file_pass_percent": 33.33,
+        "visual_pages": 9,
+        "visual_pass_percent": 33.33
+      },
+      "real-text-basic": {
+        "files": 6,
+        "file_pass_percent": 100.0,
+        "visual_pages": 8,
+        "visual_pass_percent": 100.0
+      },
+      "synthetic-forms": {
+        "files": 8,
+        "file_pass_percent": 100.0,
+        "visual_pages": 8,
+        "visual_pass_percent": 100.0
+      },
+      "synthetic-geometry": {
+        "files": 24,
+        "file_pass_percent": 75.0,
+        "visual_pages": 24,
+        "visual_pass_percent": 75.0
+      },
+      "synthetic-graphics": {
+        "files": 42,
+        "file_pass_percent": 100.0,
+        "visual_pages": 42,
+        "visual_pass_percent": 100.0
+      },
+      "synthetic-images": {
+        "files": 16,
+        "file_pass_percent": 100.0,
+        "visual_pages": 16,
+        "visual_pass_percent": 100.0
+      },
+      "synthetic-text": {
+        "files": 18,
+        "file_pass_percent": 100.0,
+        "visual_pages": 18,
+        "visual_pass_percent": 100.0
+      },
+      "synthetic-transparency": {
+        "files": 12,
+        "file_pass_percent": 100.0,
+        "visual_pages": 12,
+        "visual_pass_percent": 100.0
+      }
+    }
+  },
+  "weighted_score": {
+    "score": 87.19,
+    "sub_scores": {
+      "safety": 100.0,
+      "page_count_dimensions": 100.0,
+      "visual_match": 78.37,
+      "text_font_correctness_proxy": 68.67,
+      "image_color_correctness_proxy": 78.95,
+      "performance_memory": 100.0
+    },
+    "weights": {
+      "safety": 25,
+      "page_count_dimensions": 15,
+      "visual_match": 35,
+      "text_font_correctness": 10,
+      "image_color_correctness": 10,
+      "performance_memory": 5
+    }
+  },
+  "tier": {
+    "rating": "Tier 0",
+    "scale_caveat": "Tier is rated only at this run's corpus scale; Tier 3 requires 1,000+ real PDFs and 10,000+ rendered pages."
+  },
+  "blocking_findings": [
+    {
+      "file": "tests/corpus/pdfs/pdfjs/IdentityToUnicodeMap_charCodeOf.pdf",
+      "category": "real-cjk-text",
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/IdentityToUnicodeMap_charCodeOf.pdf",
+      "category": "real-cjk-text",
+      "page": 1,
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/function_based_shading.pdf",
+      "category": "real-complex-vector",
+      "reason": "rendered_page_missing"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/function_based_shading.pdf",
+      "category": "real-complex-vector",
+      "page": 1,
+      "reason": "rendered_page_missing"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/issue18032.pdf",
+      "category": "real-complex-vector",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/issue18032.pdf",
+      "category": "real-complex-vector",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/smask_alpha_oob.pdf",
+      "category": "real-complex-vector",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/smask_alpha_oob.pdf",
+      "category": "real-complex-vector",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/tiling_patterns_variations.pdf",
+      "category": "real-complex-vector",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/tiling_patterns_variations.pdf",
+      "category": "real-complex-vector",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/bug1802506.pdf",
+      "category": "real-forms",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/bug1802506.pdf",
+      "category": "real-forms",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/checkbox_no_appearance.pdf",
+      "category": "real-forms",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/checkbox_no_appearance.pdf",
+      "category": "real-forms",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/prefilled_f1040.pdf",
+      "category": "real-forms",
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/prefilled_f1040.pdf",
+      "category": "real-forms",
+      "page": 1,
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/prefilled_f1040.pdf",
+      "category": "real-forms",
+      "page": 2,
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/bug_jpx.pdf",
+      "category": "real-jpeg2000",
+      "reason": "rendered_page_missing"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/bug_jpx.pdf",
+      "category": "real-jpeg2000",
+      "page": 1,
+      "reason": "rendered_page_missing"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/freeculture.pdf",
+      "category": "real-multi-column",
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/freeculture.pdf",
+      "category": "real-multi-column",
+      "page": 1,
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/freeculture.pdf",
+      "category": "real-multi-column",
+      "page": 2,
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/ThuluthFeatures.pdf",
+      "category": "real-rtl-text",
+      "page": 1,
+      "reason": "major_color_or_inversion"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/issue5801.pdf",
+      "category": "real-rtl-text",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/issue5801.pdf",
+      "category": "real-rtl-text",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/image-rotated-black-white-ratio.pdf",
+      "category": "real-scanned",
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/image-rotated-black-white-ratio.pdf",
+      "category": "real-scanned",
+      "page": 1,
+      "reason": "large_region_difference"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/images.pdf",
+      "category": "real-scanned",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/images.pdf",
+      "category": "real-scanned",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/images_1bit_grayscale.pdf",
+      "category": "real-scanned",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/images_1bit_grayscale.pdf",
+      "category": "real-scanned",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/xobject-image.pdf",
+      "category": "real-scanned",
+      "reason": "blank_page_mismatch"
+    },
+    {
+      "file": "tests/corpus/pdfs/pdfjs/xobject-image.pdf",
+      "category": "real-scanned",
+      "page": 1,
+      "reason": "blank_page_mismatch"
+    }
+  ]
+}

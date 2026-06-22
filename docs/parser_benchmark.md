@@ -1,8 +1,6 @@
 # Oxide Extraction-Quality Benchmark
 
 > **Generated** by `extraction-benchmark/scripts/write_report.py` from `results/results.json`. Re-run with `generate_corpus.py` → `extraction_benchmark.py` → `write_report.py`. This is the **extraction** benchmark; the rendering-fidelity benchmark lives separately under `renderer-benchmark/`.
->
-> **Measured** 2026-06-21 against the SDK-foundation commit that records this line (see `git log` for the hash). Competitors present this run: PyMuPDF 1.27, qpdf, Poppler `pdftotext`; Docling not installed (marked not-run, never fabricated). Quality scores are deterministic — re-running the harness reproduces the CER / cell-F1 / field-F1 / reading-order / block-type tables byte-for-byte; only the wall-clock timing rows vary with machine load.
 
 ## Tools compared
 
@@ -39,11 +37,11 @@ Character accuracy = `1 − CER` (edit distance / reference chars); reading orde
 
 | Document | Mode | Oxide char-acc | PyMuPDF | pdftotext | Oxide order |
 | --- | --- | --- | --- | --- | --- |
-| figure | digital | 0.598 | 0.990 | 0.931 | 1.000 |
-| paper | digital | 0.993 | 0.998 | 0.951 | 1.000 |
+| figure | digital | 0.598 | 0.990 | 0.833 | 1.000 |
+| paper | digital | 0.993 | 0.998 | 0.956 | 1.000 |
 | paper_scanned | scanned | 0.942 | 0.000 | 0.000 | 1.000 |
-| report_multicol | digital | 0.605 | 0.669 | 0.347 | 1.000 |
-| tables | digital | 1.000 | 0.877 | 0.298 | 1.000 |
+| report_multicol | digital | 0.605 | 0.669 | 0.596 | 1.000 |
+| tables | digital | 1.000 | 0.877 | 0.088 | 1.000 |
 | tables_scanned | scanned | 0.632 | 0.000 | 0.000 | 1.000 |
 
 ## Tables (cell-F1 / TEDS)
@@ -97,16 +95,16 @@ qpdf **validates Oxide's output** (split parts pass `qpdf --check`) and page cou
 
 | Metric | Oxide | Python + PyMuPDF |
 | --- | --- | --- |
-| Process startup | 6.1 ms | 145.1 ms (interpreter + import) |
-| Distribution | single 12.3 MB static binary, no runtime | Python runtime + C-extension wheels |
+| Process startup | 7.5 ms | 158.7 ms (interpreter + import) |
+| Distribution | single 12.8 MB static binary, no runtime | Python runtime + C-extension wheels |
 
 Per-call text-extraction time (mean over digital docs):
 
 | Tool | Mean ms/doc |
 | --- | --- |
-| `oxide_text` | 15.6 |
-| `pymupdf_text` | 3.1 |
-| `pdftotext_text` | 11.2 |
+| `oxide_text` | 32.5 |
+| `pymupdf_text` | 11.2 |
+| `pdftotext_text` | 45.4 |
 
 > Note: Oxide's per-call time includes **process spawn** (CLI); PyMuPDF runs in-process. For many-small-doc throughput PyMuPDF's in-process call is faster, but Oxide wins decisively on **startup, deployment footprint, and no-runtime embeddability** (single static binary vs a Python+native stack; Docling adds a multi-GB torch stack on top).
 

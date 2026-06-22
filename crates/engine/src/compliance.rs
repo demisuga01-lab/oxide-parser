@@ -128,6 +128,17 @@ pub fn validate_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<PdfAVali
             "PDF/A-1 is based on PDF 1.4 and must not use later PDF features",
         ));
     }
+    if reader
+        .first_file_id()
+        .map(|id| id.is_empty())
+        .unwrap_or(true)
+    {
+        violations.push(ComplianceViolation::error(
+            "pdfa.file_id",
+            "trailer/ID",
+            "PDF/A requires a non-empty trailer ID array",
+        ));
+    }
 
     validate_output_intent(&catalog, reader, &mut violations);
     validate_xmp(&catalog, reader, profile, &mut violations);
@@ -169,6 +180,7 @@ pub fn convert_to_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<Vec<u8
     drop_copied_structural_artifacts(&mut objects);
     let mut document_info = DocumentInfo::gather(doc)?;
     document_info.producer = Some("Oxide PDF SDK".to_string());
+    let file_id = pdfa_file_id(doc, profile, &document_info);
     let next = objects.iter().map(|obj| obj.number).max().unwrap_or(0) + 1;
     let metadata_number = next;
     let icc_number = next + 1;
@@ -201,7 +213,7 @@ pub fn convert_to_pdfa(doc: &PdfDocument, profile: PdfAProfile) -> Result<Vec<u8
     PdfWriter::new(objects, root)
         .with_version(version)
         .with_info(Some(info_number))
-        .with_id(doc.reader().first_file_id())
+        .with_id(Some(file_id))
         .with_mode(writer_mode)
         .write()
 }
@@ -709,6 +721,45 @@ fn upsert_info(objects: &mut Vec<OutputObject>, info_number: u32) {
         number: info_number,
         object: PdfObject::Dictionary(dict(&[("Producer", pdf_text("Oxide PDF SDK"))])),
     });
+}
+
+fn pdfa_file_id(doc: &PdfDocument, profile: PdfAProfile, info: &DocumentInfo) -> Vec<u8> {
+    if let Some(id) = doc.reader().first_file_id() {
+        if !id.is_empty() {
+            return id;
+        }
+    }
+
+    let mut seed = Vec::new();
+    seed.extend_from_slice(b"oxide-pdfa-file-id\0");
+    seed.extend_from_slice(profile.label().as_bytes());
+    seed.push(0);
+    seed.extend_from_slice(doc.reader().version().as_bytes());
+    seed.push(0);
+    if let Some(size) = doc.reader().size() {
+        seed.extend_from_slice(size.to_string().as_bytes());
+    }
+    seed.push(0);
+    if let Some((root, generation)) = doc.reader().root_reference() {
+        seed.extend_from_slice(root.to_string().as_bytes());
+        seed.push(b' ');
+        seed.extend_from_slice(generation.to_string().as_bytes());
+    }
+    for value in [
+        &info.title,
+        &info.author,
+        &info.subject,
+        &info.keywords,
+        &info.creator,
+        &info.producer,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        seed.push(0);
+        seed.extend_from_slice(value.as_bytes());
+    }
+    crate::crypto::md5(&seed).to_vec()
 }
 
 fn strip_disallowed_actions(object: &mut PdfObject) {

@@ -1,0 +1,39 @@
+{
+  "fixture": "crates\\engine\\tests\\fixtures\\basicapi.pdf",
+  "commit": "60b8f60",
+  "surfaces": {
+    "library": {
+      "ok": true,
+      "exit_code": 0,
+      "elapsed_ms": 478.8,
+      "sha256": "43c9f91f575550430b4790e76fa65f8e6fbdbece01e517bc0eeb414c11a29e10",
+      "text_preview": "Table Of Content\n\nChapter 1 .......................................................... 2\nParagraph 1.1\n.................",
+      "stderr": ""
+    },
+    "cli": {
+      "ok": true,
+      "exit_code": 0,
+      "elapsed_ms": 40.3,
+      "sha256": "43c9f91f575550430b4790e76fa65f8e6fbdbece01e517bc0eeb414c11a29e10",
+      "text_preview": "Table Of Content\n\nChapter 1 .......................................................... 2\nParagraph 1.1\n.................",
+      "stderr": ""
+    },
+    "c_abi": {
+      "ok": true,
+      "exit_code": 0,
+      "elapsed_ms": 39.6,
+      "sha256": "43c9f91f575550430b4790e76fa65f8e6fbdbece01e517bc0eeb414c11a29e10",
+      "text_preview": "Table Of Content\n\nChapter 1 .......................................................... 2\nParagraph 1.1\n.................",
+      "stderr": ""
+    },
+    "server": {
+      "ok": true,
+      "exit_code": 200,
+      "elapsed_ms": 59.9,
+      "sha256": "43c9f91f575550430b4790e76fa65f8e6fbdbece01e517bc0eeb414c11a29e10",
+      "text_preview": "Table Of Content\n\nChapter 1 .......................................................... 2\nParagraph 1.1\n.................",
+      "stderr": ""
+    }
+  },
+  "consistent": true
+}
