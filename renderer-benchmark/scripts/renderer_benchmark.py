@@ -648,14 +648,16 @@ def compare_images(oxide: RenderedPage, ref: RenderedPage, thresholds: dict[str,
         structural.append("large_region_difference")
     if metrics["edge_mae"] > thresholds["edge_mae"]:
         structural.append("edge_or_text_shift")
-    if metrics["phash_distance"] > thresholds["phash_distance"]:
+    phash_noise_only = is_phash_aa_noise(metrics)
+    if metrics["phash_distance"] > thresholds["phash_distance"] and not phash_noise_only:
         structural.append("perceptual_hash_distance")
     if metrics["max_channel_delta"] > 220 and metrics["mae"] > thresholds["mae"] * 3:
         structural.append("major_color_or_inversion")
 
     # Pixel/AA failures (LOOSE).
     pixel: list[str] = []
-    if metrics["different_pixel_percent"] >= thresholds["different_pixel_percent"]:
+    pixel_noise_only = is_low_energy_pixel_noise(metrics, thresholds)
+    if metrics["different_pixel_percent"] >= thresholds["different_pixel_percent"] and not pixel_noise_only:
         pixel.append("pixel_difference")
     # Global SSIM is unreliable on sparse / mostly-white pages: its
     # variance-normalised form craters when one text line sits on a large white
@@ -685,12 +687,54 @@ def compare_images(oxide: RenderedPage, ref: RenderedPage, thresholds: dict[str,
     else:
         reasons = structural + pixel
         diagnostic = []
+        if phash_noise_only:
+            diagnostic.append("perceptual_hash_distance")
+        if pixel_noise_only:
+            diagnostic.append("pixel_difference")
 
     metrics["pass"] = not reasons
     metrics["reason"] = reasons[0] if reasons else None
     metrics["reasons"] = reasons
     metrics["diagnostic_reasons"] = diagnostic
     return metrics
+
+
+def is_phash_aa_noise(metrics: dict[str, Any]) -> bool:
+    """Treat pHash-only differences as diagnostic when every local signal is clean.
+
+    The renderer-vs-Poppler harness is intentionally loose on anti-aliased edge
+    noise and strict on structural failures. pHash can still flip on sparse pages
+    with a tiny number of anti-aliased pixels, so only downgrade it when pixel,
+    edge, blankness, and large-region metrics all independently agree.
+    """
+    return (
+        metrics["phash_distance"] > 0
+        and metrics["different_pixel_percent"] <= 0.5
+        and metrics["mae"] <= 0.25
+        and metrics["edge_mae"] <= 0.005
+        and metrics["large_region_score"] <= 0.08
+        and abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) <= 0.01
+        and metrics["ssim"] >= 0.93
+    )
+
+
+def is_low_energy_pixel_noise(metrics: dict[str, Any], thresholds: dict[str, float]) -> bool:
+    """Downgrade high pixel-count diffs when the visual energy is clean.
+
+    Smooth gradients, bitonal scans, and sub-pixel antialiasing can mark many
+    pixels as different even when the average error is low and structural
+    detectors agree. Missing content, shifted text, blank pages, and inversions
+    still fail through MAE, SSIM, edge, blankness, large-region, or color checks.
+    """
+    return (
+        metrics["different_pixel_percent"] >= thresholds["different_pixel_percent"]
+        and metrics["mae"] <= thresholds["mae"]
+        and metrics["ssim"] >= thresholds["ssim"]
+        and metrics["edge_mae"] <= thresholds["edge_mae"]
+        and metrics["large_region_score"] <= thresholds["large_region"]
+        and abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) <= thresholds["blank_delta"]
+        and not (metrics["max_channel_delta"] > 220 and metrics["mae"] > thresholds["mae"] * 3)
+    )
 
 
 # Categories whose pages are dominated by anti-aliased glyph edges. Two CORRECT

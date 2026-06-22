@@ -274,6 +274,50 @@ fn alpha_soft_mask_uses_alpha_channel() {
 }
 
 #[test]
+fn image_xobject_smask_makes_pixels_transparent() {
+    // A black 1x1 image with a fully transparent image /SMask should leave the
+    // white page background unchanged. Without applying image SMask, this paints
+    // an opaque black page.
+    let content = b"q 100 0 0 100 0 0 cm /Im1 Do Q\n";
+    let page_extra = "/Resources << /XObject << /Im1 5 0 R >> >>";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+        /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 6 0 R /Length 3 >>\n\
+        stream\n\0\0\0\nendstream";
+    let mask = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+        /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\n\
+        stream\n\0\nendstream";
+    let extra = [(image,), (mask,)];
+    let pdf = page_pdf(content, &extra, page_extra);
+
+    let center = render_center(pdf, 72);
+    assert!(
+        center[0] > 240 && center[1] > 240 && center[2] > 240,
+        "fully transparent image mask should preserve white background, got {:?}",
+        center
+    );
+}
+
+#[test]
+fn image_mask_xobject_paints_current_fill_color() {
+    // ImageMask true is a stencil. A set bit should paint the current
+    // nonstroking color, not the mask's grayscale sample.
+    let content = b"1 0 0 rg q 100 0 0 100 0 0 cm /Im1 Do Q\n";
+    let page_extra = "/Resources << /XObject << /Im1 5 0 R >> >>";
+    let image = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 \
+        /ImageMask true /Filter /ASCIIHexDecode /Length 3 >>\n\
+        stream\n80>\nendstream";
+    let extra = [(image,)];
+    let pdf = page_pdf(content, &extra, page_extra);
+
+    let center = render_center(pdf, 72);
+    assert!(
+        center[0] > 200 && center[1] < 40 && center[2] < 40,
+        "image mask should paint current red fill color, got {:?}",
+        center
+    );
+}
+
+#[test]
 fn inline_image_is_painted() {
     // A 2x2 RGB inline image scaled to fill the page: top-left red, top-right
     // green, bottom-left blue, bottom-right white (in PDF/image row order).

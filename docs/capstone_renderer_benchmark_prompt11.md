@@ -2,6 +2,11 @@
 
 Generated: 2026-06-22T16:09:31.372049+00:00
 
+Update: GA Prompt 4 reran the same 265-entry slice after targeted renderer and
+benchmark-attribution fixes. The latest recorded result is 86.18% visual pass /
+91.32 weighted score; see `docs/ga4_renderer_fidelity.md`. The Prompt 11
+baseline below is preserved for provenance.
+
 ## Scope
 
 - Files run: 265

@@ -9,6 +9,7 @@ use crate::fonts::variations::VariationRequest;
 use crate::fonts::FontResolver;
 use crate::images::decoder::ImageDecoder;
 use crate::images::locator::ImageReference;
+use crate::images::SmaskLoader;
 use crate::info::decode_pdf_text_string;
 use crate::object::{PdfDictionary, PdfObject};
 use crate::render::buffer::{AlphaMask, ClipMask, PixelBuffer, PixelColor, RenderMode, WHITE};
@@ -729,6 +730,12 @@ impl<'a> RenderState<'a> {
                 return;
             }
         };
+        let raw = if is_mask {
+            let color = self.resolve_paint_color(&self.gs.fill_color, self.gs.fill_alpha as f32);
+            image_mask_to_stencil_rgba(raw, color, inline_image_mask_paints_ones(&dict))
+        } else {
+            raw
+        };
 
         let ctm = self.ctm();
         ImagePainter::paint_image_with_options(
@@ -804,6 +811,26 @@ impl<'a> RenderState<'a> {
 
         match ImageDecoder::decode(&image_ref, self.engine.document().reader()) {
             Ok(raw) => {
+                let raw = if image_ref.is_mask {
+                    let color =
+                        self.resolve_paint_color(&self.gs.fill_color, self.gs.fill_alpha as f32);
+                    image_mask_to_stencil_rgba(raw, color, image_mask_paints_ones(dict))
+                } else if dict.contains_key("SMask") {
+                    match SmaskLoader::load_and_combine(
+                        &image_ref,
+                        raw.clone(),
+                        self.engine.document().reader(),
+                    ) {
+                        Ok(Some(masked)) => masked,
+                        Ok(None) => raw,
+                        Err(err) => {
+                            log::warn!("PageRenderer: image '{}' SMask failed: {}", name, err);
+                            raw
+                        }
+                    }
+                } else {
+                    raw
+                };
                 let ctm = self.ctm();
                 let smooth_jpx = image_ref.filter.iter().any(|filter| filter == "JPXDecode");
                 if image_interpolate(dict) {
@@ -2333,6 +2360,55 @@ fn dict_filter_list(map: &std::collections::HashMap<String, Operand>) -> Vec<&st
         Some(Operand::Array(items)) => items.iter().filter_map(Operand::as_name).collect(),
         _ => Vec::new(),
     }
+}
+
+fn image_mask_to_stencil_rgba(
+    raw: crate::images::decoder::RawImage,
+    color: PixelColor,
+    paint_ones: bool,
+) -> crate::images::decoder::RawImage {
+    let pixel_count = raw.width as usize * raw.height as usize;
+    let channels = raw.channels.max(1) as usize;
+    let mut pixels = Vec::with_capacity(pixel_count * 4);
+    for i in 0..pixel_count {
+        let sample = raw.pixels.get(i * channels).copied().unwrap_or(0);
+        let paint = if paint_ones {
+            sample >= 128
+        } else {
+            sample < 128
+        };
+        pixels.push(color[0]);
+        pixels.push(color[1]);
+        pixels.push(color[2]);
+        pixels.push(if paint { color[3] } else { 0 });
+    }
+    crate::images::decoder::RawImage {
+        width: raw.width,
+        height: raw.height,
+        channels: 4,
+        bits_per_sample: 8,
+        pixels,
+    }
+}
+
+fn image_mask_paints_ones(dict: &PdfDictionary) -> bool {
+    dict.get("Decode")
+        .and_then(PdfObject::as_array)
+        .and_then(|items| decode_array_paints_ones(items.iter().filter_map(PdfObject::as_number)))
+        .unwrap_or(true)
+}
+
+fn inline_image_mask_paints_ones(map: &std::collections::HashMap<String, Operand>) -> bool {
+    map.get("Decode")
+        .and_then(Operand::as_array)
+        .and_then(|items| decode_array_paints_ones(items.iter().filter_map(Operand::as_number)))
+        .unwrap_or(true)
+}
+
+fn decode_array_paints_ones(mut values: impl Iterator<Item = f64>) -> Option<bool> {
+    let zero = values.next()?;
+    let one = values.next()?;
+    Some(one >= zero)
 }
 
 /// Determine the opaque backdrop color for a luminosity soft mask.

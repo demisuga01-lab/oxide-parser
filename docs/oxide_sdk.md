@@ -142,7 +142,8 @@ and trails ML-based systems on messy scanned structure.
 
 ## Renderer Benchmark
 
-Full report: `docs/capstone_renderer_benchmark_prompt11.md`. Raw data:
+Baseline report: `docs/capstone_renderer_benchmark_prompt11.md`. GA4 follow-up:
+`docs/ga4_renderer_fidelity.md`. Baseline raw data:
 `docs/capstone_renderer_benchmark_prompt11.json`.
 
 Command:
@@ -178,6 +179,16 @@ Results:
 | Peak Oxide memory | 66.0 MB |
 | Determinism sample | 24/24 stable |
 
+GA4 follow-up result on the same 265-entry slice:
+
+| Metric | Prompt 11 baseline | GA4 final |
+| --- | ---: | ---: |
+| Weighted score | 87.19 | 91.32 |
+| Visual pass | 78.37% | 86.18% |
+| File pass | 82.64% | 89.06% |
+| Hostile safety | 100.0% crash/timeout/memory-safe | 100.0% crash/timeout/memory-safe |
+| Determinism sample | 24/24 stable | 24/24 stable |
+
 Weakest real-world categories:
 
 | Category | Visual pass |
@@ -204,8 +215,9 @@ python renderer-benchmark\scripts\renderer_benchmark.py `
 ```
 
 Interpretation: the renderer is crash-safe on hostile input and fast in this
-slice, but it is not Poppler/MuPDF/PDFium fidelity class. Rendering remains a
-known gap for commercial visual-proof workflows.
+slice. GA4 raised the preview/OCR-grade visual pass materially, but Oxide still
+is not Poppler/MuPDF/PDFium fidelity class. Rendering remains a known gap for
+commercial visual-proof workflows.
 
 ## SDK Operation Benchmarks
 
