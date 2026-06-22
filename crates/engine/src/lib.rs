@@ -135,8 +135,8 @@ pub use docmodel::{
 };
 pub use document::{PdfDocument, PdfPage};
 pub use editing::{
-    EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect, ImageStampOptions,
-    OverlayLayer, PdfEditor, WatermarkOptions,
+    AnnotationOptions, EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect,
+    ImageStampOptions, OverlayLayer, PdfEditor, RedactionOptions, WatermarkOptions,
 };
 pub use engine::{max_render_pixels, ContentEngine, PageResources, DEFAULT_MAX_RENDER_PIXELS};
 pub use error::{OxideError, Result};
@@ -238,8 +238,8 @@ pub mod prelude {
     };
     pub use crate::chunk::{chunk, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
     pub use crate::editing::{
-        EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect, ImageStampOptions,
-        OverlayLayer, PdfEditor, WatermarkOptions,
+        AnnotationOptions, EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect,
+        ImageStampOptions, OverlayLayer, PdfEditor, RedactionOptions, WatermarkOptions,
     };
     pub use crate::engine::ContentEngine;
     pub use crate::error::{OxideError, Result};

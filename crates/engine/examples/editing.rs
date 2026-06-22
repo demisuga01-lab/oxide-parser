@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use oxide_engine::{
-    AuthorPageSize as PageSize, Color, EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions,
-    ImageRect, ImageStampOptions, OverlayLayer, PdfBuilder, PdfEditor, StandardFont, TextStyle,
-    WatermarkOptions,
+    AnnotationOptions, AuthorPageSize as PageSize, Color, EditMode, EditRectStyle, EditTextStyle,
+    HeaderFooterOptions, ImageRect, ImageStampOptions, OverlayLayer, PdfBuilder, PdfEditor,
+    RedactionOptions, StandardFont, TextStyle, WatermarkOptions,
 };
 
 fn main() -> oxide_engine::Result<()> {
@@ -16,17 +16,29 @@ fn main() -> oxide_engine::Result<()> {
     let base = base_pdf()?;
     let full = edit_pdf(base.clone(), EditMode::FullRewrite)?;
     let incremental = edit_pdf(base.clone(), EditMode::Incremental)?;
+    let redacted = redact_pdf(base.clone())?;
+    let annotated = annotate_pdf(base.clone(), EditMode::Incremental)?;
+    let flattened_form = fill_and_flatten_form()?;
 
     let base_path = out_dir.join("editing-base.pdf");
     let full_path = out_dir.join("editing-full-rewrite.pdf");
     let incremental_path = out_dir.join("editing-incremental.pdf");
+    let redacted_path = out_dir.join("editing-redacted.pdf");
+    let annotated_path = out_dir.join("editing-annotated.pdf");
+    let flattened_form_path = out_dir.join("editing-form-flattened.pdf");
     std::fs::write(&base_path, base)?;
     std::fs::write(&full_path, full)?;
     std::fs::write(&incremental_path, incremental)?;
+    std::fs::write(&redacted_path, redacted)?;
+    std::fs::write(&annotated_path, annotated)?;
+    std::fs::write(&flattened_form_path, flattened_form)?;
 
     println!("wrote {}", base_path.display());
     println!("wrote {}", full_path.display());
     println!("wrote {}", incremental_path.display());
+    println!("wrote {}", redacted_path.display());
+    println!("wrote {}", annotated_path.display());
+    println!("wrote {}", flattened_form_path.display());
     Ok(())
 }
 
@@ -49,6 +61,14 @@ fn base_pdf() -> oxide_engine::Result<Vec<u8>> {
             690.0,
             &TextStyle::standard(StandardFont::Helvetica, 11.0),
         )?;
+        if page_number == 2 {
+            page.draw_text(
+                "Account secret: 123-45-6789",
+                72.0,
+                660.0,
+                &TextStyle::standard(StandardFont::Helvetica, 11.0),
+            )?;
+        }
     }
     doc.to_bytes()
 }
@@ -98,6 +118,48 @@ fn edit_pdf(base: Vec<u8>, mode: EditMode) -> oxide_engine::Result<Vec<u8>> {
     editor.save_to_bytes(mode)
 }
 
+fn redact_pdf(base: Vec<u8>) -> oxide_engine::Result<Vec<u8>> {
+    let mut editor = PdfEditor::open_bytes(base)?;
+    editor.redact(
+        2,
+        ImageRect::new(70.0, 650.0, 180.0, 24.0),
+        RedactionOptions::default(),
+    )?;
+    editor.save_to_bytes(EditMode::FullRewrite)
+}
+
+fn annotate_pdf(base: Vec<u8>, mode: EditMode) -> oxide_engine::Result<Vec<u8>> {
+    let mut editor = PdfEditor::open_bytes(base)?;
+    editor
+        .add_highlight_annotation(
+            1,
+            ImageRect::new(70.0, 686.0, 360.0, 18.0),
+            AnnotationOptions::default().contents("review this sentence"),
+        )?
+        .add_stamp_annotation(
+            1,
+            ImageRect::new(380.0, 640.0, 100.0, 32.0),
+            "APPROVED",
+            AnnotationOptions::default().color(Color::device_rgb(0.86, 0.94, 1.0)),
+        )?
+        .add_link_uri(
+            1,
+            ImageRect::new(72.0, 620.0, 110.0, 18.0),
+            "https://example.com",
+        )?;
+    editor.save_to_bytes(mode)
+}
+
+fn fill_and_flatten_form() -> oxide_engine::Result<Vec<u8>> {
+    let mut editor = PdfEditor::open_bytes(form_fixture_pdf())?;
+    editor
+        .set_form_text("name", "Alice Example")
+        .set_form_checkbox("agree", true)
+        .set_form_choice("plan", "Gold")
+        .flatten_forms();
+    editor.save_to_bytes(EditMode::FullRewrite)
+}
+
 fn rgba_badge(width: u32, height: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
     for y in 0..height {
@@ -111,4 +173,72 @@ fn rgba_badge(width: u32, height: u32) -> Vec<u8> {
         }
     }
     pixels
+}
+
+fn form_fixture_pdf() -> Vec<u8> {
+    let mut b = TinyPdf::new();
+    b.add("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R] /DA (/Helv 10 Tf 0 g) >> >>");
+    b.add("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+    b.add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /Helv << /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >> >> >> /Contents 4 0 R /Annots [5 0 R 6 0 R 7 0 R] >>");
+    let stream = b"BT /Helv 10 Tf 20 170 Td (Form fixture) Tj ET";
+    b.add_raw(
+        [
+            format!("<< /Length {} >>\nstream\n", stream.len()).into_bytes(),
+            stream.to_vec(),
+            b"\nendstream".to_vec(),
+        ]
+        .concat(),
+    );
+    b.add("<< /Type /Annot /Subtype /Widget /FT /Tx /T (name) /Rect [80 130 220 150] /V () /DA (/Helv 10 Tf 0 g) >>");
+    b.add("<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /Rect [80 95 100 115] /V /Off /AS /Off >>");
+    b.add("<< /Type /Annot /Subtype /Widget /FT /Ch /T (plan) /Rect [80 60 160 80] /Opt [(Silver) (Gold)] /V (Silver) /DA (/Helv 10 Tf 0 g) >>");
+    b.build()
+}
+
+struct TinyPdf {
+    objects: Vec<Vec<u8>>,
+}
+
+impl TinyPdf {
+    fn new() -> Self {
+        Self {
+            objects: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, body: &str) {
+        self.objects.push(body.as_bytes().to_vec());
+    }
+
+    fn add_raw(&mut self, body: Vec<u8>) {
+        self.objects.push(body);
+    }
+
+    fn build(&self) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.7\n");
+        let mut offsets = Vec::new();
+        for (idx, body) in self.objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n", idx + 1).as_bytes());
+            pdf.extend_from_slice(body);
+            pdf.extend_from_slice(b"\nendobj\n");
+        }
+        let xref = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for offset in offsets {
+            pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                self.objects.len() + 1,
+                xref
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
 }
