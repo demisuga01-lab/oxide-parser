@@ -41,6 +41,11 @@ Differential fuzzing is configured in
 [`differential_fuzzing.md`](differential_fuzzing.md) for the qpdf/Poppler
 wrong-output gate.
 
+Property-based invariants run in normal tests and in
+`.github/workflows/property-tests.yml`. See
+[`property_testing.md`](property_testing.md) for the round-trip, determinism,
+and structural guarantees.
+
 ## What was set up
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)

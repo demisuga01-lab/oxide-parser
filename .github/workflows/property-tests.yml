@@ -1,0 +1,45 @@
+name: Property Tests
+
+on:
+  pull_request:
+    paths:
+      - "crates/engine/**"
+      - ".github/workflows/property-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/engine/**"
+      - ".github/workflows/property-tests.yml"
+  schedule:
+    - cron: "23 5 * * 0"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "PROPTEST_CASES for the heavy run"
+        required: false
+        default: "512"
+
+jobs:
+  property-tests:
+    name: oxide-engine property invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || github.event_name == 'push' && '64' || github.event.inputs.cases || '512' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-property-tests-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run property tests
+        run: cargo test -p oxide-engine --test property_invariants -- --nocapture
