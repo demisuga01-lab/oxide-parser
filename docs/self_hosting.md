@@ -67,9 +67,9 @@ oxide render input.pdf --dpi 150 --format png
 A binary built without OCR returns an actionable error if you pass `--ocr`.
 
 > **Structural writes.** The CLI includes `encrypt`, `rotate`, `optimize`,
-> `repair`, and a guarded qpdf-validated `linearize` subset. Broader
-> linearization coverage, decrypt-as-write, and server mutation routes remain
-> deliberate follow-ups (see `docs/manipulation.md`).
+> `repair`, and qpdf-validated `linearize` output for the supported structural
+> subset. Linearized object-stream packing, decrypt-as-write, and server
+> mutation routes remain deliberate follow-ups (see `docs/manipulation.md`).
 > `extract-tables` does not support `--ocr` (OCR'd table-grid reconstruction is
 > a known gap; use `extract-fields --ocr` for scanned tabular data).
 

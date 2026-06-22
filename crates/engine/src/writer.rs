@@ -1152,7 +1152,10 @@ fn collect_references(object: &PdfObject, out: &mut Vec<u32>) {
             }
         }
         PdfObject::Stream { dict, .. } => {
-            for (_, value) in dict.iter() {
+            for (key, value) in dict.iter() {
+                if key == "Length" {
+                    continue;
+                }
                 collect_references(value, out);
             }
         }
@@ -1498,6 +1501,48 @@ pub fn rewrite_document_objects(
     Ok((objects, new_root, info_number))
 }
 
+fn rewrite_document_objects_with_remap(
+    reader: &PdfReader,
+    remap: &HashMap<u32, u32>,
+    mutate: &mut impl FnMut(u32, &mut PdfObject),
+) -> Result<(Vec<OutputObject>, u32, Option<u32>)> {
+    let root = reader.root_reference().ok_or_else(|| {
+        OxideError::MalformedPdf("cannot round-trip: trailer is missing /Root".to_string())
+    })?;
+
+    let mut objects: Vec<OutputObject> = Vec::new();
+    for (number, generation) in reader.object_ids() {
+        let Some(&new_number) = remap.get(&number) else {
+            continue;
+        };
+        let object = match reader.get_object(number, generation) {
+            Ok(object) => object,
+            Err(err) => {
+                log::warn!("roundtrip: skipping object {number} {generation}: {err}");
+                continue;
+            }
+        };
+        if let PdfObject::Stream { dict, .. } = &object {
+            if dict.get_name("Type") == Some("XRef") {
+                continue;
+            }
+        }
+        let mut rewritten = rewrite_references(object, remap);
+        mutate(number, &mut rewritten);
+        objects.push(OutputObject {
+            number: new_number,
+            object: rewritten,
+        });
+    }
+
+    let new_root = remap[&root.0];
+    let info_number = reader
+        .info_reference()
+        .and_then(|(n, _)| remap.get(&n).copied());
+
+    Ok((objects, new_root, info_number))
+}
+
 /// Write a linearized (Fast Web View) PDF using PDF 1.5 cross-reference
 /// streams. The content-preserving object copy is the same base used by the
 /// other structural operations; this layer changes object ordering, writes the
@@ -1513,7 +1558,8 @@ pub fn write_document_linearized(doc: &PdfDocument) -> Result<Vec<u8>> {
     }
     ensure_linearization_supported(doc, &pages)?;
 
-    let remap = build_identity_remap(reader);
+    let source_plan = build_linearization_source_plan(reader, &pages)?;
+    let remap = source_plan.remap.clone();
     let page_by_source: HashMap<u32, crate::document::PdfPage> = pages
         .iter()
         .cloned()
@@ -1529,6 +1575,8 @@ pub fn write_document_linearized(doc: &PdfDocument) -> Result<Vec<u8>> {
             dict.remove("Dests");
             dict.remove("Names");
             dict.remove("PageMode");
+            dict.remove("StructTreeRoot");
+            dict.remove("PageLabels");
         }
         if dict.get_name("Type") == Some("Pages") {
             dict.remove("MediaBox");
@@ -1558,15 +1606,13 @@ pub fn write_document_linearized(doc: &PdfDocument) -> Result<Vec<u8>> {
         dict.insert("Resources", resources);
     };
     let (mut objects, new_root, info_number) =
-        rewrite_document_objects(reader, &mut normalize_pages)?;
+        rewrite_document_objects_with_remap(reader, &remap, &mut normalize_pages)?;
     retain_reachable_linearized_objects(&mut objects, new_root, info_number);
-    let object_map: HashMap<u32, PdfObject> = objects
-        .iter()
-        .map(|obj| (obj.number, obj.object.clone()))
-        .collect();
-
-    let page_groups = analyze_linearized_page_groups(&pages, &object_map, &remap, new_root)?;
-    let layout = LinearizedObjectLayout::new(&objects, new_root, &page_groups);
+    let page_groups = source_plan.output_page_groups(&remap)?;
+    let shared_objects = source_plan.output_shared_objects(&remap)?;
+    let opening_objects = source_plan.output_opening_objects(&remap)?;
+    let layout =
+        LinearizedObjectLayout::new(&objects, opening_objects, &page_groups, shared_objects)?;
 
     let max_regular = objects.iter().map(|obj| obj.number).max().unwrap_or(0);
     let linearization_number = max_regular + 1;
@@ -1717,34 +1763,13 @@ fn ensure_linearization_supported(
     doc: &PdfDocument,
     pages: &[crate::document::PdfPage],
 ) -> Result<()> {
-    if pages.len() != 1 {
-        return Err(OxideError::UnsupportedFeature(
-            "linearize: qpdf-valid output is currently implemented for simple single-page PDFs; multi-page page/shared-object hint refinement remains deferred".to_string(),
-        ));
-    }
-    let catalog = doc.get_catalog()?;
-    for key in [
-        "AcroForm",
-        "Outlines",
-        "OpenAction",
-        "Names",
-        "Dests",
-        "StructTreeRoot",
-        "PageLabels",
-    ] {
-        if catalog.contains_key(key) {
-            return Err(OxideError::UnsupportedFeature(format!(
-                "linearize: qpdf-valid output for documents with /{key} is still deferred"
-            )));
-        }
-    }
     let reader = doc.reader();
     for page in pages {
         let page_obj = reader.get_object(page.object_number, page.generation_number)?;
         if let Some(dict) = page_obj.as_dict() {
-            if dict.contains_key("Annots") {
+            if dict.contains_key("Thumb") {
                 return Err(OxideError::UnsupportedFeature(
-                    "linearize: qpdf-valid output for annotated/form pages is still deferred"
+                    "linearize: qpdf-valid output for page thumbnails is still deferred"
                         .to_string(),
                 ));
             }
@@ -1753,17 +1778,231 @@ fn ensure_linearization_supported(
     Ok(())
 }
 
-fn build_identity_remap(reader: &PdfReader) -> HashMap<u32, u32> {
-    let mut remap = HashMap::new();
-    let mut next = 1u32;
-    for (number, _) in reader.object_ids() {
-        remap.entry(number).or_insert_with(|| {
-            let new = next;
-            next += 1;
-            new
+struct LinearizationSourcePlan {
+    opening_objects: Vec<u32>,
+    page_groups: Vec<LinearizedPageGroup>,
+    shared_objects: Vec<u32>,
+    remap: HashMap<u32, u32>,
+}
+
+impl LinearizationSourcePlan {
+    fn output_opening_objects(&self, remap: &HashMap<u32, u32>) -> Result<Vec<u32>> {
+        remap_numbers(&self.opening_objects, remap)
+    }
+
+    fn output_shared_objects(&self, remap: &HashMap<u32, u32>) -> Result<Vec<u32>> {
+        remap_numbers(&self.shared_objects, remap)
+    }
+
+    fn output_page_groups(&self, remap: &HashMap<u32, u32>) -> Result<Vec<LinearizedPageGroup>> {
+        self.page_groups
+            .iter()
+            .map(|group| {
+                Ok(LinearizedPageGroup {
+                    objects: remap_numbers(&group.objects, remap)?,
+                    shared_identifiers: group.shared_identifiers.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+fn remap_numbers(numbers: &[u32], remap: &HashMap<u32, u32>) -> Result<Vec<u32>> {
+    numbers
+        .iter()
+        .map(|number| {
+            remap.get(number).copied().ok_or_else(|| {
+                OxideError::MalformedPdf(format!(
+                    "linearize: object {number} was not assigned an output number"
+                ))
+            })
+        })
+        .collect()
+}
+
+fn build_linearization_source_plan(
+    reader: &PdfReader,
+    pages: &[crate::document::PdfPage],
+) -> Result<LinearizationSourcePlan> {
+    let object_map = original_object_map(reader);
+    let mut closures: Vec<BTreeSet<u32>> = Vec::with_capacity(pages.len());
+    let mut object_pages: BTreeMap<u32, BTreeSet<usize>> = BTreeMap::new();
+
+    for (idx, page) in pages.iter().enumerate() {
+        let mut roots = BTreeSet::new();
+        roots.insert(page.object_number);
+
+        if let Some(page_obj) = object_map.get(&page.object_number) {
+            collect_page_local_references(page_obj, &mut roots);
+        }
+
+        collect_references_into_set(&PdfObject::Dictionary(page.resources.clone()), &mut roots);
+        for (content, _) in &page.contents {
+            roots.insert(*content);
+        }
+
+        let top_pages = BTreeSet::from([page.object_number]);
+        let mut closure = dependency_closure_for_linearization(&roots, &object_map, &top_pages);
+        closure.insert(page.object_number);
+        closure.retain(|number| object_map.contains_key(number));
+        for &number in &closure {
+            object_pages.entry(number).or_default().insert(idx);
+        }
+        closures.push(closure);
+    }
+
+    let root = reader.root_reference().ok_or_else(|| {
+        OxideError::MalformedPdf("cannot linearize: trailer is missing /Root".to_string())
+    })?;
+    let opening_objects = build_opening_source_objects(root.0, &object_map);
+    let opening_set: BTreeSet<u32> = opening_objects.iter().copied().collect();
+
+    let mut assigned = BTreeSet::new();
+    let first_page_number = pages[0].object_number;
+    let first_group: BTreeSet<u32> = closures[0]
+        .iter()
+        .copied()
+        .filter(|number| !opening_set.contains(number))
+        .collect();
+    let first_objects = ordered_group_with_first(first_page_number, &first_group);
+    assigned.extend(first_objects.iter().copied());
+
+    let mut source_page_groups = Vec::with_capacity(pages.len());
+    source_page_groups.push(LinearizedPageGroup {
+        objects: first_objects.clone(),
+        shared_identifiers: Vec::new(),
+    });
+
+    let mut shared_objects: Vec<u32> = object_pages
+        .iter()
+        .filter_map(|(&number, users)| {
+            if users.len() > 1 && !assigned.contains(&number) && !opening_set.contains(&number) {
+                Some(number)
+            } else {
+                None
+            }
+        })
+        .collect();
+    shared_objects.sort_unstable();
+
+    let mut shared_index: HashMap<u32, usize> = HashMap::new();
+    for (idx, &number) in first_objects.iter().enumerate() {
+        shared_index.insert(number, idx);
+    }
+    for &number in &shared_objects {
+        let idx = shared_index.len();
+        shared_index.insert(number, idx);
+    }
+
+    for (idx, page) in pages.iter().enumerate().skip(1) {
+        let page_number = page.object_number;
+        let mut owned = BTreeSet::new();
+        owned.insert(page_number);
+        for &number in &closures[idx] {
+            let Some(users) = object_pages.get(&number) else {
+                continue;
+            };
+            if users.len() == 1 && users.contains(&idx) && !opening_set.contains(&number) {
+                owned.insert(number);
+            }
+        }
+        let objects = ordered_group_with_first(page_number, &owned);
+        assigned.extend(objects.iter().copied());
+
+        let mut shared_identifiers: Vec<usize> = closures[idx]
+            .iter()
+            .filter(|number| {
+                object_pages
+                    .get(number)
+                    .map(|users| users.len() > 1 && !opening_set.contains(number))
+                    .unwrap_or(false)
+            })
+            .filter_map(|number| shared_index.get(number).copied())
+            .collect();
+        shared_identifiers.sort_unstable();
+        shared_identifiers.dedup();
+
+        source_page_groups.push(LinearizedPageGroup {
+            objects,
+            shared_identifiers,
         });
     }
-    remap
+
+    assigned.extend(shared_objects.iter().copied());
+    assigned.extend(opening_objects.iter().copied());
+
+    let mut remap = HashMap::new();
+    let mut next = 1u32;
+    for group in &source_page_groups {
+        for &number in &group.objects {
+            assign_linearized_number(&mut remap, &mut next, number);
+        }
+    }
+    for &number in &shared_objects {
+        assign_linearized_number(&mut remap, &mut next, number);
+    }
+
+    let mut remaining: Vec<u32> = reader
+        .object_ids()
+        .into_iter()
+        .map(|(number, _)| number)
+        .filter(|number| object_map.contains_key(number))
+        .filter(|number| !assigned.contains(number))
+        .collect();
+    remaining.sort_unstable();
+    remaining.dedup();
+    for number in remaining {
+        assign_linearized_number(&mut remap, &mut next, number);
+    }
+    for &number in &opening_objects {
+        assign_linearized_number(&mut remap, &mut next, number);
+    }
+
+    Ok(LinearizationSourcePlan {
+        opening_objects,
+        page_groups: source_page_groups,
+        shared_objects,
+        remap,
+    })
+}
+
+fn original_object_map(reader: &PdfReader) -> HashMap<u32, PdfObject> {
+    let mut object_map = HashMap::new();
+    for (number, generation) in reader.object_ids() {
+        let Ok(object) = reader.get_object(number, generation) else {
+            continue;
+        };
+        if let PdfObject::Stream { dict, .. } = &object {
+            if dict.get_name("Type") == Some("XRef") {
+                continue;
+            }
+        }
+        object_map.insert(number, object);
+    }
+    object_map
+}
+
+fn build_opening_source_objects(root: u32, object_map: &HashMap<u32, PdfObject>) -> Vec<u32> {
+    let mut roots = BTreeSet::new();
+    if let Some(PdfObject::Dictionary(dict)) = object_map.get(&root) {
+        for key in ["ViewerPreferences", "Threads", "AcroForm"] {
+            if let Some(value) = dict.get(key) {
+                collect_references_into_set(value, &mut roots);
+            }
+        }
+    }
+    let closure = dependency_closure_all(&roots, object_map);
+    let mut out = vec![root];
+    out.extend(closure.into_iter().filter(|number| *number != root));
+    out
+}
+
+fn assign_linearized_number(remap: &mut HashMap<u32, u32>, next: &mut u32, number: u32) {
+    remap.entry(number).or_insert_with(|| {
+        let assigned = *next;
+        *next += 1;
+        assigned
+    });
 }
 
 fn retain_reachable_linearized_objects(
@@ -1804,97 +2043,17 @@ struct LinearizedPageGroup {
     shared_identifiers: Vec<usize>,
 }
 
-fn analyze_linearized_page_groups(
-    pages: &[crate::document::PdfPage],
-    object_map: &HashMap<u32, PdfObject>,
-    remap: &HashMap<u32, u32>,
-    _new_root: u32,
-) -> Result<Vec<LinearizedPageGroup>> {
-    let mut closures: Vec<BTreeSet<u32>> = Vec::with_capacity(pages.len());
-    for page in pages {
-        let page_number = remap.get(&page.object_number).copied().ok_or_else(|| {
-            OxideError::MalformedPdf(format!(
-                "linearize: page object {} was not copied",
-                page.object_number
-            ))
-        })?;
-        let mut roots = BTreeSet::new();
-        roots.insert(page_number);
-
-        if let Some(page_obj) = object_map.get(&page_number) {
-            collect_page_local_references(page_obj, &mut roots);
-        }
-
-        let rewritten_resources =
-            rewrite_references(PdfObject::Dictionary(page.resources.clone()), remap);
-        collect_references_into_set(&rewritten_resources, &mut roots);
-
-        for (content, _) in &page.contents {
-            if let Some(&new_content) = remap.get(content) {
-                roots.insert(new_content);
-            }
-        }
-
-        let mut closure = dependency_closure_for_linearization(&roots, object_map);
-        closure.insert(page_number);
-        closures.push(closure);
-    }
-
-    let first_page_number = remap[&pages[0].object_number];
-    let first_group = closures[0].clone();
-
-    let first_objects = ordered_group_with_first(first_page_number, &first_group);
-    let first_index: HashMap<u32, usize> = first_objects
-        .iter()
-        .enumerate()
-        .map(|(idx, &number)| (number, idx))
-        .collect();
-
-    let mut emitted: BTreeSet<u32> = first_objects.iter().copied().collect();
-    let mut groups = Vec::with_capacity(pages.len());
-    groups.push(LinearizedPageGroup {
-        objects: first_objects,
-        shared_identifiers: Vec::new(),
-    });
-
-    for (idx, page) in pages.iter().enumerate().skip(1) {
-        let page_number = remap[&page.object_number];
-        let mut shared_identifiers: Vec<usize> = closures[idx]
-            .iter()
-            .filter_map(|number| first_index.get(number).copied())
-            .collect();
-        shared_identifiers.sort_unstable();
-        shared_identifiers.dedup();
-
-        let mut owned: BTreeSet<u32> = closures[idx]
-            .iter()
-            .copied()
-            .filter(|number| !emitted.contains(number))
-            .filter(|number| !first_index.contains_key(number))
-            .collect();
-        owned.insert(page_number);
-        let objects = ordered_group_with_first(page_number, &owned);
-        emitted.extend(objects.iter().copied());
-
-        groups.push(LinearizedPageGroup {
-            objects,
-            shared_identifiers,
-        });
-    }
-
-    Ok(groups)
-}
-
 fn collect_page_local_references(object: &PdfObject, out: &mut BTreeSet<u32>) {
     match object {
         PdfObject::Dictionary(dict) => {
             let is_page = dict.get_name("Type") == Some("Page");
             let is_pages = dict.get_name("Type") == Some("Pages");
             if is_page {
-                for key in ["Contents", "Resources", "Group"] {
-                    if let Some(value) = dict.get(key) {
-                        collect_references_into_set(value, out);
+                for (key, value) in dict.iter() {
+                    if key == "Parent" || key == "Resources" || key == "Thumb" {
+                        continue;
                     }
+                    collect_references_into_set(value, out);
                 }
                 return;
             }
@@ -1912,6 +2071,7 @@ fn collect_page_local_references(object: &PdfObject, out: &mut BTreeSet<u32>) {
 fn dependency_closure_for_linearization(
     roots: &BTreeSet<u32>,
     object_map: &HashMap<u32, PdfObject>,
+    top_pages: &BTreeSet<u32>,
 ) -> BTreeSet<u32> {
     let mut closure = BTreeSet::new();
     let mut stack: Vec<u32> = roots.iter().copied().collect();
@@ -1922,8 +2082,48 @@ fn dependency_closure_for_linearization(
         let Some(object) = object_map.get(&number) else {
             continue;
         };
+        if !top_pages.contains(&number)
+            && matches!(
+                object,
+                PdfObject::Dictionary(dict) if dict.get_name("Type") == Some("Page")
+            )
+        {
+            continue;
+        }
         let mut refs = BTreeSet::new();
         collect_page_local_references(object, &mut refs);
+        for reference in refs {
+            if !closure.contains(&reference) {
+                stack.push(reference);
+            }
+        }
+    }
+    closure
+}
+
+fn dependency_closure_all(
+    roots: &BTreeSet<u32>,
+    object_map: &HashMap<u32, PdfObject>,
+) -> BTreeSet<u32> {
+    let mut closure = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack: Vec<u32> = roots.iter().copied().collect();
+    while let Some(number) = stack.pop() {
+        if !visited.insert(number) {
+            continue;
+        }
+        let Some(object) = object_map.get(&number) else {
+            continue;
+        };
+        if matches!(
+            object,
+            PdfObject::Dictionary(dict) if dict.get_name("Type") == Some("Page")
+        ) {
+            continue;
+        }
+        closure.insert(number);
+        let mut refs = BTreeSet::new();
+        collect_references_into_set(object, &mut refs);
         for reference in refs {
             if !closure.contains(&reference) {
                 stack.push(reference);
@@ -1951,12 +2151,18 @@ fn ordered_group_with_first(first: u32, group: &BTreeSet<u32>) -> Vec<u32> {
 struct LinearizedObjectLayout {
     opening_objects: Vec<u32>,
     page_groups: Vec<Vec<u32>>,
+    shared_objects: Vec<u32>,
     leftovers: Vec<u32>,
     object_bytes: HashMap<u32, Vec<u8>>,
 }
 
 impl LinearizedObjectLayout {
-    fn new(objects: &[OutputObject], new_root: u32, page_groups: &[LinearizedPageGroup]) -> Self {
+    fn new(
+        objects: &[OutputObject],
+        opening_objects: Vec<u32>,
+        page_groups: &[LinearizedPageGroup],
+        shared_objects: Vec<u32>,
+    ) -> Result<Self> {
         let mut object_bytes = HashMap::new();
         for object in objects {
             object_bytes.insert(
@@ -1966,17 +2172,16 @@ impl LinearizedObjectLayout {
         }
 
         let mut assigned = BTreeSet::new();
-        let opening_objects = if object_bytes.contains_key(&new_root) {
-            assigned.insert(new_root);
-            vec![new_root]
-        } else {
-            Vec::new()
-        };
+        for &number in &opening_objects {
+            ensure_layout_object(&object_bytes, number)?;
+            assigned.insert(number);
+        }
 
         let mut page_group_numbers = Vec::with_capacity(page_groups.len());
         for group in page_groups {
             let mut numbers = Vec::new();
             for &number in &group.objects {
+                ensure_layout_object(&object_bytes, number)?;
                 if assigned.insert(number) {
                     numbers.push(number);
                 }
@@ -1984,18 +2189,25 @@ impl LinearizedObjectLayout {
             page_group_numbers.push(numbers);
         }
 
-        let leftovers = objects
+        for &number in &shared_objects {
+            ensure_layout_object(&object_bytes, number)?;
+            assigned.insert(number);
+        }
+
+        let mut leftovers: Vec<u32> = objects
             .iter()
             .map(|object| object.number)
             .filter(|number| !assigned.contains(number))
             .collect();
+        leftovers.sort_unstable();
 
-        Self {
+        Ok(Self {
             opening_objects,
             page_groups: page_group_numbers,
+            shared_objects,
             leftovers,
             object_bytes,
-        }
+        })
     }
 
     fn object_len(&self, number: u32) -> usize {
@@ -2003,6 +2215,16 @@ impl LinearizedObjectLayout {
             .get(&number)
             .map(|bytes| bytes.len())
             .unwrap_or(0)
+    }
+}
+
+fn ensure_layout_object(object_bytes: &HashMap<u32, Vec<u8>>, number: u32) -> Result<()> {
+    if object_bytes.contains_key(&number) {
+        Ok(())
+    } else {
+        Err(OxideError::MalformedPdf(format!(
+            "linearize: planned object {number} was not copied"
+        )))
     }
 }
 
@@ -2016,6 +2238,7 @@ struct LinearizedPositions {
     opening_offsets: Vec<(u32, usize)>,
     hint_offset: usize,
     page_offsets: Vec<Vec<(u32, usize)>>,
+    shared_offsets: Vec<(u32, usize)>,
     page_lengths: Vec<usize>,
     first_page_end: usize,
     leftover_offsets: Vec<(u32, usize)>,
@@ -2056,6 +2279,12 @@ fn compute_linearized_positions(
         page_offsets.push(offsets);
     }
 
+    let mut shared_offsets = Vec::with_capacity(layout.shared_objects.len());
+    for &number in &layout.shared_objects {
+        shared_offsets.push((number, pos));
+        pos += layout.object_len(number);
+    }
+
     let mut leftover_offsets = Vec::with_capacity(layout.leftovers.len());
     for &number in &layout.leftovers {
         leftover_offsets.push((number, pos));
@@ -2067,6 +2296,7 @@ fn compute_linearized_positions(
     for (number, offset) in opening_offsets
         .iter()
         .chain(page_offsets.iter().flatten())
+        .chain(shared_offsets.iter())
         .chain(leftover_offsets.iter())
     {
         front_xref_entries.push((*number, XrefEntryOut::Uncompressed { offset: *offset }));
@@ -2076,6 +2306,7 @@ fn compute_linearized_positions(
         opening_offsets,
         hint_offset,
         page_offsets,
+        shared_offsets,
         page_lengths,
         first_page_end,
         leftover_offsets,
@@ -2164,18 +2395,15 @@ fn build_hint_stream_data(
     let min_content_length = min_page_length;
     let max_content_length_delta = max_page_length_delta;
     let max_shared_count = *shared_counts.iter().max().unwrap_or(&0);
-    let max_shared_identifier = page_groups
-        .iter()
-        .flat_map(|group| group.shared_identifiers.iter().copied())
-        .max()
-        .unwrap_or(0);
+    let nshared_first_page = page_groups[0].objects.len();
+    let nshared_total = nshared_first_page + positions.shared_offsets.len();
 
     let nbits_objects = bits_required(max_objects_delta as u64);
     let nbits_page_length = bits_required(max_page_length_delta as u64);
     let nbits_content_offset = 0usize;
     let nbits_content_length = bits_required(max_content_length_delta as u64);
     let nbits_shared_count = bits_required(max_shared_count as u64);
-    let nbits_shared_identifier = bits_required(max_shared_identifier as u64).max(1);
+    let nbits_shared_identifier = bits_required(nshared_total as u64).max(1);
     let nbits_shared_numerator = 0usize;
     let shared_denominator = 4usize;
 
@@ -2225,26 +2453,27 @@ fn build_hint_stream_data(
     page_table.extend_from_slice(&page_bits.finish());
 
     let shared_table_offset = page_table.len();
-    let first_page_groups = &page_groups[0].objects;
-    let shared_lengths: Vec<usize> = positions
-        .page_offsets
-        .first()
-        .into_iter()
-        .flatten()
-        .map(|(number, _)| {
-            let idx = first_page_groups
-                .iter()
-                .position(|candidate| candidate == number)
-                .unwrap_or(0);
-            let start = positions.page_offsets[0][idx].1;
-            let end = if idx + 1 < positions.page_offsets[0].len() {
-                positions.page_offsets[0][idx + 1].1
+    let mut shared_lengths: Vec<usize> = Vec::with_capacity(nshared_total);
+    if let Some(first_page_offsets) = positions.page_offsets.first() {
+        for (idx, (_, start)) in first_page_offsets.iter().enumerate() {
+            let end = if idx + 1 < first_page_offsets.len() {
+                first_page_offsets[idx + 1].1
             } else {
                 positions.first_page_end
             };
-            end - start
-        })
-        .collect();
+            shared_lengths.push(end - start);
+        }
+    }
+    for (idx, (_, start)) in positions.shared_offsets.iter().enumerate() {
+        let end = if idx + 1 < positions.shared_offsets.len() {
+            positions.shared_offsets[idx + 1].1
+        } else if let Some((_, offset)) = positions.leftover_offsets.first() {
+            *offset
+        } else {
+            positions.main_xref_offset
+        };
+        shared_lengths.push(end - start);
+    }
 
     let min_group_length = *shared_lengths.iter().min().unwrap_or(&0);
     let max_group_delta = shared_lengths
@@ -2255,10 +2484,26 @@ fn build_hint_stream_data(
     let nbits_group_length = bits_required(max_group_delta as u64);
 
     let mut bytes = page_table;
-    write_u32(&mut bytes, 0)?;
-    write_u32(&mut bytes, 0)?;
-    write_u32(&mut bytes, first_page_groups.len())?;
-    write_u32(&mut bytes, first_page_groups.len())?;
+    let first_shared_obj = positions
+        .shared_offsets
+        .first()
+        .map(|(number, _)| *number as usize)
+        .unwrap_or(0);
+    let hint_len = positions
+        .page_offsets
+        .first()
+        .and_then(|offsets| offsets.first())
+        .map(|(_, first_page_offset)| first_page_offset.saturating_sub(positions.hint_offset))
+        .unwrap_or(0);
+    let first_shared_offset = if positions.shared_offsets.is_empty() {
+        0
+    } else {
+        positions.shared_offsets[0].1.saturating_sub(hint_len)
+    };
+    write_u32(&mut bytes, first_shared_obj)?;
+    write_u32(&mut bytes, first_shared_offset)?;
+    write_u32(&mut bytes, nshared_first_page)?;
+    write_u32(&mut bytes, nshared_total)?;
     write_u16(&mut bytes, 0)?;
     write_u32(&mut bytes, min_group_length)?;
     write_u16(&mut bytes, nbits_group_length)?;
@@ -2268,7 +2513,7 @@ fn build_hint_stream_data(
         shared_bits.write(length - min_group_length, nbits_group_length);
     }
     shared_bits.align_byte();
-    for _ in first_page_groups {
+    for _ in 0..nshared_total {
         shared_bits.write(0, 1);
     }
     shared_bits.align_byte();
@@ -2326,6 +2571,9 @@ fn assemble_linearized_output(parts: LinearizedOutputParts<'_>) -> Vec<u8> {
         for (number, _) in group {
             out.extend_from_slice(&parts.layout.object_bytes[number]);
         }
+    }
+    for (number, _) in &parts.positions.shared_offsets {
+        out.extend_from_slice(&parts.layout.object_bytes[number]);
     }
     for (number, _) in &parts.positions.leftover_offsets {
         out.extend_from_slice(&parts.layout.object_bytes[number]);

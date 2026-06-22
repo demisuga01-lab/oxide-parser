@@ -227,25 +227,30 @@ is recorded as future work. Repaired output is unencrypted.
 
 ### `oxide linearize`
 
-Produces a qpdf-validated Fast Web View PDF for the proven subset: simple
-single-page documents without forms, annotations, outlines, destinations, named
-trees, page labels, or structure trees. The implementation builds on the modern
-cross-reference-stream writer and adds the linearization layer:
+Produces a qpdf-validated Fast Web View PDF for the supported structural
+subset, including single-page files, realistic multi-page files with shared
+resources, page annotations, and AcroForm/form fixtures. The implementation
+builds on the modern cross-reference-stream writer and adds the linearization
+layer:
 
 - a fixed-width linearization parameter dictionary (`/Linearized`, `/L`, `/H`,
   `/O`, `/E`, `/N`, `/T`) immediately after the PDF header;
 - a front cross-reference stream plus the main cross-reference stream chain;
 - page-offset and shared-object hint stream data encoded in the Annex-F order
   qpdf validates;
-- dependency analysis that groups the page object and its render dependencies
-  at the front, with catalog/root objects retained before the first-page span;
+- dependency analysis that groups the first page and its render dependencies at
+  the front, emits later page groups in page order, and places page-shared
+  dependencies in the shared-object section qpdf expects;
 - iterative fixed-width/padded offset resolution so `/L`, `/H`, `/O`, `/E`, and
   `/T` stabilize exactly.
 
-Inputs outside the validated subset return `UnsupportedFeature` and do not write
-an output file. Multi-page page/shared-object hint refinement, form/annotation
-closures, and object-stream packing inside linearized output remain follow-ups;
-the command will not emit a `/Linearized` file unless qpdf accepts it.
+Catalog navigation/tagging metadata that would need additional open-document
+hint coverage is intentionally removed before writing: outlines, open actions,
+named destinations/name trees, page mode, page labels, and structure trees. Page
+thumbnails still return `UnsupportedFeature` and do not write an output file.
+Linearized output uses xref streams; packing regular objects into `/ObjStm`
+inside the linearized layout remains a size-optimization follow-up. The command
+will not emit a `/Linearized` file unless qpdf accepts it.
 
 ## Validation
 
@@ -269,9 +274,8 @@ The writer is validated three ways (see `crates/engine/tests/writer.rs`):
 
 ## Future enhancements
 
-- **Linearization broadening** (fast web view) — multi-page page/shared-object
-  hints, form/annotation closures, and object-stream packing in linearized
-  output. The current subset is qpdf-validated and guarded.
+- **Linearization size refinement** (fast web view) — pack eligible regular
+  objects into `/ObjStm` inside the already qpdf-valid linearized layout.
 - **Object-stream / cross-reference-stream output** (PDF 1.5+) for more
   structural operations. `optimize` already uses this path so object-heavy /
   already-packed files shrink instead of growing.
@@ -287,4 +291,4 @@ The writer is validated three ways (see `crates/engine/tests/writer.rs`):
 
 Done this round (Bucket 2): `encrypt` (AES-256 verified), `rotate`, `optimize`
 (GC + recompression, visually safe), `repair` (persisted recovery), and the
-guarded qpdf-valid linearization subset.
+qpdf-valid linearization implementation for the supported structural subset.

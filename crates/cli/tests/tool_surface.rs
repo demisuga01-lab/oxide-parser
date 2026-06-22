@@ -690,7 +690,7 @@ fn linearize_command_writes_fast_web_view_pdf() {
 }
 
 #[test]
-fn linearize_command_refuses_unvalidated_multi_page_pdf() {
+fn linearize_command_writes_multi_page_fast_web_view_pdf() {
     let out = tmp("linearize_multi_out.pdf");
     let _ = std::fs::remove_file(&out);
     let res = run(&[
@@ -699,17 +699,52 @@ fn linearize_command_refuses_unvalidated_multi_page_pdf() {
         "-o",
         out.to_str().unwrap(),
     ]);
+    assert_ok(&res, "linearize multi-page");
+    assert!(out.exists());
+    let bytes = std::fs::read(&out).expect("linearized multi-page output");
+    let text = String::from_utf8_lossy(&bytes);
     assert!(
-        !res.status.success(),
-        "linearize should reject unvalidated multi-page output"
+        text.contains("/Linearized"),
+        "multi-page output should carry /Linearized"
     );
-    let err = String::from_utf8_lossy(&res.stderr);
+    let info = run(&["info", out.to_str().unwrap()]);
+    assert_ok(&info, "info on multi-page linearized");
+    let stdout = String::from_utf8_lossy(&info.stdout);
     assert!(
-        err.contains("multi-page"),
-        "should explain the staged boundary: {err}"
+        stdout.contains("Pages:           14"),
+        "info output: {stdout}"
     );
     assert!(
-        !out.exists(),
-        "unsupported linearization must not write output"
+        stdout.contains("Optimized:       yes"),
+        "info output: {stdout}"
     );
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn linearize_command_writes_form_fast_web_view_pdf() {
+    let out = tmp("linearize_form_out.pdf");
+    let _ = std::fs::remove_file(&out);
+    let res = run(&[
+        "linearize",
+        fx("form_160f.pdf").to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_ok(&res, "linearize form");
+    assert!(out.exists());
+    let bytes = std::fs::read(&out).expect("linearized form output");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("/Linearized"),
+        "form output should carry /Linearized"
+    );
+    let info = run(&["info", out.to_str().unwrap()]);
+    assert_ok(&info, "info on form linearized");
+    let stdout = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        stdout.contains("Optimized:       yes"),
+        "info output: {stdout}"
+    );
+    let _ = std::fs::remove_file(&out);
 }

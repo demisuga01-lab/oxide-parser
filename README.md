@@ -80,9 +80,9 @@ extraction, OCR'd-text recovery where PyMuPDF/Poppler do nothing, embeddability
 (bounded by Tesseract), pixel-faithful rendering (use Poppler/PDFium — see
 `docs/oxide_vs_poppler.md`), and the breadth of ML-model understanding on exotic
 layouts (Docling head-to-head not measured locally). Structural write operations
-are available for encrypt, rotate, optimize, repair, and a guarded
-qpdf-validated linearization subset; decrypt-as-write and broader linearization
-coverage remain documented follow-ups.
+are available for encrypt, rotate, optimize, repair, and qpdf-validated
+linearization for the supported structural subset; decrypt-as-write and
+linearized object-stream packing remain documented follow-ups.
 
 All claims are reproducible via the benchmark in `extraction-benchmark/`.
 

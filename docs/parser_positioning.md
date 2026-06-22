@@ -97,13 +97,14 @@ paper) — a tie, stated as such.
 
 Oxide's CLI/library structural operations now include merge, split,
 extract-pages, encrypt, rotate, optimize, repair, and a guarded
-qpdf-validated linearization subset. The server remains intentionally
+qpdf-validated linearization implementation for the supported structural subset.
+The server remains intentionally
 **non-mutating** unless a route explicitly documents otherwise, which is a real
 safety property for a service ingesting untrusted PDFs.
 
 Remaining structural follow-ups are documented in `docs/manipulation.md`:
-decrypt-as-write, broader multi-page/form-heavy linearization, and from-scratch
-xref/trailer rebuild for the most damaged repair inputs.
+decrypt-as-write, object-stream packing inside linearized output, and
+from-scratch xref/trailer rebuild for the most damaged repair inputs.
 
 ## Who it's for
 
