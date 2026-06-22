@@ -72,6 +72,7 @@ pub mod content;
 pub mod crypto;
 pub mod docmodel;
 pub mod document;
+pub mod editing;
 pub mod engine;
 pub mod error;
 pub mod eval;
@@ -133,6 +134,10 @@ pub use docmodel::{
     ModelSource, RegionKind,
 };
 pub use document::{PdfDocument, PdfPage};
+pub use editing::{
+    EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect, ImageStampOptions,
+    OverlayLayer, PdfEditor, WatermarkOptions,
+};
 pub use engine::{max_render_pixels, ContentEngine, PageResources, DEFAULT_MAX_RENDER_PIXELS};
 pub use error::{OxideError, Result};
 pub use eval::{score, score_json, ScoreInput, ScoreOutput};
@@ -232,6 +237,10 @@ pub mod prelude {
         TextAlign, TextStyle,
     };
     pub use crate::chunk::{chunk, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
+    pub use crate::editing::{
+        EditMode, EditRectStyle, EditTextStyle, HeaderFooterOptions, ImageRect, ImageStampOptions,
+        OverlayLayer, PdfEditor, WatermarkOptions,
+    };
     pub use crate::engine::ContentEngine;
     pub use crate::error::{OxideError, Result};
     pub use crate::eval::{score, score_json, ScoreInput, ScoreOutput};

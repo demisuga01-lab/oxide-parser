@@ -56,6 +56,14 @@ pub struct OutputObject {
     pub object: PdfObject,
 }
 
+/// An indirect object appended by an incremental update.
+#[derive(Clone, Debug)]
+pub struct IncrementalObject {
+    pub number: u32,
+    pub generation: u16,
+    pub object: PdfObject,
+}
+
 /// Low-level serializer: turns a set of [`OutputObject`]s plus a root reference
 /// (and optional `/Info`) into PDF file bytes.
 ///
@@ -1406,6 +1414,76 @@ pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
     rewrite_document(reader, |_orig, _obj| {})
 }
 
+/// Append an incremental update revision to `reader`'s original bytes.
+///
+/// Only the supplied objects are written, followed by a classic xref section
+/// and trailer with `/Prev` pointing at the previous `startxref`. This leaves
+/// the original byte prefix untouched, which is the required shape for later
+/// signature-preserving updates.
+pub fn write_incremental_update(
+    reader: &PdfReader,
+    changed_objects: Vec<IncrementalObject>,
+) -> Result<Vec<u8>> {
+    if reader.is_encrypted() {
+        return Err(OxideError::UnsupportedFeature(
+            "incremental writer: encrypted inputs require encrypted appended objects".to_string(),
+        ));
+    }
+    if changed_objects.is_empty() {
+        return Ok(reader.file_bytes().to_vec());
+    }
+
+    let mut objects = changed_objects;
+    objects.sort_by_key(|obj| (obj.number, obj.generation));
+    for pair in objects.windows(2) {
+        if pair[0].number == pair[1].number && pair[0].generation == pair[1].generation {
+            return Err(OxideError::MalformedPdf(format!(
+                "incremental writer: duplicate object {} {}",
+                pair[0].number, pair[0].generation
+            )));
+        }
+    }
+    for obj in &objects {
+        if obj.number == 0 {
+            return Err(OxideError::MalformedPdf(
+                "incremental writer: object number 0 is reserved".to_string(),
+            ));
+        }
+    }
+
+    let mut out = reader.file_bytes().to_vec();
+    if !out.ends_with(b"\n") && !out.ends_with(b"\r") {
+        out.push(b'\n');
+    }
+
+    let mut offsets = Vec::with_capacity(objects.len());
+    for obj in &objects {
+        let offset = out.len();
+        offsets.push((obj.number, obj.generation, offset));
+        out.extend_from_slice(format!("{} {} obj\n", obj.number, obj.generation).as_bytes());
+        serialize_object(&obj.object, &mut out);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+
+    let xref_offset = out.len();
+    out.extend_from_slice(b"xref\n");
+    for group in contiguous_xref_groups(&offsets) {
+        out.extend_from_slice(format!("{} {}\n", group.start, group.entries.len()).as_bytes());
+        for (_, generation, offset) in group.entries {
+            out.extend_from_slice(format!("{offset:010} {generation:05} n \n").as_bytes());
+        }
+    }
+
+    out.extend_from_slice(b"trailer\n");
+    let trailer = incremental_trailer_dict(reader, &objects)?;
+    serialize_dictionary(&trailer, &mut out);
+    out.extend_from_slice(b"\nstartxref\n");
+    out.extend_from_slice(format!("{xref_offset}\n").as_bytes());
+    out.extend_from_slice(b"%%EOF\n");
+
+    Ok(out)
+}
+
 /// Whole-document copy with a per-object MUTATION HOOK — the content-preserving
 /// base shared by the structural-write ops (rotate, optimize, encrypt, repair).
 ///
@@ -1421,6 +1499,77 @@ pub fn write_document_roundtrip(reader: &PdfReader) -> Result<Vec<u8>> {
 /// ORIGINAL (source) object number and a mutable handle, so an op can adjust
 /// specific objects (e.g. set `/Rotate` on a page) by their identity. `/Type
 /// /XRef` streams are dropped (the writer emits its own classic xref).
+struct XrefGroup<'a> {
+    start: u32,
+    entries: &'a [(u32, u16, usize)],
+}
+
+fn contiguous_xref_groups(entries: &[(u32, u16, usize)]) -> Vec<XrefGroup<'_>> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let mut groups = Vec::new();
+    let mut start_idx = 0usize;
+    for idx in 1..entries.len() {
+        if entries[idx].0 != entries[idx - 1].0 + 1 {
+            groups.push(XrefGroup {
+                start: entries[start_idx].0,
+                entries: &entries[start_idx..idx],
+            });
+            start_idx = idx;
+        }
+    }
+    groups.push(XrefGroup {
+        start: entries[start_idx].0,
+        entries: &entries[start_idx..],
+    });
+    groups
+}
+
+fn incremental_trailer_dict(
+    reader: &PdfReader,
+    changed_objects: &[IncrementalObject],
+) -> Result<PdfDictionary> {
+    let mut trailer = PdfDictionary::empty();
+    let max_changed = changed_objects
+        .iter()
+        .map(|obj| i64::from(obj.number))
+        .max()
+        .unwrap_or(0);
+    let existing_size = reader.size().unwrap_or(0);
+    trailer.insert(
+        "Size",
+        PdfObject::Integer(existing_size.max(max_changed + 1)),
+    );
+    let (root, root_generation) = reader.root_reference().ok_or_else(|| {
+        OxideError::MalformedPdf("incremental writer: trailer is missing /Root".to_string())
+    })?;
+    trailer.insert(
+        "Root",
+        PdfObject::Reference {
+            number: root,
+            generation: root_generation,
+        },
+    );
+    if let Some((info, generation)) = reader.info_reference() {
+        trailer.insert(
+            "Info",
+            PdfObject::Reference {
+                number: info,
+                generation,
+            },
+        );
+    }
+    if let Some(PdfObject::Array(id)) = reader.trailer().get("ID") {
+        trailer.insert("ID", PdfObject::Array(id.clone()));
+    }
+    if let Some(encrypt) = reader.trailer().get("Encrypt") {
+        trailer.insert("Encrypt", encrypt.clone());
+    }
+    trailer.insert("Prev", PdfObject::Integer(reader.startxref_offset() as i64));
+    Ok(trailer)
+}
+
 pub fn rewrite_document(
     reader: &PdfReader,
     mutate: impl FnMut(u32, &mut PdfObject),

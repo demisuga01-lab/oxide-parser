@@ -65,6 +65,7 @@ pub struct PdfReader {
     /// a given object stream is decoded.
     object_stream_cache: RwLock<ObjectStreamCache>,
     encryption: Option<EncryptionContext>,
+    startxref: usize,
 }
 
 impl PdfReader {
@@ -112,6 +113,7 @@ impl PdfReader {
             trailer,
             object_stream_cache: RwLock::new(HashMap::new()),
             encryption,
+            startxref,
         })
     }
 
@@ -141,6 +143,11 @@ impl PdfReader {
     /// it must use the raw bytes, never a re-serialization.
     pub fn file_bytes(&self) -> &[u8] {
         &self.data
+    }
+
+    /// Byte offset recorded by the latest `startxref` marker.
+    pub fn startxref_offset(&self) -> usize {
+        self.startxref
     }
 
     /// The raw, resolved `/Encrypt` dictionary, if the document is encrypted.
@@ -720,7 +727,7 @@ fn read_xref_chain(
         }
 
         if let Some(xref_stm) = section.xref_stm {
-            if visited.insert(xref_stm) {
+            if xref_stm != offset && !visited.contains(&xref_stm) {
                 let _ = read_xref_section(data, xref_stm, xref)?;
             }
         }
@@ -807,6 +814,8 @@ fn read_xref_section(
     let offset = skip_ws_and_comments(data, offset);
     if bytes_at(data, offset, b"xref") {
         read_classic_xref(data, offset, xref)
+    } else if let Ok(section) = read_xref_stream(data, offset, xref) {
+        Ok(section)
     } else if let Some(repaired) = nearby_classic_xref_offset(data, offset) {
         read_classic_xref(data, repaired, xref)
     } else {

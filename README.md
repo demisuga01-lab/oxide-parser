@@ -84,9 +84,12 @@ are available for encrypt, rotate, optimize, repair, and qpdf-validated
 linearization for the supported structural subset. New PDFs can be authored
 from scratch with `PdfBuilder` and `FlowDocument` (pages, text, vector graphics,
 images, whole TrueType font embedding, tables, and single-column flow layout;
-see `docs/authoring.md`). Decrypt-as-write, linearized object-stream packing,
-custom font subsetting, CFF/OpenType embedding, and advanced multi-column layout
-remain documented follow-ups.
+see `docs/authoring.md`). Existing PDFs can be edited additively with
+watermarks, headers/footers, overlays/underlays, image stamps, and append-only
+incremental updates that preserve the original byte prefix (see
+`docs/editing.md`). Decrypt-as-write, linearized object-stream packing, custom
+font subsetting, CFF/OpenType embedding, redaction/annotations/forms, and
+advanced multi-column layout remain documented follow-ups.
 
 All claims are reproducible via the benchmark in `extraction-benchmark/`.
 
