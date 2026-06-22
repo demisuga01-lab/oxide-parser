@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use oxide_engine::authoring::{PageSize, PdfBuilder};
 use oxide_engine::{
-    Color, FontFace, GraphicsStyle, ParagraphStyle, StandardFont, TextAlign, TextStyle,
+    AuthorPageSize, Color, FlowDocument, Margins, ParagraphStyle, StandardFont, TableBuilder,
+    TableColumn, TextAlign, TextStyle,
 };
 
 fn main() -> oxide_engine::Result<()> {
@@ -14,69 +14,73 @@ fn main() -> oxide_engine::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut doc = PdfBuilder::new();
-    doc.set_title("Oxide authored example")
+    let mut flow = FlowDocument::new(AuthorPageSize::LETTER, Margins::all(72.0));
+    flow.builder_mut()
+        .set_title("Oxide authored capstone")
         .set_author("Oxide PDF SDK")
         .set_subject("PDF authoring API smoke")
         .set_creator("oxide-engine examples/authoring.rs");
 
-    let title = TextStyle::standard(StandardFont::HelveticaBold, 24.0)
-        .fill(Color::device_rgb(0.08, 0.12, 0.18));
-    let body = TextStyle::standard(StandardFont::TimesRoman, 11.5);
-    let unicode =
-        TextStyle::new(FontFace::BuiltinUnicode, 12.0).fill(Color::device_rgb(0.0, 0.25, 0.5));
+    let custom_font = flow.builder_mut().register_font_bytes(
+        "LiberationSerifCapstone",
+        include_bytes!("../fonts/LiberationSerif-Regular.ttf").as_slice(),
+    )?;
+    let image = flow
+        .builder_mut()
+        .add_rgba_image(16, 12, sample_rgba_gradient(16, 12))?;
 
-    let page = doc.add_page(PageSize::LETTER);
-    page.draw_text("Oxide PDF Authoring", 72.0, 720.0, &title)?;
-    page.draw_paragraph(
-        "This page was created from scratch with PdfBuilder. Coordinates use native PDF user space: bottom-left origin, y-up.",
-        72.0,
-        680.0,
-        360.0,
+    let body = TextStyle::new(custom_font, 11.0).fill(Color::device_rgb(0.1, 0.12, 0.14));
+    let paragraph = ParagraphStyle::new()
+        .align(TextAlign::Left)
+        .line_height(1.28);
+
+    flow.add_heading("Oxide PDF Authoring", 1)?;
+    flow.add_paragraph(
+        "This capstone document was created from scratch with the authoring API. It combines flowing text, a custom embedded TrueType font, an RGBA image soft mask, vector drawing, and a table that can continue across pages.",
         &body,
-        &ParagraphStyle::new().align(TextAlign::Left),
+        &paragraph,
     )?;
-    page.draw_text(
-        "Unicode text via embedded Liberation Sans: cafe \u{03c0}",
-        72.0,
-        625.0,
-        &unicode,
-    )?;
-    page.draw_rounded_rect(
-        70.0,
-        575.0,
-        260.0,
-        32.0,
-        6.0,
-        &GraphicsStyle::fill_stroke(
-            Color::device_rgb(0.9, 0.94, 0.98),
-            Color::device_rgb(0.15, 0.25, 0.38),
-            1.2,
-        ),
-    );
-    page.draw_line(
-        72.0,
-        548.0,
-        420.0,
-        548.0,
-        &GraphicsStyle::stroke(Color::device_rgb(0.65, 0.08, 0.08), 2.0).dash(vec![8.0, 4.0], 0.0),
-    );
+    flow.add_image(image, 180.0, 96.0)?;
+    flow.add_spacer(28.0);
 
-    let page2 = doc.add_page(PageSize::A4.landscape());
-    page2.draw_text_from_top(
-        "Second page using top-left helper",
-        72.0,
-        72.0,
-        &TextStyle::standard(StandardFont::Courier, 12.0),
-    )?;
-    page2.draw_circle(
-        180.0,
-        300.0,
-        40.0,
-        &GraphicsStyle::fill(Color::device_rgb(0.2, 0.45, 0.75)),
-    );
+    let mut table = TableBuilder::new(vec![
+        TableColumn::new(96.0),
+        TableColumn::new(132.0),
+        TableColumn::new(168.0),
+    ])
+    .body_style(TextStyle::standard(StandardFont::Helvetica, 8.5))
+    .header_style(TextStyle::standard(StandardFont::HelveticaBold, 8.5));
+    table.set_header(["Section", "Owner", "Notes"]);
+    for idx in 0..24 {
+        table.add_row([
+            format!("Item {}", idx + 1),
+            if idx % 2 == 0 {
+                "SDK".to_string()
+            } else {
+                "QA".to_string()
+            },
+            "Wrapped table text validates row height, borders, fills, and repeated headers."
+                .to_string(),
+        ]);
+    }
+    flow.add_heading("Implementation Notes", 2)?;
+    flow.add_table(&table)?;
 
-    doc.save(&out)?;
+    flow.save(&out)?;
     println!("wrote {}", out.display());
     Ok(())
+}
+
+fn sample_rgba_gradient(width: u32, height: u32) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for y in 0..height {
+        for x in 0..width {
+            let r = (40 + x * 10).min(255) as u8;
+            let g = (80 + y * 12).min(255) as u8;
+            let b = 190u8;
+            let a = (90 + x * 8 + y * 6).min(255) as u8;
+            pixels.extend_from_slice(&[r, g, b, a]);
+        }
+    }
+    pixels
 }

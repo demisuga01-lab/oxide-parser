@@ -61,14 +61,17 @@ Margins can be attached to a page for layout helpers with
 `add_page_with_margins`, but primitive drawing APIs always accept explicit PDF
 coordinates.
 
-## Text
+## Text And Fonts
 
-Part 1 supports:
+The authoring API supports:
 
 - All PDF Standard-14 faces via `StandardFont`: Helvetica, Times, Courier,
   Symbol, and ZapfDingbats.
 - A bundled Unicode baseline via `FontFace::BuiltinUnicode`, embedded as a
   Type0 TrueType font with ToUnicode and CIDToGIDMap.
+- Document-registered TrueType fonts via `PdfBuilder::register_font_bytes`.
+  Custom fonts are embedded as whole Type0/CIDFontType2 fonts with Identity-H,
+  CIDToGIDMap, widths, and ToUnicode so authored text is extractable.
 - `draw_text`, `draw_text_line`, `draw_text_from_top`.
 - `wrap_text` and `draw_paragraph` with left, center, and right alignment.
 - Gray, RGB, and CMYK fill colors through the shared `Color` type.
@@ -76,11 +79,88 @@ Part 1 supports:
 Standard fonts use WinAnsi encoding. If text contains characters outside
 WinAnsi, use `TextStyle::unicode(...)` or `FontFace::BuiltinUnicode`.
 
+```rust
+let serif = doc.register_font_bytes(
+    "LiberationSerif",
+    include_bytes!("../crates/engine/fonts/LiberationSerif-Regular.ttf").as_slice(),
+)?;
+doc.add_page(PageSize::LETTER).draw_text(
+    "Unicode custom font: cafe \u{03c0}",
+    72.0,
+    720.0,
+    &TextStyle::new(serif, 12.0),
+)?;
+# Ok::<(), oxide_engine::OxideError>(())
+```
+
+Custom font subsetting is intentionally deferred. Current output is correct but
+larger because the complete TrueType program is embedded. CFF/OpenType
+`FontFile3` embedding is also a follow-up.
+
 ## Graphics
 
-Part 1 supports line, rectangle, rounded rectangle, circle, ellipse, polygon,
+The graphics API supports line, rectangle, rounded rectangle, circle, ellipse, polygon,
 and arbitrary paths. Each draw is wrapped in `q`/`Q` and can set stroke color,
 fill color, line width, line cap/join, and dash pattern through `GraphicsStyle`.
 
-Images, custom font loading/subsetting, tables, and higher-level layout helpers
-are planned for the next authoring prompt.
+## Images
+
+Register images on the document and place them on pages with `draw_image`.
+
+- JPEG bytes are embedded directly with `DCTDecode`; they are decoded only to
+  read dimensions and channel count.
+- PNG bytes and raw RGB/RGBA samples are embedded as Flate-compressed image
+  XObjects.
+- Gray/RGB alpha channels are emitted as grayscale `/SMask` image XObjects.
+
+```rust
+let jpeg = doc.add_jpeg_image(std::fs::read("photo.jpg")?)?;
+let rgba = doc.add_rgba_image(2, 2, vec![
+    255, 0, 0, 255, 0, 255, 0, 180,
+    0, 0, 255, 120, 255, 255, 0, 64,
+])?;
+
+let page = doc.add_page(PageSize::LETTER);
+page.draw_image(jpeg, 72.0, 560.0, 144.0, 96.0);
+page.draw_image(rgba, 240.0, 560.0, 96.0, 96.0);
+# Ok::<(), oxide_engine::OxideError>(())
+```
+
+## Tables
+
+`TableBuilder` renders fixed-width columns, optional header rows, borders,
+fills, padding, wrapped cell text, and per-column alignment. `draw_on_page`
+draws a table at an explicit top-left anchor; `FlowDocument::add_table` handles
+page breaks and repeats the header row on continuation pages.
+
+```rust
+use oxide_engine::{TableBuilder, TableColumn, TextAlign};
+
+let mut table = TableBuilder::new(vec![
+    TableColumn::new(96.0),
+    TableColumn::new(260.0).align(TextAlign::Left),
+]);
+table.set_header(["Metric", "Notes"]);
+table.add_row(["Throughput", "Wrapped text is measured from glyph widths."]);
+```
+
+## Flow Layout
+
+`FlowDocument` is a single-column layout helper over `PdfBuilder`. It tracks a
+cursor, wraps paragraphs, inserts headings, lists, images, tables, spacers, and
+creates new pages automatically when content reaches the bottom margin.
+
+```rust
+use oxide_engine::{FlowDocument, Margins};
+
+let mut flow = FlowDocument::new(PageSize::LETTER, Margins::all(72.0));
+flow.add_heading("Report", 1)?;
+flow.add_paragraph(
+    "Flowed text wraps within the page margins and continues on new pages.",
+    &TextStyle::standard(StandardFont::Helvetica, 11.0),
+    &ParagraphStyle::new(),
+)?;
+flow.add_table(&table)?;
+flow.save("flow-report.pdf")?;
+# Ok::<(), oxide_engine::OxideError>(())
+```

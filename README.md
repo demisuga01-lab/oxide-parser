@@ -82,10 +82,11 @@ extraction, OCR'd-text recovery where PyMuPDF/Poppler do nothing, embeddability
 layouts (Docling head-to-head not measured locally). Structural write operations
 are available for encrypt, rotate, optimize, repair, and qpdf-validated
 linearization for the supported structural subset. New PDFs can be authored
-from scratch with `PdfBuilder` (pages, text, and vector graphics; see
-`docs/authoring.md`). Decrypt-as-write, linearized object-stream packing, image
-authoring, custom font subsetting, and table/layout helpers remain documented
-follow-ups.
+from scratch with `PdfBuilder` and `FlowDocument` (pages, text, vector graphics,
+images, whole TrueType font embedding, tables, and single-column flow layout;
+see `docs/authoring.md`). Decrypt-as-write, linearized object-stream packing,
+custom font subsetting, CFF/OpenType embedding, and advanced multi-column layout
+remain documented follow-ups.
 
 All claims are reproducible via the benchmark in `extraction-benchmark/`.
 

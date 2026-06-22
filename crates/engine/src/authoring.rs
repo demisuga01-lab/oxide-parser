@@ -6,12 +6,15 @@
 //! convenient.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Cursor;
 use std::path::Path;
 
 use crate::content::{Color, ColorSpace, LineCap, LineDash, LineJoin};
 use crate::error::{OxideError, Result};
+use crate::filters::flate_encode;
 use crate::fonts::encoding::{zapf_dingbats_name_to_unicode, Encoding};
 use crate::fonts::glyph_list::glyph_name_to_unicode;
+use crate::images::decoder::{ImageDecoder, RawImage};
 use crate::object::{PdfDictionary, PdfObject};
 use crate::render::get_fallback_font;
 use crate::writer::{OutputObject, PdfWriter, WriterMode};
@@ -32,6 +35,8 @@ pub struct PdfBuilder {
     metadata: PdfMetadata,
     writer_mode: WriterMode,
     version: String,
+    custom_fonts: Vec<CustomFont>,
+    images: Vec<AuthoredImage>,
 }
 
 impl Default for PdfBuilder {
@@ -48,6 +53,8 @@ impl PdfBuilder {
             metadata: PdfMetadata::default(),
             writer_mode: WriterMode::XrefStreamWithObjStm,
             version: "1.7".to_string(),
+            custom_fonts: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -122,6 +129,135 @@ impl PdfBuilder {
         &mut self.pages
     }
 
+    /// Register a TrueType font program for authored text.
+    ///
+    /// The current authoring layer embeds the complete font program as a
+    /// Type0/CIDFontType2 font with Identity-H encoding and a ToUnicode CMap.
+    /// Font subsetting is deliberately left to the next size-optimization pass.
+    pub fn register_font_bytes(
+        &mut self,
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Result<FontFace> {
+        let bytes = bytes.into();
+        if bytes.is_empty() {
+            return Err(OxideError::MalformedPdf(
+                "authoring: custom font bytes are empty".to_string(),
+            ));
+        }
+        TrueTypeMetrics::parse(&bytes)?;
+        let id = CustomFontId(self.custom_fonts.len() as u32);
+        let base_name = sanitize_pdf_name(&name.into(), &format!("OxideCustomFont{}", id.0 + 1));
+        self.custom_fonts.push(CustomFont {
+            id,
+            base_name,
+            bytes,
+        });
+        Ok(FontFace::Custom(id))
+    }
+
+    /// Alias for [`Self::register_font_bytes`] that documents the supported
+    /// whole-font embedding format.
+    pub fn register_truetype_font_bytes(
+        &mut self,
+        name: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Result<FontFace> {
+        self.register_font_bytes(name, bytes)
+    }
+
+    /// Register a JPEG image XObject. The source JPEG bytes are embedded
+    /// directly with `DCTDecode`; they are decoded only to read dimensions and
+    /// color channel count.
+    pub fn add_jpeg_image(&mut self, bytes: impl Into<Vec<u8>>) -> Result<ImageHandle> {
+        let bytes = bytes.into();
+        let (_, width, height, channels) = ImageDecoder::decode_jpeg_with_info(&bytes)?;
+        let color_space = ImageColorSpace::from_channels(channels)?;
+        Ok(self.push_image(AuthoredImage {
+            width,
+            height,
+            color_space,
+            bits_per_component: 8,
+            data: bytes,
+            filter: ImageFilter::DctDecode,
+            smask: None,
+        }))
+    }
+
+    /// Register PNG bytes as an Image XObject. RGB/gray samples are Flate
+    /// compressed; alpha is split into a PDF soft mask.
+    pub fn add_png_image(&mut self, bytes: &[u8]) -> Result<ImageHandle> {
+        let decoded = decode_png_for_authoring(bytes)?;
+        self.add_raw_image(decoded)
+    }
+
+    /// Register interleaved RGB samples as a Flate-compressed Image XObject.
+    pub fn add_rgb_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<ImageHandle> {
+        self.add_raw_image(RawImage {
+            width,
+            height,
+            channels: 3,
+            bits_per_sample: 8,
+            pixels,
+        })
+    }
+
+    /// Register interleaved RGBA samples as a Flate-compressed Image XObject
+    /// with an `SMask` for alpha.
+    pub fn add_rgba_image(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<ImageHandle> {
+        self.add_raw_image(RawImage {
+            width,
+            height,
+            channels: 4,
+            bits_per_sample: 8,
+            pixels,
+        })
+    }
+
+    fn add_raw_image(&mut self, raw: RawImage) -> Result<ImageHandle> {
+        if !raw.is_valid() || raw.bits_per_sample != 8 {
+            return Err(OxideError::MalformedPdf(
+                "authoring: image samples must be non-empty 8-bit data".to_string(),
+            ));
+        }
+        let authored = authored_image_from_raw(raw)?;
+        Ok(self.push_image(authored))
+    }
+
+    fn push_image(&mut self, image: AuthoredImage) -> ImageHandle {
+        let handle = ImageHandle(self.images.len() as u32);
+        self.images.push(image);
+        handle
+    }
+
+    fn image(&self, handle: ImageHandle) -> Result<&AuthoredImage> {
+        self.images.get(handle.0 as usize).ok_or_else(|| {
+            OxideError::MalformedPdf(format!(
+                "authoring: image handle {} was not registered on this document",
+                handle.0
+            ))
+        })
+    }
+
+    fn custom_font(&self, id: CustomFontId) -> Result<&CustomFont> {
+        self.custom_fonts.get(id.0 as usize).ok_or_else(|| {
+            OxideError::MalformedPdf(format!(
+                "authoring: custom font handle {} was not registered on this document",
+                id.0
+            ))
+        })
+    }
+
     /// Serialize the authored document to PDF bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         if self.pages.is_empty() {
@@ -130,8 +266,9 @@ impl PdfBuilder {
             ));
         }
 
-        let font_plan = FontBuildPlan::from_pages(&self.pages)?;
-        let objects = AuthoredObjects::build(self, &font_plan)?;
+        let font_plan = FontBuildPlan::from_builder(self)?;
+        let image_plan = ImageBuildPlan::from_builder(self)?;
+        let objects = AuthoredObjects::build(self, &font_plan, &image_plan)?;
         PdfWriter::new(objects.objects, objects.catalog_number)
             .with_info(objects.info_number)
             .with_version(self.version.clone())
@@ -193,6 +330,95 @@ impl PdfMetadata {
             && self.keywords.is_none()
             && self.creator.is_none()
     }
+}
+
+/// Handle returned by [`PdfBuilder::add_jpeg_image`],
+/// [`PdfBuilder::add_png_image`], or raw image registration helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ImageHandle(u32);
+
+impl ImageHandle {
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// Handle for a document-registered custom font.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CustomFontId(u32);
+
+impl CustomFontId {
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CustomFont {
+    id: CustomFontId,
+    base_name: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageColorSpace {
+    DeviceGray,
+    DeviceRGB,
+    DeviceCMYK,
+}
+
+impl ImageColorSpace {
+    fn from_channels(channels: u8) -> Result<Self> {
+        match channels {
+            1 => Ok(Self::DeviceGray),
+            3 => Ok(Self::DeviceRGB),
+            4 => Ok(Self::DeviceCMYK),
+            _ => Err(OxideError::UnsupportedFeature(format!(
+                "authoring: unsupported image channel count {channels}"
+            ))),
+        }
+    }
+
+    fn pdf_name(self) -> &'static str {
+        match self {
+            Self::DeviceGray => "DeviceGray",
+            Self::DeviceRGB => "DeviceRGB",
+            Self::DeviceCMYK => "DeviceCMYK",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageFilter {
+    DctDecode,
+    FlateDecode,
+}
+
+impl ImageFilter {
+    fn pdf_name(self) -> &'static str {
+        match self {
+            Self::DctDecode => "DCTDecode",
+            Self::FlateDecode => "FlateDecode",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AuthoredImage {
+    width: u32,
+    height: u32,
+    color_space: ImageColorSpace,
+    bits_per_component: u8,
+    data: Vec<u8>,
+    filter: ImageFilter,
+    smask: Option<AuthoredSoftMask>,
+}
+
+#[derive(Debug, Clone)]
+struct AuthoredSoftMask {
+    width: u32,
+    height: u32,
+    data: Vec<u8>,
 }
 
 /// Page dimensions in PDF points.
@@ -522,6 +748,25 @@ impl PdfPageBuilder {
         self
     }
 
+    /// Place a registered image in the rectangle `(x, y, width, height)`.
+    pub fn draw_image(
+        &mut self,
+        image: ImageHandle,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    ) -> &mut Self {
+        self.commands.push(PageCommand::Image {
+            image,
+            x,
+            y,
+            width,
+            height,
+        });
+        self
+    }
+
     fn fonts_used(&self) -> Vec<FontFace> {
         let mut out = Vec::new();
         for command in &self.commands {
@@ -532,18 +777,30 @@ impl PdfPageBuilder {
         out
     }
 
-    fn unicode_chars_used(&self) -> Vec<char> {
-        let mut out = Vec::new();
-        let mut seen = BTreeSet::new();
+    fn unicode_chars_used_by_font(&self) -> HashMap<FontFace, Vec<char>> {
+        let mut out: HashMap<FontFace, Vec<char>> = HashMap::new();
+        let mut seen: HashMap<FontFace, BTreeSet<char>> = HashMap::new();
         for command in &self.commands {
             if let PageCommand::Text { text, style, .. } = command {
-                if style.font == FontFace::BuiltinUnicode {
+                if style.font.is_embedded_unicode() {
+                    let chars = out.entry(style.font).or_default();
+                    let seen_for_font = seen.entry(style.font).or_default();
                     for ch in text.chars() {
-                        if seen.insert(ch) {
-                            out.push(ch);
+                        if seen_for_font.insert(ch) {
+                            chars.push(ch);
                         }
                     }
                 }
+            }
+        }
+        out
+    }
+
+    fn images_used(&self) -> Vec<ImageHandle> {
+        let mut out = Vec::new();
+        for command in &self.commands {
+            if let PageCommand::Image { image, .. } = command {
+                push_unique_image(&mut out, *image);
             }
         }
         out
@@ -557,11 +814,19 @@ pub enum FontFace {
     /// Bundled Liberation Sans, embedded as a Type0 TrueType font with
     /// ToUnicode. This is the Part-1 Unicode authoring baseline.
     BuiltinUnicode,
+    /// Document-registered custom TrueType font, embedded whole as Type0.
+    Custom(CustomFontId),
 }
 
 impl Default for FontFace {
     fn default() -> Self {
         Self::Standard(StandardFont::Helvetica)
+    }
+}
+
+impl FontFace {
+    fn is_embedded_unicode(self) -> bool {
+        matches!(self, Self::BuiltinUnicode | Self::Custom(_))
     }
 }
 
@@ -652,6 +917,10 @@ impl TextStyle {
         Self::new(FontFace::BuiltinUnicode, size)
     }
 
+    pub fn custom(font: CustomFontId, size: f64) -> Self {
+        Self::new(FontFace::Custom(font), size)
+    }
+
     pub fn fill(mut self, color: Color) -> Self {
         self.fill = color;
         self
@@ -701,6 +970,519 @@ impl ParagraphStyle {
 
     fn line_height_points(self, font_size: f64) -> f64 {
         font_size * self.line_height.max(0.1)
+    }
+}
+
+/// One table column with fixed width in PDF points.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableColumn {
+    pub width: f64,
+    pub align: TextAlign,
+}
+
+impl TableColumn {
+    pub fn new(width: f64) -> Self {
+        Self {
+            width,
+            align: TextAlign::Left,
+        }
+    }
+
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.align = align;
+        self
+    }
+}
+
+/// Styling shared by authored tables.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableStyle {
+    pub border_color: Color,
+    pub header_fill: Color,
+    pub row_fill: Option<Color>,
+    pub padding: f64,
+    pub line_width: f64,
+    pub paragraph: ParagraphStyle,
+}
+
+impl Default for TableStyle {
+    fn default() -> Self {
+        Self {
+            border_color: Color::device_rgb(0.28, 0.32, 0.36),
+            header_fill: Color::device_rgb(0.9, 0.93, 0.96),
+            row_fill: None,
+            padding: 4.0,
+            line_width: 0.5,
+            paragraph: ParagraphStyle::new(),
+        }
+    }
+}
+
+impl TableStyle {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn padding(mut self, padding: f64) -> Self {
+        self.padding = padding.max(0.0);
+        self
+    }
+
+    pub fn border(mut self, color: Color, line_width: f64) -> Self {
+        self.border_color = color;
+        self.line_width = line_width.max(0.0);
+        self
+    }
+
+    pub fn header_fill(mut self, color: Color) -> Self {
+        self.header_fill = color;
+        self
+    }
+
+    pub fn row_fill(mut self, color: Option<Color>) -> Self {
+        self.row_fill = color;
+        self
+    }
+}
+
+/// A text cell in an authored table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableCell {
+    pub text: String,
+    pub style: Option<TextStyle>,
+    pub background: Option<Color>,
+    pub align: Option<TextAlign>,
+}
+
+impl TableCell {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            style: None,
+            background: None,
+            align: None,
+        }
+    }
+
+    pub fn style(mut self, style: TextStyle) -> Self {
+        self.style = Some(style);
+        self
+    }
+
+    pub fn background(mut self, color: Color) -> Self {
+        self.background = Some(color);
+        self
+    }
+
+    pub fn align(mut self, align: TextAlign) -> Self {
+        self.align = Some(align);
+        self
+    }
+}
+
+impl From<&str> for TableCell {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<String> for TableCell {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
+/// A table row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRow {
+    pub cells: Vec<TableCell>,
+}
+
+impl TableRow {
+    pub fn new(cells: Vec<TableCell>) -> Self {
+        Self { cells }
+    }
+}
+
+/// Fixed-column table renderer with wrapped text and repeatable headers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableBuilder {
+    columns: Vec<TableColumn>,
+    header: Option<TableRow>,
+    rows: Vec<TableRow>,
+    body_style: TextStyle,
+    header_style: TextStyle,
+    style: TableStyle,
+}
+
+impl TableBuilder {
+    pub fn new(columns: Vec<TableColumn>) -> Self {
+        Self {
+            columns,
+            header: None,
+            rows: Vec::new(),
+            body_style: TextStyle::standard(StandardFont::Helvetica, 9.0),
+            header_style: TextStyle::standard(StandardFont::HelveticaBold, 9.0),
+            style: TableStyle::default(),
+        }
+    }
+
+    pub fn body_style(mut self, style: TextStyle) -> Self {
+        self.body_style = style;
+        self
+    }
+
+    pub fn header_style(mut self, style: TextStyle) -> Self {
+        self.header_style = style;
+        self
+    }
+
+    pub fn style(mut self, style: TableStyle) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn set_header<I, C>(&mut self, cells: I) -> &mut Self
+    where
+        I: IntoIterator<Item = C>,
+        C: Into<TableCell>,
+    {
+        self.header = Some(TableRow::new(cells.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    pub fn add_row<I, C>(&mut self, cells: I) -> &mut Self
+    where
+        I: IntoIterator<Item = C>,
+        C: Into<TableCell>,
+    {
+        self.rows
+            .push(TableRow::new(cells.into_iter().map(Into::into).collect()));
+        self
+    }
+
+    pub fn rows(&self) -> &[TableRow] {
+        &self.rows
+    }
+
+    pub fn columns(&self) -> &[TableColumn] {
+        &self.columns
+    }
+
+    /// Draw the whole table on one page at a top-left anchor and return the
+    /// consumed height. Long tables should use [`FlowDocument::add_table`].
+    pub fn draw_on_page(&self, page: &mut PdfPageBuilder, x: f64, top_y: f64) -> Result<f64> {
+        let mut cursor = top_y;
+        if let Some(header) = &self.header {
+            let height = self.measure_row(page, header, true)?;
+            self.render_row(page, header, x, cursor, height, true)?;
+            cursor -= height;
+        }
+        for row in &self.rows {
+            let height = self.measure_row(page, row, false)?;
+            self.render_row(page, row, x, cursor, height, false)?;
+            cursor -= height;
+        }
+        Ok(top_y - cursor)
+    }
+
+    fn total_width(&self) -> f64 {
+        self.columns.iter().map(|col| col.width.max(0.0)).sum()
+    }
+
+    fn measure_row(&self, page: &PdfPageBuilder, row: &TableRow, header: bool) -> Result<f64> {
+        let mut height: f64 = 0.0;
+        for (idx, column) in self.columns.iter().enumerate() {
+            let cell = row.cells.get(idx);
+            let style = self.cell_style(cell, header);
+            let inner_width = (column.width - self.style.padding * 2.0).max(1.0);
+            let text = cell.map(|cell| cell.text.as_str()).unwrap_or("");
+            let line_count = page.wrap_text(text, inner_width, &style)?.len().max(1);
+            let line_height = self.style.paragraph.line_height_points(style.size);
+            height = height.max(line_count as f64 * line_height + self.style.padding * 2.0);
+        }
+        Ok(height.max(self.style.padding * 2.0 + self.body_style.size))
+    }
+
+    fn render_row(
+        &self,
+        page: &mut PdfPageBuilder,
+        row: &TableRow,
+        x: f64,
+        top_y: f64,
+        height: f64,
+        header: bool,
+    ) -> Result<()> {
+        let mut x_cursor = x;
+        for (idx, column) in self.columns.iter().enumerate() {
+            let cell = row.cells.get(idx);
+            let fill = cell
+                .and_then(|cell| cell.background.clone())
+                .or_else(|| header.then_some(self.style.header_fill.clone()))
+                .or_else(|| self.style.row_fill.clone());
+            page.draw_rect(
+                x_cursor,
+                top_y - height,
+                column.width,
+                height,
+                &GraphicsStyle::fill_stroke(
+                    fill.unwrap_or_else(|| Color::device_gray(1.0)),
+                    self.style.border_color.clone(),
+                    self.style.line_width,
+                ),
+            );
+
+            let style = self.cell_style(cell, header);
+            let align = cell.and_then(|cell| cell.align).unwrap_or(column.align);
+            let inner_width = (column.width - self.style.padding * 2.0).max(1.0);
+            let text = cell.map(|cell| cell.text.as_str()).unwrap_or("");
+            let lines = page.wrap_text(text, inner_width, &style)?;
+            let line_height = self.style.paragraph.line_height_points(style.size);
+            let mut baseline = top_y - self.style.padding - style.size;
+            for line in lines {
+                let text_width = page.text_width(&line, &style)?;
+                let text_x = match align {
+                    TextAlign::Left => x_cursor + self.style.padding,
+                    TextAlign::Center => {
+                        x_cursor + self.style.padding + (inner_width - text_width) / 2.0
+                    }
+                    TextAlign::Right => x_cursor + self.style.padding + inner_width - text_width,
+                };
+                page.draw_text(line, text_x, baseline, &style)?;
+                baseline -= line_height;
+            }
+            x_cursor += column.width;
+        }
+        Ok(())
+    }
+
+    fn cell_style(&self, cell: Option<&TableCell>, header: bool) -> TextStyle {
+        cell.and_then(|cell| cell.style.clone()).unwrap_or_else(|| {
+            if header {
+                self.header_style.clone()
+            } else {
+                self.body_style.clone()
+            }
+        })
+    }
+}
+
+/// Single-column layout helper that creates pages as content overflows.
+#[derive(Debug, Clone)]
+pub struct FlowDocument {
+    builder: PdfBuilder,
+    page_size: PageSize,
+    margins: Margins,
+    current_page: usize,
+    cursor_y: f64,
+}
+
+impl FlowDocument {
+    pub fn new(page_size: PageSize, margins: Margins) -> Self {
+        let mut builder = PdfBuilder::new();
+        builder.add_page_with_margins(page_size, margins);
+        Self {
+            builder,
+            page_size,
+            margins,
+            current_page: 0,
+            cursor_y: page_size.height - margins.top,
+        }
+    }
+
+    pub fn builder(&self) -> &PdfBuilder {
+        &self.builder
+    }
+
+    pub fn builder_mut(&mut self) -> &mut PdfBuilder {
+        &mut self.builder
+    }
+
+    pub fn into_builder(self) -> PdfBuilder {
+        self.builder
+    }
+
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.builder.save(path)
+    }
+
+    pub fn add_heading(&mut self, text: &str, level: u8) -> Result<&mut Self> {
+        let size = match level {
+            0 | 1 => 22.0,
+            2 => 16.0,
+            _ => 13.0,
+        };
+        let style = TextStyle::standard(StandardFont::HelveticaBold, size)
+            .fill(Color::device_rgb(0.08, 0.12, 0.16));
+        self.add_paragraph(
+            text,
+            &style,
+            &ParagraphStyle::new().line_height(if level <= 1 { 1.15 } else { 1.2 }),
+        )?;
+        self.add_spacer(if level <= 1 { 8.0 } else { 5.0 });
+        Ok(self)
+    }
+
+    pub fn add_paragraph(
+        &mut self,
+        text: &str,
+        style: &TextStyle,
+        paragraph: &ParagraphStyle,
+    ) -> Result<&mut Self> {
+        let width = self.content_width();
+        let lines = wrap_text(text, width, style)?;
+        let line_height = paragraph.line_height_points(style.size);
+        for line in lines {
+            self.ensure_space(line_height)?;
+            let text_width = text_width(&line, style)?;
+            let x = match paragraph.align {
+                TextAlign::Left => self.margins.left,
+                TextAlign::Center => self.margins.left + (width - text_width) / 2.0,
+                TextAlign::Right => self.margins.left + width - text_width,
+            };
+            let y = self.cursor_y;
+            self.current_page_mut().draw_text(line, x, y, style)?;
+            self.cursor_y -= line_height;
+        }
+        Ok(self)
+    }
+
+    pub fn add_list<I, S>(
+        &mut self,
+        items: I,
+        ordered: bool,
+        style: &TextStyle,
+        paragraph: &ParagraphStyle,
+    ) -> Result<&mut Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let base_left = self.margins.left;
+        let width = (self.content_width() - 18.0).max(1.0);
+        let line_height = paragraph.line_height_points(style.size);
+        for (idx, item) in items.into_iter().enumerate() {
+            let marker = if ordered {
+                format!("{}.", idx + 1)
+            } else {
+                "*".to_string()
+            };
+            let lines = wrap_text(item.as_ref(), width, style)?;
+            self.ensure_space(line_height)?;
+            let marker_y = self.cursor_y;
+            self.current_page_mut()
+                .draw_text(marker, base_left, marker_y, style)?;
+            for (line_idx, line) in lines.into_iter().enumerate() {
+                if line_idx > 0 {
+                    self.cursor_y -= line_height;
+                    self.ensure_space(line_height)?;
+                }
+                let line_y = self.cursor_y;
+                self.current_page_mut()
+                    .draw_text(line, base_left + 18.0, line_y, style)?;
+            }
+            self.cursor_y -= line_height;
+        }
+        Ok(self)
+    }
+
+    pub fn add_image(&mut self, image: ImageHandle, width: f64, height: f64) -> Result<&mut Self> {
+        self.builder.image(image)?;
+        self.ensure_space(height)?;
+        let x = self.margins.left;
+        let y = self.cursor_y - height;
+        self.current_page_mut()
+            .draw_image(image, x, y, width, height);
+        self.cursor_y = y;
+        Ok(self)
+    }
+
+    pub fn add_table(&mut self, table: &TableBuilder) -> Result<&mut Self> {
+        let x = self.margins.left;
+        let available_width = self.content_width();
+        if table.total_width() > available_width + 0.0001 {
+            return Err(OxideError::ResourceLimit(format!(
+                "authoring: table width {} exceeds flow content width {}",
+                fmt_num(table.total_width()),
+                fmt_num(available_width)
+            )));
+        }
+
+        let mut header_height = 0.0;
+        if let Some(header) = &table.header {
+            header_height = table.measure_row(self.current_page_ref(), header, true)?;
+            self.ensure_space(header_height)?;
+            let top = self.cursor_y;
+            table.render_row(self.current_page_mut(), header, x, top, header_height, true)?;
+            self.cursor_y -= header_height;
+        }
+
+        for row in &table.rows {
+            let row_height = table.measure_row(self.current_page_ref(), row, false)?;
+            if self.cursor_y - row_height < self.margins.bottom {
+                self.add_page_break();
+                if let Some(header) = &table.header {
+                    self.ensure_space(header_height)?;
+                    let top = self.cursor_y;
+                    table.render_row(
+                        self.current_page_mut(),
+                        header,
+                        x,
+                        top,
+                        header_height,
+                        true,
+                    )?;
+                    self.cursor_y -= header_height;
+                }
+            }
+            let top = self.cursor_y;
+            table.render_row(self.current_page_mut(), row, x, top, row_height, false)?;
+            self.cursor_y -= row_height;
+        }
+        Ok(self)
+    }
+
+    pub fn add_spacer(&mut self, height: f64) -> &mut Self {
+        let height = height.max(0.0);
+        if self.cursor_y - height < self.margins.bottom {
+            self.add_page_break();
+        } else {
+            self.cursor_y -= height;
+        }
+        self
+    }
+
+    pub fn add_page_break(&mut self) -> &mut Self {
+        self.builder
+            .add_page_with_margins(self.page_size, self.margins);
+        self.current_page = self.builder.pages.len() - 1;
+        self.cursor_y = self.page_size.height - self.margins.top;
+        self
+    }
+
+    fn ensure_space(&mut self, height: f64) -> Result<()> {
+        if height > self.page_size.height - self.margins.top - self.margins.bottom {
+            return Err(OxideError::ResourceLimit(format!(
+                "authoring: flow block height {} exceeds usable page height",
+                fmt_num(height)
+            )));
+        }
+        if self.cursor_y - height < self.margins.bottom {
+            self.add_page_break();
+        }
+        Ok(())
+    }
+
+    fn content_width(&self) -> f64 {
+        (self.page_size.width - self.margins.left - self.margins.right).max(1.0)
+    }
+
+    fn current_page_ref(&self) -> &PdfPageBuilder {
+        &self.builder.pages[self.current_page]
+    }
+
+    fn current_page_mut(&mut self) -> &mut PdfPageBuilder {
+        &mut self.builder.pages[self.current_page]
     }
 }
 
@@ -840,6 +1622,13 @@ enum PageCommand {
         path: PathBuilder,
         style: GraphicsStyle,
     },
+    Image {
+        image: ImageHandle,
+        x: f64,
+        y: f64,
+        width: f64,
+        height: f64,
+    },
 }
 
 struct AuthoredObjects {
@@ -849,7 +1638,11 @@ struct AuthoredObjects {
 }
 
 impl AuthoredObjects {
-    fn build(builder: &PdfBuilder, font_plan: &FontBuildPlan) -> Result<Self> {
+    fn build(
+        builder: &PdfBuilder,
+        font_plan: &FontBuildPlan,
+        image_plan: &ImageBuildPlan,
+    ) -> Result<Self> {
         let catalog_number = 1u32;
         let pages_number = 2u32;
         let page_count = builder.pages.len();
@@ -857,10 +1650,39 @@ impl AuthoredObjects {
         let content_start = page_start + page_count as u32;
         let mut next = content_start + page_count as u32;
 
+        let mut image_objects = Vec::new();
+        let mut image_refs = HashMap::new();
+        for handle in &image_plan.images {
+            let image = builder.image(*handle)?;
+            let smask_number = if image.smask.is_some() {
+                Some(alloc(&mut next))
+            } else {
+                None
+            };
+            let image_number = alloc(&mut next);
+            image_refs.insert(*handle, image_number);
+            if let (Some(number), Some(mask)) = (smask_number, image.smask.as_ref()) {
+                image_objects.push(OutputObject {
+                    number,
+                    object: PdfObject::Stream {
+                        dict: smask_image_dict(mask),
+                        raw: mask.data.clone(),
+                    },
+                });
+            }
+            image_objects.push(OutputObject {
+                number: image_number,
+                object: PdfObject::Stream {
+                    dict: authored_image_dict(image, smask_number),
+                    raw: image.data.clone(),
+                },
+            });
+        }
+
         let mut font_objects = Vec::new();
         let mut font_refs = HashMap::new();
         for font in &font_plan.fonts {
-            let built = build_font_objects(*font, &mut next, font_plan)?;
+            let built = build_font_objects(*font, builder, &mut next, font_plan)?;
             font_refs.insert(*font, built.top_object);
             font_objects.extend(built.objects);
         }
@@ -883,19 +1705,24 @@ impl AuthoredObjects {
             object: PdfObject::Dictionary(pages_tree_dict(page_start, page_count)),
         });
 
+        let resource_refs = PageResourceRefs {
+            font_plan,
+            font_refs: &font_refs,
+            image_plan,
+            image_refs: &image_refs,
+        };
+
         for (idx, page) in builder.pages.iter().enumerate() {
             let page_number = page_start + idx as u32;
             let content_number = content_start + idx as u32;
-            let content = build_content_stream(page, font_plan)?;
+            let content = build_content_stream(page, font_plan, image_plan)?;
             objects.push(OutputObject {
                 number: page_number,
                 object: PdfObject::Dictionary(page_dict(
                     pages_number,
                     content_number,
-                    page.size,
-                    page.fonts_used(),
-                    font_plan,
-                    &font_refs,
+                    page,
+                    &resource_refs,
                 )?),
             });
             objects.push(OutputObject {
@@ -907,6 +1734,7 @@ impl AuthoredObjects {
             });
         }
 
+        objects.extend(image_objects);
         objects.extend(font_objects);
         if let Some(number) = info_number {
             objects.push(OutputObject {
@@ -930,27 +1758,46 @@ struct BuiltFontObjects {
     objects: Vec<OutputObject>,
 }
 
+struct PageResourceRefs<'a> {
+    font_plan: &'a FontBuildPlan,
+    font_refs: &'a HashMap<FontFace, u32>,
+    image_plan: &'a ImageBuildPlan,
+    image_refs: &'a HashMap<ImageHandle, u32>,
+}
+
 #[derive(Debug)]
 struct FontBuildPlan {
     fonts: Vec<FontFace>,
     resource_names: HashMap<FontFace, String>,
-    unicode_cids: HashMap<char, u16>,
-    unicode_chars: Vec<char>,
+    embedded: HashMap<FontFace, EmbeddedFontPlan>,
+}
+
+#[derive(Debug, Clone)]
+struct EmbeddedFontPlan {
+    cids: HashMap<char, u16>,
+    chars: Vec<char>,
 }
 
 impl FontBuildPlan {
-    fn from_pages(pages: &[PdfPageBuilder]) -> Result<Self> {
+    fn from_builder(builder: &PdfBuilder) -> Result<Self> {
         let mut fonts = Vec::new();
-        let mut unicode_chars = Vec::new();
-        let mut unicode_seen = BTreeSet::new();
+        let mut chars_by_font: HashMap<FontFace, Vec<char>> = HashMap::new();
+        let mut seen_by_font: HashMap<FontFace, BTreeSet<char>> = HashMap::new();
 
-        for page in pages {
+        for page in &builder.pages {
             for font in page.fonts_used() {
+                if let FontFace::Custom(id) = font {
+                    builder.custom_font(id)?;
+                }
                 push_unique_font(&mut fonts, font);
             }
-            for ch in page.unicode_chars_used() {
-                if unicode_seen.insert(ch) {
-                    unicode_chars.push(ch);
+            for (font, chars) in page.unicode_chars_used_by_font() {
+                let out = chars_by_font.entry(font).or_default();
+                let seen = seen_by_font.entry(font).or_default();
+                for ch in chars {
+                    if seen.insert(ch) {
+                        out.push(ch);
+                    }
                 }
             }
         }
@@ -960,23 +1807,36 @@ impl FontBuildPlan {
             resource_names.insert(*font, format!("F{}", idx + 1));
         }
 
-        let mut unicode_cids = HashMap::new();
-        for (idx, ch) in unicode_chars.iter().enumerate() {
-            let cid = u16::try_from(idx + 1).map_err(|_| {
-                OxideError::ResourceLimit(
-                    "authoring: too many unique Unicode scalar values for one built-in font"
-                        .to_string(),
-                )
-            })?;
-            unicode_cids.insert(*ch, cid);
+        let mut embedded = HashMap::new();
+        for font in &fonts {
+            if !font.is_embedded_unicode() {
+                continue;
+            }
+            let chars = chars_by_font.remove(font).unwrap_or_default();
+            let mut cids = HashMap::new();
+            for (idx, ch) in chars.iter().enumerate() {
+                let cid = u16::try_from(idx + 1).map_err(|_| {
+                    OxideError::ResourceLimit(format!(
+                        "authoring: too many unique Unicode scalar values for font {font:?}"
+                    ))
+                })?;
+                cids.insert(*ch, cid);
+            }
+            embedded.insert(*font, EmbeddedFontPlan { cids, chars });
         }
 
         Ok(Self {
             fonts,
             resource_names,
-            unicode_cids,
-            unicode_chars,
+            embedded,
         })
+    }
+
+    #[cfg(test)]
+    fn from_pages(pages: &[PdfPageBuilder]) -> Result<Self> {
+        let mut builder = PdfBuilder::new();
+        builder.pages = pages.to_vec();
+        Self::from_builder(&builder)
     }
 
     fn resource_name(&self, font: FontFace) -> Result<&str> {
@@ -988,16 +1848,69 @@ impl FontBuildPlan {
             })
     }
 
-    fn cid_for(&self, ch: char) -> Result<u16> {
-        self.unicode_cids.get(&ch).copied().ok_or_else(|| {
-            OxideError::MalformedPdf(format!("authoring: Unicode character {ch:?} has no CID"))
+    fn embedded_plan(&self, font: FontFace) -> Result<&EmbeddedFontPlan> {
+        self.embedded.get(&font).ok_or_else(|| {
+            OxideError::MalformedPdf(format!("authoring: embedded font {font:?} was not planned"))
         })
+    }
+
+    fn cid_for(&self, font: FontFace, ch: char) -> Result<u16> {
+        self.embedded_plan(font)?
+            .cids
+            .get(&ch)
+            .copied()
+            .ok_or_else(|| {
+                OxideError::MalformedPdf(format!(
+                    "authoring: Unicode character {ch:?} has no CID for {font:?}"
+                ))
+            })
     }
 }
 
 fn push_unique_font(fonts: &mut Vec<FontFace>, font: FontFace) {
     if !fonts.contains(&font) {
         fonts.push(font);
+    }
+}
+
+#[derive(Debug)]
+struct ImageBuildPlan {
+    images: Vec<ImageHandle>,
+    resource_names: HashMap<ImageHandle, String>,
+}
+
+impl ImageBuildPlan {
+    fn from_builder(builder: &PdfBuilder) -> Result<Self> {
+        let mut images = Vec::new();
+        for page in &builder.pages {
+            for image in page.images_used() {
+                builder.image(image)?;
+                push_unique_image(&mut images, image);
+            }
+        }
+        let mut resource_names = HashMap::new();
+        for (idx, image) in images.iter().enumerate() {
+            resource_names.insert(*image, format!("Im{}", idx + 1));
+        }
+        Ok(Self {
+            images,
+            resource_names,
+        })
+    }
+
+    fn resource_name(&self, image: ImageHandle) -> Result<&str> {
+        self.resource_names
+            .get(&image)
+            .map(String::as_str)
+            .ok_or_else(|| {
+                OxideError::MalformedPdf("authoring: image was not registered".to_string())
+            })
+    }
+}
+
+fn push_unique_image(images: &mut Vec<ImageHandle>, image: ImageHandle) {
+    if !images.contains(&image) {
+        images.push(image);
     }
 }
 
@@ -1022,15 +1935,13 @@ fn pages_tree_dict(page_start: u32, page_count: usize) -> PdfDictionary {
 fn page_dict(
     parent: u32,
     contents: u32,
-    size: PageSize,
-    page_fonts: Vec<FontFace>,
-    plan: &FontBuildPlan,
-    font_refs: &HashMap<FontFace, u32>,
+    page: &PdfPageBuilder,
+    resource_refs: &PageResourceRefs<'_>,
 ) -> Result<PdfDictionary> {
     let mut fonts = PdfDictionary::empty();
-    for font in page_fonts {
-        let resource = plan.resource_name(font)?;
-        let Some(number) = font_refs.get(&font).copied() else {
+    for font in page.fonts_used() {
+        let resource = resource_refs.font_plan.resource_name(font)?;
+        let Some(number) = resource_refs.font_refs.get(&font).copied() else {
             return Err(OxideError::MalformedPdf(
                 "authoring: font object missing".to_string(),
             ));
@@ -1038,13 +1949,32 @@ fn page_dict(
         fonts.insert(resource, reference(number));
     }
 
+    let mut xobjects = PdfDictionary::empty();
+    for image in page.images_used() {
+        let resource = resource_refs.image_plan.resource_name(image)?;
+        let Some(number) = resource_refs.image_refs.get(&image).copied() else {
+            return Err(OxideError::MalformedPdf(
+                "authoring: image object missing".to_string(),
+            ));
+        };
+        xobjects.insert(resource, reference(number));
+    }
+
     let mut resources = PdfDictionary::empty();
-    resources.insert("Font", PdfObject::Dictionary(fonts));
+    if !fonts.is_empty() {
+        resources.insert("Font", PdfObject::Dictionary(fonts));
+    }
+    if !xobjects.is_empty() {
+        resources.insert("XObject", PdfObject::Dictionary(xobjects));
+    }
     resources.insert(
         "ProcSet",
         PdfObject::Array(vec![
             PdfObject::Name("PDF".to_string()),
             PdfObject::Name("Text".to_string()),
+            PdfObject::Name("ImageB".to_string()),
+            PdfObject::Name("ImageC".to_string()),
+            PdfObject::Name("ImageI".to_string()),
         ]),
     );
 
@@ -1056,8 +1986,8 @@ fn page_dict(
             PdfObject::Array(vec![
                 PdfObject::Integer(0),
                 PdfObject::Integer(0),
-                pdf_number(size.width),
-                pdf_number(size.height),
+                pdf_number(page.size.width),
+                pdf_number(page.size.height),
             ]),
         ),
         ("Resources", PdfObject::Dictionary(resources)),
@@ -1089,8 +2019,146 @@ fn info_dict(metadata: &PdfMetadata) -> PdfDictionary {
     info
 }
 
+fn authored_image_dict(image: &AuthoredImage, smask_number: Option<u32>) -> PdfDictionary {
+    let mut dict = dict(&[
+        ("Type", PdfObject::Name("XObject".to_string())),
+        ("Subtype", PdfObject::Name("Image".to_string())),
+        ("Width", PdfObject::Integer(i64::from(image.width))),
+        ("Height", PdfObject::Integer(i64::from(image.height))),
+        (
+            "ColorSpace",
+            PdfObject::Name(image.color_space.pdf_name().to_string()),
+        ),
+        (
+            "BitsPerComponent",
+            PdfObject::Integer(i64::from(image.bits_per_component)),
+        ),
+        (
+            "Filter",
+            PdfObject::Name(image.filter.pdf_name().to_string()),
+        ),
+    ]);
+    if let Some(number) = smask_number {
+        dict.insert("SMask", reference(number));
+    }
+    dict
+}
+
+fn smask_image_dict(mask: &AuthoredSoftMask) -> PdfDictionary {
+    dict(&[
+        ("Type", PdfObject::Name("XObject".to_string())),
+        ("Subtype", PdfObject::Name("Image".to_string())),
+        ("Width", PdfObject::Integer(i64::from(mask.width))),
+        ("Height", PdfObject::Integer(i64::from(mask.height))),
+        ("ColorSpace", PdfObject::Name("DeviceGray".to_string())),
+        ("BitsPerComponent", PdfObject::Integer(8)),
+        ("Filter", PdfObject::Name("FlateDecode".to_string())),
+    ])
+}
+
+fn authored_image_from_raw(raw: RawImage) -> Result<AuthoredImage> {
+    let expected = raw.byte_count();
+    if raw.pixels.len() != expected {
+        return Err(OxideError::MalformedPdf(format!(
+            "authoring: image data has {} bytes but expected {expected}",
+            raw.pixels.len()
+        )));
+    }
+
+    let (samples, color_space, smask) = match raw.channels {
+        1 => (raw.pixels, ImageColorSpace::DeviceGray, None),
+        2 => {
+            let mut samples = Vec::with_capacity(raw.pixel_count());
+            let mut alpha = Vec::with_capacity(raw.pixel_count());
+            for px in raw.pixels.chunks_exact(2) {
+                samples.push(px[0]);
+                alpha.push(px[1]);
+            }
+            (
+                samples,
+                ImageColorSpace::DeviceGray,
+                Some(AuthoredSoftMask {
+                    width: raw.width,
+                    height: raw.height,
+                    data: flate_encode(&alpha, 9),
+                }),
+            )
+        }
+        3 => (raw.pixels, ImageColorSpace::DeviceRGB, None),
+        4 => {
+            let mut samples = Vec::with_capacity(raw.pixel_count() * 3);
+            let mut alpha = Vec::with_capacity(raw.pixel_count());
+            for px in raw.pixels.chunks_exact(4) {
+                samples.extend_from_slice(&px[..3]);
+                alpha.push(px[3]);
+            }
+            (
+                samples,
+                ImageColorSpace::DeviceRGB,
+                Some(AuthoredSoftMask {
+                    width: raw.width,
+                    height: raw.height,
+                    data: flate_encode(&alpha, 9),
+                }),
+            )
+        }
+        channels => {
+            return Err(OxideError::UnsupportedFeature(format!(
+                "authoring: unsupported raw image channel count {channels}"
+            )))
+        }
+    };
+
+    Ok(AuthoredImage {
+        width: raw.width,
+        height: raw.height,
+        color_space,
+        bits_per_component: 8,
+        data: flate_encode(&samples, 9),
+        filter: ImageFilter::FlateDecode,
+        smask,
+    })
+}
+
+fn decode_png_for_authoring(bytes: &[u8]) -> Result<RawImage> {
+    let mut decoder = png::Decoder::new(Cursor::new(bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|err| OxideError::MalformedPdf(format!("authoring: cannot read PNG: {err}")))?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|err| OxideError::MalformedPdf(format!("authoring: cannot decode PNG: {err}")))?;
+    if info.bit_depth != png::BitDepth::Eight {
+        return Err(OxideError::UnsupportedFeature(format!(
+            "authoring: PNG bit depth {:?} is not supported after expansion",
+            info.bit_depth
+        )));
+    }
+    let channels = match info.color_type {
+        png::ColorType::Grayscale => 1,
+        png::ColorType::GrayscaleAlpha => 2,
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        png::ColorType::Indexed => {
+            return Err(OxideError::UnsupportedFeature(
+                "authoring: indexed PNG did not expand to samples".to_string(),
+            ))
+        }
+    };
+    Ok(RawImage {
+        width: info.width,
+        height: info.height,
+        channels,
+        bits_per_sample: 8,
+        pixels: buf[..info.buffer_size()].to_vec(),
+    })
+}
+
 fn build_font_objects(
     font: FontFace,
+    builder: &PdfBuilder,
     next: &mut u32,
     plan: &FontBuildPlan,
 ) -> Result<BuiltFontObjects> {
@@ -1105,7 +2173,18 @@ fn build_font_objects(
                 }],
             })
         }
-        FontFace::BuiltinUnicode => build_builtin_unicode_font(next, plan),
+        FontFace::BuiltinUnicode => build_embedded_type0_font(
+            next,
+            font,
+            BUILTIN_UNICODE_RESOURCE_NAME,
+            builtin_unicode_font_bytes()?,
+            plan,
+        ),
+        FontFace::Custom(id) => {
+            let custom = builder.custom_font(id)?;
+            debug_assert_eq!(custom.id, id);
+            build_embedded_type0_font(next, font, &custom.base_name, &custom.bytes, plan)
+        }
     }
 }
 
@@ -1131,7 +2210,13 @@ fn standard_font_dict(font: StandardFont) -> Result<PdfDictionary> {
     Ok(font_dict)
 }
 
-fn build_builtin_unicode_font(next: &mut u32, plan: &FontBuildPlan) -> Result<BuiltFontObjects> {
+fn build_embedded_type0_font(
+    next: &mut u32,
+    font: FontFace,
+    base_name: &str,
+    font_bytes: &[u8],
+    plan: &FontBuildPlan,
+) -> Result<BuiltFontObjects> {
     let type0_number = alloc(next);
     let descendant_number = alloc(next);
     let descriptor_number = alloc(next);
@@ -1139,8 +2224,8 @@ fn build_builtin_unicode_font(next: &mut u32, plan: &FontBuildPlan) -> Result<Bu
     let to_unicode_number = alloc(next);
     let cid_to_gid_number = alloc(next);
 
-    let font_bytes = builtin_unicode_font_bytes()?;
     let metrics = TrueTypeMetrics::parse(font_bytes)?;
+    let cmap_name = format!("{base_name}ToUnicode");
 
     let mut objects = Vec::new();
     objects.push(OutputObject {
@@ -1148,10 +2233,7 @@ fn build_builtin_unicode_font(next: &mut u32, plan: &FontBuildPlan) -> Result<Bu
         object: PdfObject::Dictionary(dict(&[
             ("Type", PdfObject::Name("Font".to_string())),
             ("Subtype", PdfObject::Name("Type0".to_string())),
-            (
-                "BaseFont",
-                PdfObject::Name(BUILTIN_UNICODE_RESOURCE_NAME.to_string()),
-            ),
+            ("BaseFont", PdfObject::Name(base_name.to_string())),
             ("Encoding", PdfObject::Name("Identity-H".to_string())),
             (
                 "DescendantFonts",
@@ -1164,15 +2246,17 @@ fn build_builtin_unicode_font(next: &mut u32, plan: &FontBuildPlan) -> Result<Bu
     objects.push(OutputObject {
         number: descendant_number,
         object: PdfObject::Dictionary(cid_font_dict(
+            base_name,
             descriptor_number,
             cid_to_gid_number,
+            font,
             plan,
             &metrics,
         )?),
     });
     objects.push(OutputObject {
         number: descriptor_number,
-        object: PdfObject::Dictionary(font_descriptor_dict(font_file_number, &metrics)),
+        object: PdfObject::Dictionary(font_descriptor_dict(base_name, font_file_number, &metrics)),
     });
 
     let mut font_file_dict = PdfDictionary::empty();
@@ -1189,14 +2273,14 @@ fn build_builtin_unicode_font(next: &mut u32, plan: &FontBuildPlan) -> Result<Bu
         number: to_unicode_number,
         object: PdfObject::Stream {
             dict: PdfDictionary::empty(),
-            raw: build_to_unicode_cmap(plan),
+            raw: build_to_unicode_cmap(font, plan, &cmap_name)?,
         },
     });
     objects.push(OutputObject {
         number: cid_to_gid_number,
         object: PdfObject::Stream {
             dict: PdfDictionary::empty(),
-            raw: build_cid_to_gid_map(plan, &metrics),
+            raw: build_cid_to_gid_map(font, plan, &metrics)?,
         },
     });
 
@@ -1207,19 +2291,18 @@ fn build_builtin_unicode_font(next: &mut u32, plan: &FontBuildPlan) -> Result<Bu
 }
 
 fn cid_font_dict(
+    base_name: &str,
     descriptor_number: u32,
     cid_to_gid_number: u32,
+    font: FontFace,
     plan: &FontBuildPlan,
     metrics: &TrueTypeMetrics,
 ) -> Result<PdfDictionary> {
-    let widths = unicode_width_array(plan, metrics)?;
+    let widths = unicode_width_array(font, plan, metrics)?;
     Ok(dict(&[
         ("Type", PdfObject::Name("Font".to_string())),
         ("Subtype", PdfObject::Name("CIDFontType2".to_string())),
-        (
-            "BaseFont",
-            PdfObject::Name(BUILTIN_UNICODE_RESOURCE_NAME.to_string()),
-        ),
+        ("BaseFont", PdfObject::Name(base_name.to_string())),
         (
             "CIDSystemInfo",
             PdfObject::Dictionary(dict(&[
@@ -1235,13 +2318,14 @@ fn cid_font_dict(
     ]))
 }
 
-fn font_descriptor_dict(font_file_number: u32, metrics: &TrueTypeMetrics) -> PdfDictionary {
+fn font_descriptor_dict(
+    base_name: &str,
+    font_file_number: u32,
+    metrics: &TrueTypeMetrics,
+) -> PdfDictionary {
     dict(&[
         ("Type", PdfObject::Name("FontDescriptor".to_string())),
-        (
-            "FontName",
-            PdfObject::Name(BUILTIN_UNICODE_RESOURCE_NAME.to_string()),
-        ),
+        ("FontName", PdfObject::Name(base_name.to_string())),
         ("Flags", PdfObject::Integer(32)),
         (
             "FontBBox",
@@ -1256,17 +2340,23 @@ fn font_descriptor_dict(font_file_number: u32, metrics: &TrueTypeMetrics) -> Pdf
     ])
 }
 
-fn unicode_width_array(plan: &FontBuildPlan, metrics: &TrueTypeMetrics) -> Result<Vec<PdfObject>> {
-    if plan.unicode_chars.is_empty() {
+fn unicode_width_array(
+    font: FontFace,
+    plan: &FontBuildPlan,
+    metrics: &TrueTypeMetrics,
+) -> Result<Vec<PdfObject>> {
+    let embedded = plan.embedded_plan(font)?;
+    if embedded.chars.is_empty() {
         return Ok(Vec::new());
     }
-    let mut items = Vec::with_capacity(plan.unicode_chars.len() + 1);
+    let mut items = Vec::with_capacity(embedded.chars.len() + 1);
     items.push(PdfObject::Integer(1));
     let widths = plan
-        .unicode_chars
+        .embedded_plan(font)?
+        .chars
         .iter()
         .map(|ch| {
-            let cid = plan.cid_for(*ch)?;
+            let cid = plan.cid_for(font, *ch)?;
             let gid = metrics.glyph_id(*ch);
             let width = metrics.glyph_width_by_gid(gid);
             debug_assert!(cid > 0);
@@ -1277,40 +2367,50 @@ fn unicode_width_array(plan: &FontBuildPlan, metrics: &TrueTypeMetrics) -> Resul
     Ok(items)
 }
 
-fn build_to_unicode_cmap(plan: &FontBuildPlan) -> Vec<u8> {
+fn build_to_unicode_cmap(font: FontFace, plan: &FontBuildPlan, cmap_name: &str) -> Result<Vec<u8>> {
+    let embedded = plan.embedded_plan(font)?;
     let mut out = String::new();
     out.push_str("/CIDInit /ProcSet findresource begin\n");
     out.push_str("12 dict begin\nbegincmap\n");
     out.push_str("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
-    out.push_str("/CMapName /OxideUnicode def\n/CMapType 2 def\n");
+    out.push_str(&format!("/CMapName /{cmap_name} def\n/CMapType 2 def\n"));
     out.push_str("1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
 
-    for chunk in plan.unicode_chars.chunks(100) {
+    for chunk in embedded.chars.chunks(100) {
         out.push_str(&format!("{} beginbfchar\n", chunk.len()));
         for ch in chunk {
-            let cid = plan.unicode_cids[ch];
+            let cid = embedded.cids[ch];
             out.push_str(&format!("<{cid:04X}> <{}>\n", utf16be_hex_for_char(*ch)));
         }
         out.push_str("endbfchar\n");
     }
 
     out.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
-    out.into_bytes()
+    Ok(out.into_bytes())
 }
 
-fn build_cid_to_gid_map(plan: &FontBuildPlan, metrics: &TrueTypeMetrics) -> Vec<u8> {
-    let max_cid = plan.unicode_cids.values().copied().max().unwrap_or(0);
+fn build_cid_to_gid_map(
+    font: FontFace,
+    plan: &FontBuildPlan,
+    metrics: &TrueTypeMetrics,
+) -> Result<Vec<u8>> {
+    let embedded = plan.embedded_plan(font)?;
+    let max_cid = embedded.cids.values().copied().max().unwrap_or(0);
     let mut bytes = vec![0u8; (usize::from(max_cid) + 1) * 2];
-    for ch in &plan.unicode_chars {
-        let cid = plan.unicode_cids[ch];
+    for ch in &embedded.chars {
+        let cid = embedded.cids[ch];
         let gid = metrics.glyph_id(*ch);
         let offset = usize::from(cid) * 2;
         bytes[offset..offset + 2].copy_from_slice(&gid.to_be_bytes());
     }
-    bytes
+    Ok(bytes)
 }
 
-fn build_content_stream(page: &PdfPageBuilder, plan: &FontBuildPlan) -> Result<Vec<u8>> {
+fn build_content_stream(
+    page: &PdfPageBuilder,
+    plan: &FontBuildPlan,
+    image_plan: &ImageBuildPlan,
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     for command in &page.commands {
         match command {
@@ -1342,6 +2442,15 @@ fn build_content_stream(page: &PdfPageBuilder, plan: &FontBuildPlan) -> Result<V
                 write_path(&mut out, path);
                 out.extend_from_slice(format!("{}\nQ\n", paint_operator(style)).as_bytes());
             }
+            PageCommand::Image {
+                image,
+                x,
+                y,
+                width,
+                height,
+            } => {
+                write_image_command(&mut out, *image, *x, *y, *width, *height, image_plan)?;
+            }
         }
     }
     Ok(out)
@@ -1367,6 +2476,30 @@ fn write_text_command(
             fmt_num(x),
             fmt_num(y),
             hex_string(&encoded)
+        )
+        .as_bytes(),
+    );
+    Ok(())
+}
+
+fn write_image_command(
+    out: &mut Vec<u8>,
+    image: ImageHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    image_plan: &ImageBuildPlan,
+) -> Result<()> {
+    let resource = image_plan.resource_name(image)?;
+    out.extend_from_slice(
+        format!(
+            "q\n{} 0 0 {} {} {} cm\n/{} Do\nQ\n",
+            fmt_num(width),
+            fmt_num(height),
+            fmt_num(x),
+            fmt_num(y),
+            resource
         )
         .as_bytes(),
     );
@@ -1494,10 +2627,10 @@ fn encode_text_for_font(text: &str, font: FontFace, plan: &FontBuildPlan) -> Res
                 })
             })
             .collect(),
-        FontFace::BuiltinUnicode => {
+        FontFace::BuiltinUnicode | FontFace::Custom(_) => {
             let mut bytes = Vec::with_capacity(text.len() * 2);
             for ch in text.chars() {
-                let cid = plan.cid_for(ch)?;
+                let cid = plan.cid_for(font, ch)?;
                 bytes.extend_from_slice(&cid.to_be_bytes());
             }
             Ok(bytes)
@@ -1515,6 +2648,10 @@ fn text_width(text: &str, style: &TextStyle) -> Result<f64> {
             .into_iter()
             .sum::<f64>(),
         FontFace::BuiltinUnicode => {
+            let metrics = TrueTypeMetrics::parse(builtin_unicode_font_bytes()?)?;
+            text.chars().map(|ch| metrics.glyph_width(ch)).sum::<f64>()
+        }
+        FontFace::Custom(_) => {
             let metrics = TrueTypeMetrics::parse(builtin_unicode_font_bytes()?)?;
             text.chars().map(|ch| metrics.glyph_width(ch)).sum::<f64>()
         }
@@ -1799,6 +2936,20 @@ fn pdf_text_string(value: &str) -> Vec<u8> {
     bytes
 }
 
+fn sanitize_pdf_name(value: &str, fallback: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1830,7 +2981,11 @@ mod tests {
         );
 
         let plan = FontBuildPlan::from_pages(&[page.clone()]).unwrap();
-        let content = build_content_stream(&page, &plan).unwrap();
+        let image_plan = ImageBuildPlan {
+            images: Vec::new(),
+            resource_names: HashMap::new(),
+        };
+        let content = build_content_stream(&page, &plan, &image_plan).unwrap();
         let ops = ContentParser::parse(&content).unwrap();
         let names: Vec<_> = ops.iter().map(|op| op.operator.as_str()).collect();
         assert!(names.windows(2).any(|pair| pair == ["BT", "Tf"]));
@@ -1912,7 +3067,12 @@ mod tests {
         assert!(lines.len() >= 2);
 
         let plan = FontBuildPlan::from_pages(&[page.clone()]).unwrap();
-        let content = String::from_utf8(build_content_stream(&page, &plan).unwrap()).unwrap();
+        let image_plan = ImageBuildPlan {
+            images: Vec::new(),
+            resource_names: HashMap::new(),
+        };
+        let content =
+            String::from_utf8(build_content_stream(&page, &plan, &image_plan).unwrap()).unwrap();
         assert!(
             content.contains(" Td <"),
             "paragraph should emit positioned text: {content}"

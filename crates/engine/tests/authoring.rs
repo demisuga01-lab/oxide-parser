@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use oxide_engine::authoring::{PageSize, PdfBuilder};
+use oxide_engine::authoring::{FlowDocument, PageSize, PdfBuilder, TableBuilder, TableColumn};
 use oxide_engine::{
     Color, ContentEngine, FontFace, GraphicsStyle, ParagraphStyle, StandardFont, TextAlign,
     TextStyle, WriterMode,
@@ -106,6 +106,95 @@ fn authored_document_is_deterministic_across_writer_modes() {
 }
 
 #[test]
+fn authored_images_embed_jpeg_passthrough_and_png_alpha() {
+    let mut doc = PdfBuilder::new();
+    let jpeg = doc.add_jpeg_image(test_jpeg()).unwrap();
+    let png = doc.add_png_image(&test_rgba_png()).unwrap();
+    let page = doc.add_page(PageSize::LETTER);
+    page.draw_image(jpeg, 72.0, 620.0, 72.0, 72.0);
+    page.draw_image(png, 160.0, 620.0, 72.0, 72.0);
+
+    let bytes = doc.to_bytes().unwrap();
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(pdf.contains("/DCTDecode"), "JPEG must stay DCT encoded");
+    assert!(pdf.contains("/SMask"), "RGBA PNG must emit a soft mask");
+
+    let engine = ContentEngine::open_bytes(bytes).expect("open image pdf");
+    assert_eq!(engine.page_count().unwrap(), 1);
+    let png = engine.render_page_png_fast(1, 72).unwrap();
+    assert_png_has_non_white_pixels(&png, 100);
+}
+
+#[test]
+fn custom_truetype_font_embeds_and_extracts_unicode() {
+    let mut doc = PdfBuilder::new();
+    let custom = doc
+        .register_font_bytes(
+            "LiberationSerifPrompt4",
+            include_bytes!("../fonts/LiberationSerif-Regular.ttf").as_slice(),
+        )
+        .unwrap();
+    doc.add_page(PageSize::LETTER)
+        .draw_text(
+            "Custom font: cafe \u{03c0}",
+            72.0,
+            720.0,
+            &TextStyle::new(custom, 14.0),
+        )
+        .unwrap();
+
+    let bytes = doc.to_bytes().unwrap();
+    let engine = ContentEngine::open_bytes(bytes).expect("open custom font pdf");
+    let text = engine.get_page_text(1).unwrap();
+    assert!(text.contains("Custom font: cafe \u{03c0}"), "{text}");
+    let png = engine.render_page_png_fast(1, 72).unwrap();
+    assert_png_has_non_white_pixels(&png, 40);
+}
+
+#[test]
+fn flow_layout_page_breaks_table_and_repeats_header() {
+    let mut flow = FlowDocument::new(
+        PageSize::custom(300.0, 220.0),
+        oxide_engine::Margins::all(24.0),
+    );
+    flow.builder_mut().set_title("Flow table smoke");
+    flow.add_heading("Flow report", 1).unwrap();
+    flow.add_paragraph(
+        "A compact flow document should create pages as table rows overflow.",
+        &TextStyle::standard(StandardFont::Helvetica, 9.0),
+        &ParagraphStyle::new(),
+    )
+    .unwrap();
+
+    let mut table = TableBuilder::new(vec![
+        TableColumn::new(76.0),
+        TableColumn::new(172.0).align(TextAlign::Left),
+    ]);
+    table.set_header(["Metric", "Notes"]);
+    for idx in 0..14 {
+        table.add_row([
+            format!("Row {}", idx + 1),
+            "This row wraps into more than one line to exercise row height measurement."
+                .to_string(),
+        ]);
+    }
+    flow.add_table(&table).unwrap();
+
+    let bytes = flow.into_builder().to_bytes().unwrap();
+    let engine = ContentEngine::open_bytes(bytes).expect("open flow pdf");
+    assert!(engine.page_count().unwrap() > 1);
+
+    let mut header_count = 0;
+    for page in 1..=engine.page_count().unwrap() {
+        let text = engine.get_page_text(page).unwrap();
+        if text.contains("Metric") {
+            header_count += 1;
+        }
+    }
+    assert!(header_count > 1, "header should repeat after page breaks");
+}
+
+#[test]
 fn standard_font_rejects_unencodable_unicode() {
     let mut doc = PdfBuilder::new();
     let err = doc
@@ -121,6 +210,30 @@ fn standard_font_rejects_unencodable_unicode() {
         err.to_string().contains("BuiltinUnicode"),
         "error should point users to Unicode font: {err}"
     );
+}
+
+fn test_jpeg() -> Vec<u8> {
+    let pixels = [220, 30, 40, 40, 180, 70, 40, 70, 220, 250, 220, 40];
+    let mut out = Vec::new();
+    jpeg_encoder::Encoder::new(&mut out, 90)
+        .encode(&pixels, 2, 2, jpeg_encoder::ColorType::Rgb)
+        .unwrap();
+    out
+}
+
+fn test_rgba_png() -> Vec<u8> {
+    let pixels = [
+        255, 0, 0, 255, 0, 120, 255, 160, 0, 160, 60, 160, 255, 230, 0, 64,
+    ];
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&pixels).unwrap();
+    }
+    out
 }
 
 fn assert_png_has_non_white_pixels(bytes: &[u8], min: usize) {

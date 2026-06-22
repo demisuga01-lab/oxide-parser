@@ -107,8 +107,10 @@ pub use attachments::{
     extract_attachment, list_attachments, sanitize_filename, Attachment, AttachmentSource,
 };
 pub use authoring::{
-    FontFace, GraphicsStyle, Margins, PageSize as AuthorPageSize, ParagraphStyle, PathBuilder,
-    PdfBuilder, PdfMetadata, PdfPageBuilder, StandardFont, TextAlign, TextStyle,
+    CustomFontId, FlowDocument, FontFace, GraphicsStyle, ImageHandle, Margins,
+    PageSize as AuthorPageSize, ParagraphStyle, PathBuilder, PdfBuilder, PdfMetadata,
+    PdfPageBuilder, StandardFont, TableBuilder, TableCell, TableColumn, TableRow, TableStyle,
+    TextAlign, TextStyle,
 };
 pub use cancel::CancelToken;
 pub use chunk::{chunk, estimate_tokens, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
@@ -224,8 +226,10 @@ pub use writer::{
 /// server, or any non-Rust binding.
 pub mod prelude {
     pub use crate::authoring::{
-        FontFace, GraphicsStyle, Margins, PageSize as AuthorPageSize, ParagraphStyle, PathBuilder,
-        PdfBuilder, PdfMetadata, PdfPageBuilder, StandardFont, TextAlign, TextStyle,
+        CustomFontId, FlowDocument, FontFace, GraphicsStyle, ImageHandle, Margins,
+        PageSize as AuthorPageSize, ParagraphStyle, PathBuilder, PdfBuilder, PdfMetadata,
+        PdfPageBuilder, StandardFont, TableBuilder, TableCell, TableColumn, TableRow, TableStyle,
+        TextAlign, TextStyle,
     };
     pub use crate::chunk::{chunk, Chunk, ChunkOptions, ChunkSet, CHUNK_SCHEMA_VERSION};
     pub use crate::engine::ContentEngine;
