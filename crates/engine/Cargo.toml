@@ -3,6 +3,12 @@ name = "oxide-engine"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Pure-Rust PDF parsing, rendering, authoring, editing, compliance, and signing engine."
+repository = "https://github.com/oxide-pdf/oxide"
+documentation = "https://docs.rs/oxide-engine"
+homepage = "https://github.com/oxide-pdf/oxide"
+keywords = ["pdf", "parser", "rendering", "documents", "signatures"]
+categories = ["parser-implementations", "rendering", "text-processing"]
 include = ["src/**/*", "fonts/*.ttf", "fonts/LICENSE-*.txt", "fonts/README.md"]
 
 [dependencies]
@@ -37,6 +43,17 @@ der = { version = "0.7", features = ["oid"] }
 spki = "0.7"
 
 [features]
+default = ["parse", "render", "structural"]
+full = ["parse", "extract", "render", "create", "edit", "structural", "sign", "pdfa", "ocr"]
+parse = []
+extract = ["parse"]
+render = ["parse"]
+create = []
+edit = ["create", "structural"]
+structural = []
+sign = []
+pdfa = []
+ocr = []
 # Exposes internal parse/decode entry points (stream filters, etc.) as a
 # stable `pub` surface for the out-of-tree `fuzz/` workspace member. Off by
 # default so the normal build keeps these implementation details private;

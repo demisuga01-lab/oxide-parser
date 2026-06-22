@@ -3,6 +3,11 @@ name = "oxide-server"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+description = "Self-hostable HTTP server for the Oxide pure-Rust PDF toolkit."
+repository = "https://github.com/oxide-pdf/oxide"
+homepage = "https://github.com/oxide-pdf/oxide"
+keywords = ["pdf", "server", "documents"]
+categories = ["web-programming::http-server"]
 
 [lib]
 name = "oxide_server"
@@ -13,7 +18,7 @@ name = "oxide-server"
 path = "src/main.rs"
 
 [dependencies]
-oxide-engine = { path = "../engine" }
+oxide-engine = { version = "0.1.0", path = "../engine" }
 
 axum = { version = "0.7", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }

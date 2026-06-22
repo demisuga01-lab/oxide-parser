@@ -13,6 +13,7 @@ services:
       OXIDE_MAX_DPI: "600"
       OXIDE_MAX_PAGES: "200"
       OXIDE_API_KEYS: ""
+      OXIDE_ALLOW_UNAUTHENTICATED: "true"
       OXIDE_RATE_LIMIT_PER_MIN: "60"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]

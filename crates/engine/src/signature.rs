@@ -52,6 +52,7 @@ const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.10
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
 
 const BYTE_RANGE_PLACEHOLDER: &[u8] = b"[9999999999 9999999999 9999999999 9999999999]";
+const MAX_BYTE_RANGE_FIELD: u64 = 9_999_999_999;
 const DEFAULT_CONTENTS_RESERVED_BYTES: usize = 16 * 1024;
 
 /// RSA signing identity used by [`sign_document`].
@@ -977,7 +978,7 @@ fn find_unique(haystack: &[u8], needle: &[u8]) -> Result<usize> {
 
 fn patch_byte_range(out: &mut [u8], start: usize, br: &ByteRange) -> Result<()> {
     for value in [br.a, br.b, br.c, br.d] {
-        if value > 9_999_999_999 {
+        if value as u64 > MAX_BYTE_RANGE_FIELD {
             return Err(OxideError::ResourceLimit(
                 "signature ByteRange exceeds fixed 10-digit placeholder".to_string(),
             ));
