@@ -32,6 +32,10 @@ editing/redaction/forms, and signature validation. See
 [`ga5_release_hardening.md`](ga5_release_hardening.md) for the new fuzz targets
 and 265-file cross-pillar corpus run.
 
+Continuous private-CI fuzzing is configured in `.github/workflows/fuzz.yml`.
+See [`continuous_fuzzing.md`](continuous_fuzzing.md) for the persistent corpus,
+regression gate, and crash triage workflow.
+
 ## What was set up
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)

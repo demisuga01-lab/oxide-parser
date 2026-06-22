@@ -22,6 +22,11 @@ green. Fuzzing requires a nightly toolchain.
 | `crypto`            | `oxide_engine::fuzz::fuzz_crypto`             | Encryption dictionary parsing, password verification, key derivation, decrypt primitives |
 | `functions`         | `oxide_engine::fuzz::fuzz_functions`          | Function Types 0/2/3/4, sampled-function bit reader, Type 4 PostScript calculator |
 | `writer`            | `oxide_engine::fuzz::fuzz_writer`             | Object serialization, string/name/stream escaping, tiny output PDF generation |
+| `document_rewrite`  | `oxide_engine::fuzz::fuzz_document_rewrite`   | Full-document rewrite through classic xref, xref stream, and object stream writer modes |
+| `linearize`         | `oxide_engine::fuzz::fuzz_linearize`          | Linearized output layout from successfully parsed untrusted PDFs |
+| `pdfa`              | `oxide_engine::fuzz::fuzz_pdfa`               | PDF/A validation and conversion over parsed untrusted PDFs |
+| `editing`           | `oxide_engine::fuzz::fuzz_editing`            | Additive editing, redaction, form flattening, and full rewrite |
+| `signature_validation` | `oxide_engine::fuzz::fuzz_signature_validation` | Signature/DSS/LTV-like parsing reachable from untrusted signed PDFs |
 
 The `fuzz_*` entry points are gated behind the engine's `fuzzing` feature
 (enabled here via the `oxide-engine` dependency) so they are not part of the
@@ -48,6 +53,11 @@ cargo +nightly fuzz run cmap
 cargo +nightly fuzz run crypto
 cargo +nightly fuzz run functions
 cargo +nightly fuzz run writer
+cargo +nightly fuzz run document_rewrite
+cargo +nightly fuzz run linearize
+cargo +nightly fuzz run pdfa
+cargo +nightly fuzz run editing
+cargo +nightly fuzz run signature_validation
 
 # Time-box a run (e.g. 15 minutes) and cap input size:
 cargo +nightly fuzz run parse_pdf -- -max_total_time=900 -max_len=65536
@@ -72,6 +82,20 @@ regression test in the engine. To re-run the whole saved corpus quickly
 ```sh
 cargo +nightly fuzz run parse_pdf corpus/parse_pdf -- -runs=0
 ```
+
+The private CI workflow runs this replay step for every target that has a
+committed seed directory, then starts a short time-boxed fuzz run. Scheduled
+runs restore and save the per-target corpus through the GitHub Actions cache
+and upload the corpus as an artifact for manual minimization/review.
+
+### Persistent corpus policy
+
+`fuzz/corpus/` is ignored by default because libFuzzer writes many generated
+files there. Only small, reviewed seeds and minimized regression inputs should
+be committed, using `git add -f fuzz/corpus/<target>/<seed>`. CI may discover
+new coverage inputs, but it never auto-commits them. Download the scheduled
+corpus artifact, run `cargo +nightly fuzz cmin <target>`, keep only small
+high-value seeds, then force-add them in a normal review.
 
 ## AddressSanitizer (for `unsafe` code paths)
 
