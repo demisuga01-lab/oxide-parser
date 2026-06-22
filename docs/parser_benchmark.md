@@ -95,16 +95,16 @@ qpdf **validates Oxide's output** (split parts pass `qpdf --check`) and page cou
 
 | Metric | Oxide | Python + PyMuPDF |
 | --- | --- | --- |
-| Process startup | 7.5 ms | 158.7 ms (interpreter + import) |
-| Distribution | single 12.8 MB static binary, no runtime | Python runtime + C-extension wheels |
+| Process startup | 6.9 ms | 139.1 ms (interpreter + import) |
+| Distribution | single 12.7 MB static binary, no runtime | Python runtime + C-extension wheels |
 
 Per-call text-extraction time (mean over digital docs):
 
 | Tool | Mean ms/doc |
 | --- | --- |
-| `oxide_text` | 32.5 |
-| `pymupdf_text` | 11.2 |
-| `pdftotext_text` | 45.4 |
+| `oxide_text` | 31.3 |
+| `pymupdf_text` | 10.8 |
+| `pdftotext_text` | 150.2 |
 
 > Note: Oxide's per-call time includes **process spawn** (CLI); PyMuPDF runs in-process. For many-small-doc throughput PyMuPDF's in-process call is faster, but Oxide wins decisively on **startup, deployment footprint, and no-runtime embeddability** (single static binary vs a Python+native stack; Docling adds a multi-GB torch stack on top).
 

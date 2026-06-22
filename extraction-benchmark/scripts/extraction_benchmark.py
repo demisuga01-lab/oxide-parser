@@ -35,10 +35,13 @@ RESULTS = os.path.join(ROOT, "results")
 
 TIMEOUT = 60  # seconds per tool/doc
 
-# Resolve the oxide CLI binary (debug build).
-OXIDE = os.path.join(REPO, "target", "debug", "oxide.exe")
-if not os.path.exists(OXIDE):
-    OXIDE = os.path.join(REPO, "target", "debug", "oxide")
+# Resolve the oxide CLI binary. OXIDE_BIN lets release-gate runs use an
+# isolated target directory when the default debug artifact is locked.
+OXIDE = os.environ.get("OXIDE_BIN")
+if not OXIDE:
+    OXIDE = os.path.join(REPO, "target", "debug", "oxide.exe")
+    if not os.path.exists(OXIDE):
+        OXIDE = os.path.join(REPO, "target", "debug", "oxide")
 
 # Whether this oxide build understands --ocr (the `ocr` cargo feature). Probed at
 # import time so scanned-doc handling degrades cleanly when OCR isn't built in.

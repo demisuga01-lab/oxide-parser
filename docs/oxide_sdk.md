@@ -15,6 +15,11 @@ benchmark JSON records base commit `60b8f60` and `dirty: true` because this
 capstone commit itself adds the integration tests, benchmark artifacts, and a
 PDF/A trailer-ID fix found during veraPDF validation.
 
+GA6 final-gate reruns were taken on 2026-06-23 after GA5 commit `3042550`.
+The worktree was still dirty from pre-existing unrelated source changes, so the
+final release-gate verdict is evidence for a release candidate from a clean
+branch, not permission to tag this exact dirty worktree.
+
 Tools used:
 
 | Tool | Version |
@@ -243,15 +248,15 @@ best elapsed time and max peak working set across the three runs.
 
 | Operation | Best ms | Peak MB | Result |
 | --- | ---: | ---: | --- |
-| Parse to JSON, CLI | 117.0 | 18.98 | Passed |
-| Extract text, CLI | 41.0 | 19.85 | Passed |
-| Render PNG ZIP, CLI | 67.9 | 18.56 | Passed |
-| Authoring example | 28.8 | 7.62 | Passed |
-| PDF/A conversion example | 20.1 | 8.91 | Passed |
-| RSA signing example | 13.1 | 4.97 | Passed |
-| Optimize CLI | 12.5 | 6.04 | Passed |
-| Linearize CLI | 12.7 | 6.80 | Passed; GA Prompt 1 subsequently made the hint tables qpdf-clean |
-| Encrypt AES-256 CLI | 20.3 | 6.56 | Passed |
+| Parse to JSON, CLI | 95.9 | 19.00 | Passed |
+| Extract text, CLI | 38.0 | 19.92 | Passed |
+| Render PNG ZIP, CLI | 59.1 | 18.49 | Passed |
+| Authoring example | 23.3 | 7.67 | Passed |
+| PDF/A conversion example | 16.7 | 8.96 | Passed |
+| RSA signing example | 12.7 | 5.07 | Passed |
+| Optimize CLI | 9.5 | 6.05 | Passed |
+| Linearize CLI | 12.5 | 6.82 | Passed; GA Prompt 1 made the hint tables qpdf-clean |
+| Encrypt AES-256 CLI | 20.2 | 6.55 | Passed |
 
 These are smoke operation benchmarks, not statistically rigorous throughput
 claims.
@@ -265,11 +270,11 @@ claims.
 | Authoring | Builder, pages, text, vector graphics, images, whole TrueType embedding, tables, flow layout | Enough for programmatic document generation. Trails mature iText/PDFlib/Apryse layout breadth and font subsetting depth. |
 | Editing | Watermarks, overlays, underlays, headers/footers, incremental updates, redaction, annotations, form fill/flatten | Practical editing surface exists. Redaction has extract-back tests. Advanced surgical content editing remains limited. |
 | Structural ops | Merge/split/extract/rotate/repair/optimize/encrypt/decrypt plus qpdf-clean linearization for the supported subset | qpdf-class for the covered structural operations; object-stream packing inside linearized layout remains a size optimization follow-up. |
-| PDF/A and PDF/UA | PDF/A-1b and PDF/A-2b validation/conversion path with veraPDF-pass on capstone examples; PDF/UA basic validation/best-effort tagging | Useful compliance foundation. Not a certified compliance product yet; broader veraPDF corpus and manual accessibility review are needed. |
+| PDF/A and PDF/UA | PDF/A-1b, 2b, 2a, 3b, and 3a validation/conversion examples pass qpdf and veraPDF 1.30.2; PDF/UA basic validation/best-effort tagging | Useful compliance foundation. PDF/UA remains best-effort and still needs manual semantic accessibility review before any full-conformance claim. |
 | Signatures | RSA/SHA-256 signing and verification over ByteRange with incremental update; offline PAdES B-T/B-LT timestamp-token and DSS material embedding/reporting | Core signing plus deterministic LTV substrate exists. Live TSA/OCSP fetching, trust-store policy, timestamp imprint validation, PAdES-B-LTA, and ECDSA breadth remain follow-ups. |
 | Surfaces | Rust library, CLI, C ABI, WASM, HTTP server | Strong embeddability and self-hosting story. |
 | Packaging | Feature flags, dry-run packaging docs, license docs | Commercially friendly MIT OR Apache-2.0 posture. Some feature dependency slimming remains. |
-| Rendering | Fast and hostile-input safe on the capstone slice | Trails Poppler/MuPDF/PDFium fidelity, especially complex vectors, JPX, forms, RTL, scans. |
+| Rendering | 86.12% visual pass / 91.29 weighted on the final 265-entry slice, with 100% hostile safety | Materially improved from Prompt 11, but still trails Poppler/MuPDF/PDFium for visual-proof workflows. |
 
 ## Positioning
 
@@ -298,38 +303,36 @@ It trails on:
 
 ## Release-Readiness Verdict
 
-Verdict: ready for a v0.x enterprise pilot or private SDK evaluation, not ready
-for a confident v1.0 commercial general-availability claim.
+Detailed GA6 evidence: `docs/ga6_release_gate.md`.
 
-Reasons it is ready for v0.x:
+Verdict: shippable as a v1.0 release candidate or controlled enterprise pilot
+from a clean release branch. Do not tag v1.0 GA directly from this dirty
+worktree.
 
-- Core SDK pillars are present across parse, create, edit, structural,
-  compliance, signatures, OCR, and multiple surfaces.
-- Capstone integration workflows pass.
-- Cross-surface extraction is byte-consistent across Rust library, CLI, C ABI,
-  and HTTP server on the fixture used.
-- PDF/A capstone outputs pass veraPDF after the trailer-ID fix.
-- Signed output is qpdf-clean and verifies as cryptographically valid.
-- Packaging, license, API, and stability docs exist.
+Blocker status after GA1-GA5 plus GA6 verification:
 
-Release blockers before v1.0:
+| Area | Status |
+| --- | --- |
+| Linearization | Cleared: qpdf-clean check/show-linearization on the seven-fixture breadth. |
+| PDF/A matrix | Cleared: qpdf + veraPDF PASS for 1b/2b/2a/3b/3a examples. |
+| Renderer fidelity | Cleared as a meaningful improvement: 86.12% visual pass / 91.29 weighted, still preview/OCR-grade. |
+| Whole-SDK hardening | Cleared for the measured slice: 1,590 operations, 0 crashes, 0 timeouts, 0 invalid transformed outputs from qpdf-clean inputs. |
+| Signature LTV | Partially cleared: offline timestamp/DSS/CRL substrate works; live TSA/OCSP/trust-store/B-LTA and external LTV UI recognition remain known limitations. |
 
-1. Run and publish the full renderer benchmark, then address the real-world
-   fidelity gaps in JPX, complex vectors, forms, RTL, scans, and multi-column
-   layouts.
-2. Broaden PDF/A validation over a larger real corpus and keep veraPDF as the
-   oracle. PDF/UA needs manual accessibility review before any full-conformance
-   claim.
-3. Complete signature follow-ups: ECDSA coverage, live TSA/OCSP/CRL fetching,
-   timestamp imprint/TSA trust validation, PAdES-B-LTA, and configurable/system
-   trust stores.
-4. Re-run packaging with a clean release branch and no dirty-tree caveat. Keep
-   `cargo publish --dry-run`, feature matrices, and docs.rs builds green.
-5. Complete a fresh license/NOTICE audit after any new crypto/font/compliance
-   dependency changes.
+Known limitations for the release notes:
 
-Bottom line: Oxide now has the shape of a complete, self-hostable, pure-Rust
-enterprise PDF SDK. The honest commercial positioning is strong for private,
-controlled deployments and SDK pilots today, with rendering fidelity,
-certified compliance, and advanced signatures as the remaining gaps before a
-v1.0-grade release claim.
+- Resolve or intentionally commit the pre-existing dirty worktree before a GA
+  tag.
+- Signature LTV is offline-first; live revocation/timestamp fetching and
+  trust-policy validation remain follow-ups.
+- PDF/UA is assistive best-effort, not a certified accessibility claim.
+- Rendering remains preview/OCR-grade, not visual-proof grade.
+- Messy scanned tables and scanned KV extraction trail ML-heavy systems.
+- `cargo-deny` was not installed for this GA6 rerun; license posture remains
+  documented in `docs/licenses.md` and `deny.toml` is present.
+
+Bottom line: Oxide is now a complete, self-hostable, pure-Rust enterprise PDF
+SDK for parse/extract, authoring, editing, structural operations, PDF/A,
+signatures, OCR, and multi-surface embedding. It is ready for pilot release and
+release-candidate packaging; a strict GA tag should be cut only from a clean
+branch with the signature-LTV scope accepted or completed.
