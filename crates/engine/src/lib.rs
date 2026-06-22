@@ -193,8 +193,8 @@ pub use render::{
 pub use render::{render_page_svg, svg, text_decode};
 pub use semantic::{SemanticDocument, SemanticElement, SemanticMcid, SemanticSource};
 pub use signature::{
-    sign_document, verify_signatures, CertInfo, Coverage, PdfSigner, SignatureOptions,
-    SignatureReport, SignatureValidity,
+    add_ltv_material, sign_document, verify_signatures, CertInfo, Coverage, LtvMaterial, LtvReport,
+    PadesLevel, PdfSigner, RevocationStatus, SignatureOptions, SignatureReport, SignatureValidity,
 };
 pub use structural::{
     encrypt, linearize::linearize, optimize, repair, rotate_pages, OptimizeReport, Rotation,
@@ -274,8 +274,9 @@ pub mod prelude {
         SourceInfo, SCHEMA_VERSION,
     };
     pub use crate::signature::{
-        sign_document, verify_signatures, CertInfo, Coverage, PdfSigner, SignatureOptions,
-        SignatureReport, SignatureValidity,
+        add_ltv_material, sign_document, verify_signatures, CertInfo, Coverage, LtvMaterial,
+        LtvReport, PadesLevel, PdfSigner, RevocationStatus, SignatureOptions, SignatureReport,
+        SignatureValidity,
     };
     pub use crate::writer::{build_merged, build_subset};
     pub use crate::ENGINE_VERSION;

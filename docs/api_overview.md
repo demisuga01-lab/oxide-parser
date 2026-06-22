@@ -19,7 +19,7 @@ and may move while the crate is `0.x`.
 | Editing | `PdfEditor`, `WatermarkOptions`, `HeaderFooterOptions`, `RedactionOptions` |
 | Structural ops | `build_subset`, `build_merged`, `rotate_pages`, `optimize`, `repair`, `encrypt`, `linearize` |
 | PDF/A and PDF/UA | `validate_pdfa`, `convert_to_pdfa`, `validate_pdfua`, `PdfAProfile` |
-| Signatures | `ContentEngine::sign`, `sign_document`, `PdfSigner`, `verify_signatures` |
+| Signatures | `ContentEngine::sign`, `ContentEngine::add_ltv_material`, `sign_document`, `add_ltv_material`, `PdfSigner`, `verify_signatures` |
 | Errors | `Result<T>`, `OxideError`, `ErrorKind`, `OxideError::code()` |
 
 ## Bindings

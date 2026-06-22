@@ -228,7 +228,7 @@ claims.
 | Editing | Watermarks, overlays, underlays, headers/footers, incremental updates, redaction, annotations, form fill/flatten | Practical editing surface exists. Redaction has extract-back tests. Advanced surgical content editing remains limited. |
 | Structural ops | Merge/split/extract/rotate/repair/optimize/encrypt/decrypt plus qpdf-clean linearization for the supported subset | qpdf-class for the covered structural operations; object-stream packing inside linearized layout remains a size optimization follow-up. |
 | PDF/A and PDF/UA | PDF/A-1b and PDF/A-2b validation/conversion path with veraPDF-pass on capstone examples; PDF/UA basic validation/best-effort tagging | Useful compliance foundation. Not a certified compliance product yet; broader veraPDF corpus and manual accessibility review are needed. |
-| Signatures | RSA/SHA-256 signing and verification over ByteRange with incremental update | Core signing capability exists. PAdES/LTV, timestamps, ECDSA breadth, and system trust-store integration remain follow-ups. |
+| Signatures | RSA/SHA-256 signing and verification over ByteRange with incremental update; offline PAdES B-T/B-LT timestamp-token and DSS material embedding/reporting | Core signing plus deterministic LTV substrate exists. Live TSA/OCSP fetching, trust-store policy, timestamp imprint validation, PAdES-B-LTA, and ECDSA breadth remain follow-ups. |
 | Surfaces | Rust library, CLI, C ABI, WASM, HTTP server | Strong embeddability and self-hosting story. |
 | Packaging | Feature flags, dry-run packaging docs, license docs | Commercially friendly MIT OR Apache-2.0 posture. Some feature dependency slimming remains. |
 | Rendering | Fast and hostile-input safe on the capstone slice | Trails Poppler/MuPDF/PDFium fidelity, especially complex vectors, JPX, forms, RTL, scans. |
@@ -255,7 +255,7 @@ It trails on:
 - Pixel-perfect rendering fidelity versus Poppler/MuPDF/PDFium.
 - Messy scanned document understanding versus ML-heavy systems.
 - Certified compliance and mature accessibility workflows.
-- Signature LTV/PAdES depth and trust-store breadth.
+- Signature live TSA/OCSP/trust-store policy, PAdES-B-LTA depth, and ECDSA breadth.
 - Mature enterprise SDK breadth compared with iText, PDFlib, and Apryse.
 
 ## Release-Readiness Verdict
@@ -282,8 +282,9 @@ Release blockers before v1.0:
 2. Broaden PDF/A validation over a larger real corpus and keep veraPDF as the
    oracle. PDF/UA needs manual accessibility review before any full-conformance
    claim.
-3. Complete signature follow-ups: ECDSA coverage, timestamps, PAdES/LTV, OCSP
-   and CRL embedding, and configurable/system trust stores.
+3. Complete signature follow-ups: ECDSA coverage, live TSA/OCSP/CRL fetching,
+   timestamp imprint/TSA trust validation, PAdES-B-LTA, and configurable/system
+   trust stores.
 4. Re-run packaging with a clean release branch and no dirty-tree caveat. Keep
    `cargo publish --dry-run`, feature matrices, and docs.rs builds green.
 5. Complete a fresh license/NOTICE audit after any new crypto/font/compliance

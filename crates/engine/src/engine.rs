@@ -640,6 +640,12 @@ impl ContentEngine {
         crate::signature::sign_document(&self.doc, signer, options)
     }
 
+    /// Append PAdES long-term-validation material as a catalog `/DSS`
+    /// incremental update.
+    pub fn add_ltv_material(&self, material: &crate::signature::LtvMaterial) -> Result<Vec<u8>> {
+        crate::signature::add_ltv_material(&self.doc, material)
+    }
+
     /// Export the given 1-based pages to a single self-contained HTML or XML
     /// document (the `to-html` tool — `pdftohtml`-equivalent). See
     /// [`crate::html`] for the modes (complex / simple / xml).

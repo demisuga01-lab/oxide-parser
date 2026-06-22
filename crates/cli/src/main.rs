@@ -1995,7 +1995,7 @@ fn run_to_html(args: ToHtmlArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_verify_sig(args: VerifySigArgs) -> Result<(), Box<dyn Error>> {
-    use oxide_engine::{Coverage, SignatureValidity};
+    use oxide_engine::{Coverage, PadesLevel, RevocationStatus, SignatureValidity};
 
     let engine = open_engine(&args.pdf, &args.password)?;
     let reports = engine.verify_signatures()?;
@@ -2046,6 +2046,41 @@ fn run_verify_sig(args: VerifySigArgs) -> Result<(), Box<dyn Error>> {
         }
         println!("  - Verdict:      {verdict}");
         println!("  - Coverage:     {coverage}");
+        let pades = match r.ltv.pades_level {
+            PadesLevel::BaselineB => "PAdES B-B / core CMS",
+            PadesLevel::BaselineT => "PAdES B-T timestamped",
+            PadesLevel::BaselineLT => "PAdES B-LT long-term material",
+            PadesLevel::BaselineLTA => "PAdES B-LTA archive timestamp",
+        };
+        let revocation = match r.ltv.revocation_status {
+            RevocationStatus::NotChecked => "not checked",
+            RevocationStatus::EmbeddedMaterial => "embedded material present",
+            RevocationStatus::GoodFromEmbeddedCrl => "not listed in embedded CRL",
+            RevocationStatus::RevokedByEmbeddedCrl => "revoked by embedded CRL",
+            RevocationStatus::Unknown => "unknown",
+        };
+        println!("  - PAdES/LTV:    {pades}");
+        println!(
+            "      Timestamp tokens: {} valid, {} invalid",
+            r.ltv.timestamp_token_count, r.ltv.invalid_timestamp_token_count
+        );
+        println!(
+            "      DSS/VRI: {} / {}",
+            if r.ltv.dss_present {
+                "present"
+            } else {
+                "absent"
+            },
+            if r.ltv.vri_matched {
+                "matched"
+            } else {
+                "not matched"
+            }
+        );
+        println!(
+            "      Material: certs={}, ocsp={}, crls={}, revocation={}",
+            r.ltv.embedded_certs, r.ltv.embedded_ocsp_responses, r.ltv.embedded_crls, revocation
+        );
         if let Some(c) = &r.certificate {
             println!("  - Certificate:");
             println!("      Subject:  {}", c.subject);

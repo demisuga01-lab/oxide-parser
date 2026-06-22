@@ -17,7 +17,10 @@
 
 use std::path::PathBuf;
 
-use oxide_engine::{ContentEngine, Coverage, PdfSigner, SignatureOptions, SignatureValidity};
+use oxide_engine::{
+    ContentEngine, Coverage, LtvMaterial, PadesLevel, PdfSigner, RevocationStatus,
+    SignatureOptions, SignatureValidity,
+};
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -48,6 +51,82 @@ fn test_signer() -> PdfSigner {
         &[],
     )
     .expect("test signer parses")
+}
+
+fn test_timestamp_token_der() -> Vec<u8> {
+    use cms::content_info::ContentInfo;
+    use der::asn1::Any;
+    use der::{Encode, Tag};
+
+    let token = ContentInfo {
+        content_type: const_oid::db::rfc5911::ID_DATA,
+        content: Any::new(Tag::OctetString, b"oxide-test-rfc3161-token".to_vec()).unwrap(),
+    };
+    token.to_der().unwrap()
+}
+
+fn test_crl_der(signer: &PdfSigner, revoked_serial: &[u8]) -> Vec<u8> {
+    use der::asn1::{BitString, GeneralizedTime};
+    use der::{DateTime, Encode};
+    use spki::AlgorithmIdentifierOwned;
+    use x509_cert::crl::{CertificateList, RevokedCert, TbsCertList};
+    use x509_cert::serial_number::SerialNumber;
+    use x509_cert::time::Time;
+    use x509_cert::Version;
+
+    let cert = signer.signer_certificate();
+    let alg = AlgorithmIdentifierOwned {
+        oid: const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.11"),
+        parameters: None,
+    };
+    let time = Time::GeneralTime(GeneralizedTime::from_date_time(
+        DateTime::new(2026, 6, 22, 0, 0, 0).unwrap(),
+    ));
+    let crl = CertificateList {
+        tbs_cert_list: TbsCertList {
+            version: Version::V2,
+            signature: alg.clone(),
+            issuer: cert.tbs_certificate.issuer.clone(),
+            this_update: time,
+            next_update: Some(time),
+            revoked_certificates: Some(vec![RevokedCert {
+                serial_number: SerialNumber::new(revoked_serial).unwrap(),
+                revocation_date: time,
+                crl_entry_extensions: None,
+            }]),
+            crl_extensions: None,
+        },
+        signature_algorithm: alg,
+        signature: BitString::from_bytes(&[0]).unwrap(),
+    };
+    crl.to_der().unwrap()
+}
+
+fn qpdf_check_if_available(name: &str, bytes: &[u8]) {
+    if std::process::Command::new("qpdf")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("signature_ltv_qpdf")
+        .join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pdf = dir.join("out.pdf");
+    std::fs::write(&pdf, bytes).unwrap();
+    let output = std::process::Command::new("qpdf")
+        .arg("--check")
+        .arg(&pdf)
+        .output()
+        .expect("qpdf --check runs");
+    assert!(
+        output.status.success(),
+        "qpdf --check failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -98,6 +177,58 @@ fn rsa_signing_appends_valid_incremental_signature() {
 }
 
 #[test]
+fn timestamp_and_dss_ltv_material_are_reported_offline() {
+    let original = fixture_bytes("basicapi.pdf");
+    let signer = test_signer();
+    let e = ContentEngine::open_bytes(original).unwrap();
+    let options = SignatureOptions {
+        field_name: "OxideLtvSig".to_string(),
+        signer_name: Some("Oxide SDK LTV Test".to_string()),
+        reason: Some("ltv integration test".to_string()),
+        signing_time: Some("D:20260622000000Z".to_string()),
+        timestamp_token_der: Some(test_timestamp_token_der()),
+        contents_reserved_bytes: 32 * 1024,
+        ..SignatureOptions::default()
+    };
+
+    let signed = e.sign(&signer, &options).unwrap();
+    let signed_engine = ContentEngine::open_bytes(signed.clone()).unwrap();
+    let signed_report = &signed_engine.verify_signatures().unwrap()[0];
+    assert_eq!(signed_report.validity, SignatureValidity::Valid);
+    assert_eq!(signed_report.coverage, Coverage::WholeFile);
+    assert_eq!(signed_report.ltv.pades_level, PadesLevel::BaselineT);
+    assert_eq!(signed_report.ltv.timestamp_token_count, 1);
+
+    // The signer cert serial is 20260801 in the committed fixture.
+    let revoked_crl = test_crl_der(&signer, &[0x20, 0x26, 0x08, 0x01]);
+    let ltv = signed_engine
+        .add_ltv_material(&LtvMaterial {
+            crls_der: vec![revoked_crl],
+            ..LtvMaterial::default()
+        })
+        .unwrap();
+    assert!(
+        ltv.starts_with(&signed),
+        "LTV/DSS must append an incremental update without rewriting signed bytes"
+    );
+    qpdf_check_if_available("timestamp_and_dss", &ltv);
+
+    let ltv_engine = ContentEngine::open_bytes(ltv).unwrap();
+    let report = &ltv_engine.verify_signatures().unwrap()[0];
+    assert_eq!(report.validity, SignatureValidity::Valid);
+    assert_eq!(report.coverage, Coverage::ModifiedAfterSigning);
+    assert_eq!(report.ltv.pades_level, PadesLevel::BaselineLT);
+    assert!(report.ltv.dss_present);
+    assert!(report.ltv.vri_matched);
+    assert!(report.ltv.embedded_certs >= 1);
+    assert_eq!(report.ltv.embedded_crls, 1);
+    assert_eq!(
+        report.ltv.revocation_status,
+        RevocationStatus::RevokedByEmbeddedCrl
+    );
+}
+
+#[test]
 fn valid_signature_is_cryptographically_valid_with_cert_details() {
     let e = ContentEngine::open_bytes(fixture_bytes("sig_valid.pdf")).unwrap();
     let reports = e.verify_signatures().unwrap();
@@ -117,7 +248,7 @@ fn valid_signature_is_cryptographically_valid_with_cert_details() {
     assert_eq!(cert.serial_hex, "1234ABCD");
     // Honest-scope note must be present.
     assert!(
-        r.note.contains("NOT checked"),
+        r.note.contains("Trust-chain validation"),
         "scope note missing: {}",
         r.note
     );

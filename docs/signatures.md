@@ -1,14 +1,15 @@
 # Digital Signatures (`sign` API + `verify-sig`, `pdfsig`-equivalent)
 
-Oxide can apply a standard RSA/SHA-256 detached CMS signature and can report
-and cryptographically verify digital signatures in a PDF. Signing is exposed as
-the Rust API `ContentEngine::sign` / `sign_document`; verification is exposed as
+Oxide can apply a standard RSA/SHA-256 detached CMS signature, embed
+caller-supplied PAdES timestamp/LTV material, and cryptographically verify
+digital signatures in a PDF. Signing is exposed as the Rust API
+`ContentEngine::sign` / `sign_document`; verification is exposed as
 `oxide verify-sig`.
 
-```
-oxide verify-sig signed.pdf            # human-readable, pdfsig-style
-oxide verify-sig signed.pdf --json     # machine-readable
-oxide verify-sig signed.pdf --password p   # encrypted+signed PDF
+```text
+oxide verify-sig signed.pdf
+oxide verify-sig signed.pdf --json
+oxide verify-sig signed.pdf --password p
 ```
 
 ## Signing API
@@ -47,37 +48,45 @@ hex `/Contents` placeholder, and the placeholder is filled with DER CMS
 The committed example `crates/engine/examples/sign_document.rs` signs a PDF from
 PEM key/cert files:
 
-```
+```text
 cargo run -p oxide-engine --example sign_document -- input.pdf key.pem cert.pem signed.pdf
 ```
 
 ## Verification Pipeline
 
-1. **Discovery** — walk the catalog `/AcroForm /Fields` for `/FT /Sig` fields
-   (inherited `/FT` and nested `/Kids` handled) carrying a `/V` signature
-   dictionary.
-2. **Byte-range hashing** — read `/ByteRange [a b c d]` and hash the **exact
-   original file bytes** `file[a..a+b] ++ file[c..c+d]` (the whole file except
-   the `/Contents` gap). Verification uses `PdfReader::file_bytes()` — the raw
-   bytes as opened, never a re-serialization.
-3. **CMS parsing** — parse `/Contents` as a PKCS#7 / CMS `SignedData`
-   (RFC 5652) via the `cms` crate; extract the first `SignerInfo`, its digest
-   algorithm, signed attributes, signature algorithm, and the signer
-   certificate (matched by issuer+serial against the embedded `certificates`).
-4. **Verification** (RFC 5652 §5.4):
-   - with **signed attributes** (the common case): the `messageDigest`
-     signed-attribute must equal the digest of the signed bytes, and the
-     signature is verified over the DER `SET OF` re-encoding of the signed
-     attributes;
-   - without: the signature is verified over the content digest directly.
-   - The RSA PKCS#1 v1.5 signature is checked against the certificate's public
-     key (`rsa` + `x509-cert` + `spki`) using the matching SHA-1/256/384/512
-     scheme.
-5. **Coverage** — if the signed ranges plus the `/Contents` gap reach EOF, the
-   signature **covers the whole file**; trailing bytes mean an incremental
-   update was appended → **modified after signing**.
-6. **Certificate details** — subject, issuer, serial, and validity period are
-   parsed from the X.509 cert and reported.
+1. Discovery: walk the catalog `/AcroForm /Fields` for `/FT /Sig` fields
+   carrying a `/V` signature dictionary.
+2. Byte-range hashing: read `/ByteRange [a b c d]` and hash the exact original
+   file bytes `file[a..a+b] ++ file[c..c+d]`.
+3. CMS parsing: parse `/Contents` as PKCS#7 / CMS `SignedData` and match the
+   signer certificate by issuer and serial.
+4. Verification: check the CMS `messageDigest` signed attribute and verify the
+   RSA PKCS#1 v1.5 signature over the signed attributes or content digest.
+5. Coverage: report whether the signature covers the whole file or whether an
+   incremental update was appended after signing.
+6. LTV/PAdES reporting: parse timestamp-token unsigned attributes and catalog
+   `/DSS` material.
+
+## PAdES / LTV
+
+Oxide includes the offline PAdES/LTV substrate:
+
+- `SignatureOptions::timestamp_token_der` embeds a caller-supplied DER RFC 3161
+  `TimeStampToken` (`ContentInfo`) as the CMS `signatureTimeStampToken`
+  unsigned attribute. This is the deterministic, no-network path used in CI.
+- `ContentEngine::add_ltv_material` / `add_ltv_material` appends a catalog
+  `/DSS` in an incremental update. It writes `/Certs`, `/OCSPs`, `/CRLs`, and
+  per-signature `/VRI` entries keyed by the SHA-1 hash of the signature
+  `/Contents`, preserving the signed prefix exactly.
+- `verify_signatures` reports `SignatureReport::ltv`: PAdES level
+  (`baseline_b`, `baseline_t`, `baseline_lt`), timestamp-token counts,
+  DSS/VRI match status, embedded cert/OCSP/CRL counts, and revocation status.
+  Embedded CRLs are parsed with the pure-Rust `x509-cert` CRL parser and checked
+  for the signer certificate serial, so a revoked-cert fixture reports
+  `revoked_by_embedded_crl`.
+
+This is enough for offline B-T/B-LT material embedding and deterministic
+validation reporting without a live network dependency.
 
 ## Crates
 
@@ -86,66 +95,63 @@ All pure-Rust (RustCrypto), no C toolchain: `cms` 0.2 with its builder,
 plus `sha1` (with `oid`) and `sha2` (with `oid`). No `ring`/`openssl`/`-sys`
 crates are pulled in.
 
-## What "valid" means — and what is NOT checked (honest scope)
+## What "valid" means
 
-**Valid** = *cryptographically* valid: the RSA signature verifies against the
-signer certificate's public key, and the signed digest matches the
-`/ByteRange` bytes. The output also reports coverage and the signer cert
-details.
+**Valid** means cryptographically valid: the RSA signature verifies against the
+signer certificate's public key, and the signed digest matches the `/ByteRange`
+bytes. The output also reports coverage, signer cert details, and embedded
+PAdES/DSS material.
 
-**Explicitly NOT performed this round** (stated in every report's `note`):
+Still caller policy / follow-up:
 
-- **Trust-chain validation** to a trusted root CA — the cert is reported, not
-  trusted. A self-signed signature is "cryptographically valid" but not
-  "trusted". (Poppler's `pdfsig` itself depends on a configured trust store for
-  the trust verdict.)
-- **Revocation** (OCSP / CRL).
-- **Certificate validity-period enforcement** — the dates are reported, not
-  used as a pass/fail gate.
-- **Timestamp tokens** (RFC 3161) and PAdES/LTV DSS revocation embedding.
-- **ECDSA / EdDSA / RSA-PSS** verification — only RSA PKCS#1 v1.5 is verified;
-  others are reported as `unsupported_algorithm`. The signer currently applies
-  RSA/SHA-256.
+- Trust-chain validation to a configured root CA or system trust store.
+- Live TSA HTTP, OCSP fetching, CRL distribution-point fetching, and network
+  retry/timeout policy. The APIs are offline-first; callers supply DER
+  tokens/responses.
+- OCSP response signature/freshness policy and CRL issuer/signature validation.
+  Oxide parses embedded CRLs to check whether the signer serial is listed, but
+  it does not turn CRL trust into a final legal trust verdict.
+- Timestamp imprint and TSA trust validation. Tokens are embedded and parsed as
+  CMS `ContentInfo`; imprint/TSA trust remains policy-owned.
+- PAdES-B-LTA document/archive timestamps. Oxide reports B-B/B-T/B-LT today.
+- ECDSA / EdDSA / RSA-PSS verification and signing. The signer currently
+  applies RSA/SHA-256 and the verifier supports RSA PKCS#1 v1.5.
 
 ## Reported fields
 
 `SignatureReport { index, field_name, signer_name, signing_time, reason,
 location, contact_info, sub_filter, digest_algorithm, validity, coverage,
-certificate, note }`. `validity` ∈ `valid | invalid | unsupported_algorithm |
-error`; `coverage` ∈ `whole_file | modified_after_signing`.
+certificate, ltv, note }`. `validity` is `valid`, `invalid`,
+`unsupported_algorithm`, or `error`; `coverage` is `whole_file` or
+`modified_after_signing`. `ltv` includes `pades_level`, timestamp-token counts,
+DSS/VRI status, embedded material counts, and `revocation_status`.
 
 ## Validation
 
 `crates/engine/tests/signatures.rs`, with fixtures from
-`scripts/make_signature_fixtures.py` (pyHanko + a self-signed RSA/SHA-256 cert
-**we control**, so the ground truth is known; pyHanko independently confirms
-`intact=valid`):
+`scripts/make_signature_fixtures.py`:
 
-- **Valid**: `sig_valid.pdf` → cryptographically valid, covers whole file,
-  SHA-256, cert subject `CN=Oxide Test Signer`, serial `1234ABCD`.
-- **Tampered**: flipping a byte inside a signed range → `invalid` (digest
-  mismatch).
-- **Modified after signing**: appending bytes after the signed ranges → still
-  `valid` for what it covered, but `modified_after_signing`.
-- **Multiple signatures**: `sig_two.pdf` → both reported; the earlier signature
-  is `modified_after_signing` (the second signature's incremental update is
-  appended after it), the later one covers the whole file — exactly the
-  distinction `pdfsig` draws.
-- **Unsigned**: a normal PDF reports no signatures (not an error).
-- **Signing**: `minimal.pdf` signed with the committed test-only RSA key/cert
-  → original bytes preserved as a prefix, the produced signature verifies,
-  covers the whole file, reports signer metadata, and tampering is detected.
-
-**Cross-check note:** Poppler was installed for this prompt, but the Windows
-package does not include `pdfsig`. The generated signed sample was therefore
-cross-checked with `qpdf --check`, Oxide verification, and Poppler render/text
-tools (`pdftoppm`, `pdftotext`). Existing verification fixtures remain grounded
-in independent pyHanko output.
+- Valid: `sig_valid.pdf` is cryptographically valid, covers the whole file,
+  uses SHA-256, and reports signer certificate details.
+- Tampered: flipping a byte inside a signed range reports `invalid`.
+- Modified after signing: appending bytes after the signed ranges still leaves
+  the signature valid for what it covered, but reports `modified_after_signing`.
+- Multiple signatures: `sig_two.pdf` reports both signatures and distinguishes
+  the earlier modified-after-signing revision from the later whole-file
+  signature.
+- Signing: `minimal.pdf` signed with the committed test-only RSA key/cert
+  preserves original bytes as a prefix and detects tampering.
+- LTV: `basicapi.pdf` signed with a deterministic offline timestamp token, then
+  `add_ltv_material` appends a DSS with the signer cert and a synthetic DER CRL.
+  The signed bytes remain an exact prefix, qpdf is clean when available, the
+  report promotes to `baseline_lt`, the VRI matches, and the CRL-listed signer
+  serial reports `revoked_by_embedded_crl`.
 
 ## Future enhancements
 
 - Trust-chain validation against a configurable trust store; revocation
-  (OCSP/CRL); validity-period enforcement as a verdict gate.
-- ECDSA / EdDSA / RSA-PSS verification and ECDSA signing.
-- PAdES/CAdES specifics, RFC 3161 timestamp-token verification, and LTV/DSS.
-- Server endpoint (`POST /api/v1/verify-sig`) — deferred; the CLI is complete.
+  freshness/trust policy; validity-period enforcement as a verdict gate.
+- ECDSA / EdDSA / RSA-PSS verification and signing.
+- Live RFC 3161 TSA and OCSP/CRL fetching; PAdES-B-LTA document timestamps.
+- Server endpoint (`POST /api/v1/verify-sig`) remains deferred; the CLI is
+  complete.

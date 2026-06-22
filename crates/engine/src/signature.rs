@@ -15,18 +15,21 @@
 //!
 //! "Valid" here means **cryptographically valid**: the signature math checks
 //! out against the signer certificate's public key and the signed digest
-//! matches the `/ByteRange` bytes. This round does **NOT** perform trust-chain
-//! validation to a trusted root CA, nor revocation (OCSP/CRL) checking, nor
-//! certificate-validity-period enforcement as a pass/fail gate (the validity
-//! dates are reported, not enforced). RSA (PKCS#1 v1.5) signatures are
-//! supported; ECDSA/EdDSA and RSA-PSS are not yet (reported as
-//! `unsupported_algorithm`). Timestamp tokens (RFC 3161) are not verified.
+//! matches the `/ByteRange` bytes. LTV support embeds RFC 3161 timestamp
+//! tokens supplied by the caller, writes PAdES-style DSS validation material
+//! (`/Certs`, `/OCSPs`, `/CRLs`, `/VRI`) as an incremental update, and reports
+//! the PAdES baseline level implied by embedded material. Trust-chain
+//! validation to a configured root, live TSA/OCSP/CRL fetching, OCSP response
+//! policy validation, and timestamp imprint/TSA trust are intentionally outside
+//! this core primitive. RSA (PKCS#1 v1.5) signatures are supported;
+//! ECDSA/EdDSA and RSA-PSS are not yet (reported as `unsupported_algorithm`).
 
 use cms::builder::{create_signing_time_attribute, SignedDataBuilder, SignerInfoBuilder};
 use cms::cert::{x509::Certificate, CertificateChoices, IssuerAndSerialNumber};
 use cms::content_info::ContentInfo;
 use cms::signed_data::{EncapsulatedContentInfo, SignedData, SignerIdentifier, SignerInfo};
 use const_oid::ObjectIdentifier;
+use der::asn1::SetOfVec;
 use der::{Decode, DecodePem, Encode};
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -36,6 +39,8 @@ use serde::Serialize;
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use spki::AlgorithmIdentifierOwned;
+use x509_cert::attr::{Attribute, AttributeValue};
+use x509_cert::crl::CertificateList;
 
 use crate::document::PdfDocument;
 use crate::error::{OxideError, Result};
@@ -50,6 +55,8 @@ const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26")
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
+const OID_SIGNATURE_TIMESTAMP_TOKEN: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.14");
 
 const BYTE_RANGE_PLACEHOLDER: &[u8] = b"[9999999999 9999999999 9999999999 9999999999]";
 const MAX_BYTE_RANGE_FIELD: u64 = 9_999_999_999;
@@ -140,6 +147,14 @@ pub struct SignatureOptions {
     pub contact_info: Option<String>,
     /// Raw PDF date string for `/M`, e.g. `D:20260622000000Z`.
     pub signing_time: Option<String>,
+    /// DER-encoded RFC 3161 `TimeStampToken` (`ContentInfo`) to embed as the
+    /// CMS `signatureTimeStampToken` unsigned attribute.
+    ///
+    /// The core signer does not contact a TSA. Callers that need PAdES-B-T
+    /// obtain a token from their TSA/policy layer and pass the DER token here.
+    /// Verification reports the token's presence and parseability; imprint and
+    /// TSA trust validation are intentionally left to the caller's trust policy.
+    pub timestamp_token_der: Option<Vec<u8>>,
     /// Reserved CMS size in bytes. The DER CMS must fit in this placeholder.
     pub contents_reserved_bytes: usize,
 }
@@ -155,6 +170,7 @@ impl Default for SignatureOptions {
             location: None,
             contact_info: None,
             signing_time: None,
+            timestamp_token_der: None,
             contents_reserved_bytes: DEFAULT_CONTENTS_RESERVED_BYTES,
         }
     }
@@ -186,6 +202,96 @@ pub enum Coverage {
     /// Bytes exist after the signed ranges — an incremental update was appended
     /// after this signature, i.e. the document was modified after signing.
     ModifiedAfterSigning,
+}
+
+/// PAdES baseline level inferred from the signature and embedded LTV material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadesLevel {
+    /// Core CMS signature only.
+    BaselineB,
+    /// CMS signature contains a parseable RFC 3161 timestamp token.
+    BaselineT,
+    /// Timestamp plus matching DSS validation material (`/Certs` and
+    /// `/OCSPs` or `/CRLs`) is embedded for offline validation.
+    BaselineLT,
+    /// Document/archive timestamp over the DSS. Not emitted by the current
+    /// writer, but reported for future-compatible readers if detected later.
+    BaselineLTA,
+}
+
+/// Revocation status derived from embedded DSS material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationStatus {
+    /// No embedded revocation material was available.
+    NotChecked,
+    /// OCSP/CRL bytes were embedded but this verifier did not derive a
+    /// definitive signer status from them.
+    EmbeddedMaterial,
+    /// A parseable embedded CRL did not list the signer certificate serial.
+    GoodFromEmbeddedCrl,
+    /// A parseable embedded CRL listed the signer certificate serial.
+    RevokedByEmbeddedCrl,
+    /// Revocation material was present but malformed or not usable.
+    Unknown,
+}
+
+/// Long-term-validation material supplied by a caller and embedded in `/DSS`.
+///
+/// `signature_index` is 1-based and matches [`SignatureReport::index`]. When
+/// omitted, the material is associated with every signature in the document.
+/// Certificate DER is supplemented with the signer certificates already present
+/// in each CMS signature so the DSS always carries the signer chain known to
+/// Oxide.
+#[derive(Debug, Clone, Default)]
+pub struct LtvMaterial {
+    pub signature_index: Option<usize>,
+    pub certificates_der: Vec<Vec<u8>>,
+    pub ocsp_responses_der: Vec<Vec<u8>>,
+    pub crls_der: Vec<Vec<u8>>,
+}
+
+impl LtvMaterial {
+    fn is_empty(&self) -> bool {
+        self.certificates_der.is_empty()
+            && self.ocsp_responses_der.is_empty()
+            && self.crls_der.is_empty()
+    }
+}
+
+/// Per-signature LTV/PAdES validation report.
+#[derive(Debug, Clone, Serialize)]
+pub struct LtvReport {
+    pub pades_level: PadesLevel,
+    pub timestamp_token_count: usize,
+    pub invalid_timestamp_token_count: usize,
+    pub dss_present: bool,
+    pub vri_key: Option<String>,
+    pub vri_matched: bool,
+    pub embedded_certs: usize,
+    pub embedded_ocsp_responses: usize,
+    pub embedded_crls: usize,
+    pub revocation_status: RevocationStatus,
+    pub note: String,
+}
+
+impl Default for LtvReport {
+    fn default() -> Self {
+        Self {
+            pades_level: PadesLevel::BaselineB,
+            timestamp_token_count: 0,
+            invalid_timestamp_token_count: 0,
+            dss_present: false,
+            vri_key: None,
+            vri_matched: false,
+            embedded_certs: 0,
+            embedded_ocsp_responses: 0,
+            embedded_crls: 0,
+            revocation_status: RevocationStatus::NotChecked,
+            note: "no timestamp token or DSS validation material found".to_string(),
+        }
+    }
 }
 
 /// Signer certificate details (reported, not trust-validated).
@@ -220,6 +326,8 @@ pub struct SignatureReport {
     pub coverage: Coverage,
     /// Signer certificate details (when a cert was present and parsed).
     pub certificate: Option<CertInfo>,
+    /// PAdES/LTV material discovered for this signature.
+    pub ltv: LtvReport,
     /// Human-readable note on what was/wasn't checked.
     pub note: String,
 }
@@ -228,21 +336,150 @@ pub struct SignatureReport {
 pub fn verify_signatures(doc: &PdfDocument) -> Result<Vec<SignatureReport>> {
     let reader = doc.reader();
     let file = reader.file_bytes();
+    let dss = read_dss_index(reader);
     let mut reports = Vec::new();
 
     for (idx, field) in find_signature_fields(doc).into_iter().enumerate() {
-        reports.push(verify_one(&field, file, idx + 1));
+        reports.push(verify_one(&field, file, idx + 1, &dss));
     }
     Ok(reports)
+}
+
+/// Embed PAdES long-term-validation material in a catalog `/DSS` dictionary.
+///
+/// This is an incremental update: original bytes stay untouched, existing
+/// signatures remain cryptographically valid for their signed byte ranges, and
+/// their coverage will correctly report `modified_after_signing` after the DSS
+/// append. The writer embeds caller-supplied OCSP/CRL bytes as opaque streams
+/// and adds signer certificates already present in CMS signatures.
+pub fn add_ltv_material(doc: &PdfDocument, material: &LtvMaterial) -> Result<Vec<u8>> {
+    let reader = doc.reader();
+    if reader.is_encrypted() {
+        return Err(OxideError::UnsupportedFeature(
+            "embedding LTV/DSS material in encrypted inputs is not yet supported".to_string(),
+        ));
+    }
+    if material.is_empty() {
+        return Err(OxideError::MalformedPdf(
+            "LTV/DSS material must include at least one cert, OCSP response, or CRL".to_string(),
+        ));
+    }
+
+    let fields = find_signature_fields(doc);
+    if fields.is_empty() {
+        return Err(OxideError::MalformedPdf(
+            "LTV/DSS embedding requires at least one signature field".to_string(),
+        ));
+    }
+
+    if let Some(index) = material.signature_index {
+        if index == 0 || index > fields.len() {
+            return Err(OxideError::MalformedPdf(format!(
+                "LTV signature_index {index} is out of range for {} signature(s)",
+                fields.len()
+            )));
+        }
+    }
+
+    let selected = fields
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| material.signature_index.is_none_or(|n| n == idx + 1))
+        .collect::<Vec<_>>();
+
+    let (root_number, root_generation) = reader.root_reference().ok_or_else(|| {
+        OxideError::MalformedPdf("LTV/DSS writer: trailer is missing /Root".to_string())
+    })?;
+    let mut catalog = reader
+        .get_object(root_number, root_generation)?
+        .as_dict()
+        .cloned()
+        .ok_or_else(|| OxideError::MalformedPdf("/Root is not a dictionary".to_string()))?;
+
+    let mut certs = material.certificates_der.clone();
+    for (_, field) in &selected {
+        if let Some(contents) = field
+            .sig_dict
+            .get("Contents")
+            .and_then(PdfObject::as_string)
+        {
+            for der in cms_certificate_der(contents) {
+                push_unique_bytes(&mut certs, der);
+            }
+        }
+    }
+    for cert in &certs {
+        Certificate::from_der(cert)
+            .map_err(|e| OxideError::MalformedPdf(format!("LTV certificate DER: {e}")))?;
+    }
+    for crl in &material.crls_der {
+        CertificateList::from_der(crl)
+            .map_err(|e| OxideError::MalformedPdf(format!("LTV CRL DER: {e}")))?;
+    }
+
+    let next = next_free_object_number(reader);
+    let dss_number = next;
+    let mut number = next + 1;
+    let mut raw_objects = Vec::new();
+
+    let cert_refs = append_dss_streams(&mut raw_objects, &mut number, &certs);
+    let ocsp_refs = append_dss_streams(&mut raw_objects, &mut number, &material.ocsp_responses_der);
+    let crl_refs = append_dss_streams(&mut raw_objects, &mut number, &material.crls_der);
+
+    let mut vri = PdfDictionary::empty();
+    for (_, field) in selected {
+        let Some(contents) = field
+            .sig_dict
+            .get("Contents")
+            .and_then(PdfObject::as_string)
+        else {
+            continue;
+        };
+        let key = signature_vri_key(contents);
+        let mut entry = PdfDictionary::empty();
+        if !cert_refs.is_empty() {
+            entry.insert("Cert", PdfObject::Array(cert_refs.clone()));
+        }
+        if !ocsp_refs.is_empty() {
+            entry.insert("OCSP", PdfObject::Array(ocsp_refs.clone()));
+        }
+        if !crl_refs.is_empty() {
+            entry.insert("CRL", PdfObject::Array(crl_refs.clone()));
+        }
+        vri.insert(key, PdfObject::Dictionary(entry));
+    }
+
+    let mut dss = PdfDictionary::empty();
+    if !cert_refs.is_empty() {
+        dss.insert("Certs", PdfObject::Array(cert_refs));
+    }
+    if !ocsp_refs.is_empty() {
+        dss.insert("OCSPs", PdfObject::Array(ocsp_refs));
+    }
+    if !crl_refs.is_empty() {
+        dss.insert("CRLs", PdfObject::Array(crl_refs));
+    }
+    dss.insert("VRI", PdfObject::Dictionary(vri));
+
+    catalog.insert("DSS", reference(dss_number, 0));
+    raw_objects.push(raw_object(
+        root_number,
+        root_generation,
+        &PdfObject::Dictionary(catalog),
+    ));
+    raw_objects.push(raw_object(dss_number, 0, &PdfObject::Dictionary(dss)));
+
+    write_incremental_update_raw(reader, raw_objects)
 }
 
 /// Apply an RSA/SHA-256 detached CMS signature as an incremental update.
 ///
 /// The returned bytes preserve the original input as an exact prefix, append a
 /// signature field/widget plus signature dictionary, patch `/ByteRange`, and
-/// fill the `/Contents` placeholder with DER CMS. Trust-chain validation,
-/// timestamps, and revocation/LTV data are intentionally separate from this
-/// core signing primitive.
+/// fill the `/Contents` placeholder with DER CMS. A caller-supplied timestamp
+/// token can be embedded in CMS; DSS revocation/certificate material is added
+/// afterward with [`add_ltv_material`]. Trust-chain and network policy remain
+/// caller-owned.
 pub fn sign_document(
     doc: &PdfDocument,
     signer: &PdfSigner,
@@ -391,7 +628,7 @@ pub fn sign_document(
         OxideError::MalformedPdf("signature writer produced an invalid /ByteRange".to_string())
     })?;
     let digest = Sha256::digest(&signed_bytes);
-    let cms = build_detached_cms(signer, &digest)?;
+    let cms = build_detached_cms(signer, &digest, options.timestamp_token_der.as_deref())?;
     if cms.len() > options.contents_reserved_bytes {
         return Err(OxideError::ResourceLimit(format!(
             "CMS signature is {} bytes but /Contents reserved only {} bytes",
@@ -475,7 +712,230 @@ fn walk_field(
     }
 }
 
-fn verify_one(field: &SigField, file: &[u8], index: usize) -> SignatureReport {
+#[derive(Default)]
+struct DssIndex {
+    present: bool,
+    certs: Vec<Vec<u8>>,
+    ocsp: Vec<Vec<u8>>,
+    crls: Vec<Vec<u8>>,
+    vri: std::collections::BTreeMap<String, DssVriEntry>,
+}
+
+#[derive(Default)]
+struct DssVriEntry {
+    certs: Vec<Vec<u8>>,
+    ocsp: Vec<Vec<u8>>,
+    crls: Vec<Vec<u8>>,
+}
+
+fn read_dss_index(reader: &PdfReader) -> DssIndex {
+    let mut index = DssIndex::default();
+    let Some((root, root_generation)) = reader.root_reference() else {
+        return index;
+    };
+    let Ok(PdfObject::Dictionary(catalog)) = reader.get_object(root, root_generation) else {
+        return index;
+    };
+    let Some(dss) = resolve_dict(catalog.get("DSS"), reader) else {
+        return index;
+    };
+    index.present = true;
+    index.certs = resolve_stream_array(dss.get("Certs"), reader);
+    index.ocsp = resolve_stream_array(dss.get("OCSPs"), reader);
+    index.crls = resolve_stream_array(dss.get("CRLs"), reader);
+
+    if let Some(vri_dict) = resolve_dict(dss.get("VRI"), reader) {
+        for (key, value) in vri_dict.entries() {
+            let Some(entry_dict) = resolve_dict(Some(value), reader) else {
+                continue;
+            };
+            index.vri.insert(
+                key.clone(),
+                DssVriEntry {
+                    certs: resolve_stream_array(entry_dict.get("Cert"), reader),
+                    ocsp: resolve_stream_array(entry_dict.get("OCSP"), reader),
+                    crls: resolve_stream_array(entry_dict.get("CRL"), reader),
+                },
+            );
+        }
+    }
+
+    index
+}
+
+fn resolve_stream_array(obj: Option<&PdfObject>, reader: &PdfReader) -> Vec<Vec<u8>> {
+    resolve_array(obj, reader)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|obj| resolve_stream_bytes(&obj, reader))
+        .collect()
+}
+
+fn resolve_stream_bytes(obj: &PdfObject, reader: &PdfReader) -> Option<Vec<u8>> {
+    match reader.resolve(obj.clone()).ok()? {
+        PdfObject::Stream { raw, .. } => Some(raw),
+        PdfObject::String(bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
+fn build_ltv_report(
+    contents: &[u8],
+    dss: &DssIndex,
+    cms: &CmsResult,
+    cert: Option<&CertInfo>,
+) -> LtvReport {
+    let vri_key = signature_vri_key(contents);
+    let vri_entry = dss.vri.get(&vri_key);
+    let (embedded_certs, embedded_ocsp, embedded_crls, crl_bytes) = if let Some(entry) = vri_entry {
+        (
+            entry.certs.len(),
+            entry.ocsp.len(),
+            entry.crls.len(),
+            entry.crls.as_slice(),
+        )
+    } else {
+        (
+            dss.certs.len(),
+            dss.ocsp.len(),
+            dss.crls.len(),
+            dss.crls.as_slice(),
+        )
+    };
+
+    let revocation_status = revocation_status_from_crls(crl_bytes, cert);
+    let has_timestamp = cms.timestamp_token_count > 0;
+    let has_validation_material =
+        embedded_certs > 0 && (embedded_ocsp > 0 || embedded_crls > 0) && vri_entry.is_some();
+    let pades_level = if has_timestamp && has_validation_material {
+        PadesLevel::BaselineLT
+    } else if has_timestamp {
+        PadesLevel::BaselineT
+    } else {
+        PadesLevel::BaselineB
+    };
+
+    let note = match pades_level {
+        PadesLevel::BaselineLT => {
+            "PAdES B-LT material present: timestamp token plus matching DSS VRI cert/revocation streams; embedded CRLs are checked for signer serial, but trust-chain/OCSP policy/TSA imprint validation is caller policy".to_string()
+        }
+        PadesLevel::BaselineT => {
+            "PAdES B-T material present: CMS has a parseable signature timestamp token; timestamp imprint and TSA trust are not validated here".to_string()
+        }
+        PadesLevel::BaselineB if dss.present => {
+            if vri_entry.is_some() {
+                "DSS VRI material present, but no parseable CMS timestamp token; not promoted beyond PAdES B-B by this verifier".to_string()
+            } else {
+                "DSS present but no VRI entry matched this signature's /Contents hash".to_string()
+            }
+        }
+        PadesLevel::BaselineB => {
+            "no parseable CMS timestamp token or matching DSS validation material found".to_string()
+        }
+        PadesLevel::BaselineLTA => {
+            "PAdES B-LTA document timestamp material detected".to_string()
+        }
+    };
+
+    LtvReport {
+        pades_level,
+        timestamp_token_count: cms.timestamp_token_count,
+        invalid_timestamp_token_count: cms.invalid_timestamp_token_count,
+        dss_present: dss.present,
+        vri_key: Some(vri_key),
+        vri_matched: vri_entry.is_some(),
+        embedded_certs,
+        embedded_ocsp_responses: embedded_ocsp,
+        embedded_crls,
+        revocation_status,
+        note,
+    }
+}
+
+fn revocation_status_from_crls(crls: &[Vec<u8>], cert: Option<&CertInfo>) -> RevocationStatus {
+    if crls.is_empty() {
+        return RevocationStatus::NotChecked;
+    }
+    let Some(cert) = cert else {
+        return RevocationStatus::EmbeddedMaterial;
+    };
+    let mut parsed_any = false;
+    for crl in crls {
+        let Ok(list) = CertificateList::from_der(crl) else {
+            continue;
+        };
+        parsed_any = true;
+        if let Some(revoked) = &list.tbs_cert_list.revoked_certificates {
+            if revoked
+                .iter()
+                .any(|entry| hex_upper(entry.serial_number.as_bytes()) == cert.serial_hex)
+            {
+                return RevocationStatus::RevokedByEmbeddedCrl;
+            }
+        }
+    }
+    if parsed_any {
+        RevocationStatus::GoodFromEmbeddedCrl
+    } else {
+        RevocationStatus::Unknown
+    }
+}
+
+fn append_dss_streams(
+    raw_objects: &mut Vec<RawIncrementalObject>,
+    next_number: &mut u32,
+    streams: &[Vec<u8>],
+) -> Vec<PdfObject> {
+    let mut refs = Vec::with_capacity(streams.len());
+    for bytes in streams {
+        let number = *next_number;
+        *next_number += 1;
+        refs.push(reference(number, 0));
+        raw_objects.push(raw_object(number, 0, &dss_stream(bytes.clone())));
+    }
+    refs
+}
+
+fn dss_stream(raw: Vec<u8>) -> PdfObject {
+    PdfObject::Stream {
+        dict: PdfDictionary::empty(),
+        raw,
+    }
+}
+
+fn cms_certificate_der(contents: &[u8]) -> Vec<Vec<u8>> {
+    let der = trim_trailing_zeros(contents);
+    let Ok(ci) = ContentInfo::from_der(der) else {
+        return Vec::new();
+    };
+    let Ok(signed) = ci.content.decode_as::<SignedData>() else {
+        return Vec::new();
+    };
+    let Some(certs) = signed.certificates else {
+        return Vec::new();
+    };
+    certs
+        .0
+        .iter()
+        .filter_map(|choice| match choice {
+            CertificateChoices::Certificate(cert) => cert.to_der().ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn push_unique_bytes(out: &mut Vec<Vec<u8>>, bytes: Vec<u8>) {
+    if !out.iter().any(|existing| existing == &bytes) {
+        out.push(bytes);
+    }
+}
+
+fn signature_vri_key(contents: &[u8]) -> String {
+    let digest = Sha1::digest(trim_trailing_zeros(contents));
+    hex_upper(&digest)
+}
+
+fn verify_one(field: &SigField, file: &[u8], index: usize, dss: &DssIndex) -> SignatureReport {
     let sig = &field.sig_dict;
     let mut report = SignatureReport {
         index,
@@ -490,6 +950,7 @@ fn verify_one(field: &SigField, file: &[u8], index: usize) -> SignatureReport {
         validity: SignatureValidity::Error,
         coverage: Coverage::ModifiedAfterSigning,
         certificate: None,
+        ltv: LtvReport::default(),
         note: String::new(),
     };
 
@@ -524,9 +985,11 @@ fn verify_one(field: &SigField, file: &[u8], index: usize) -> SignatureReport {
 
     match verify_cms(&contents, &signed_data_bytes) {
         Ok(result) => {
+            let ltv = build_ltv_report(&contents, dss, &result, result.certificate.as_ref());
             report.validity = result.validity;
             report.digest_algorithm = result.digest_algorithm;
             report.certificate = result.certificate;
+            report.ltv = ltv;
         }
         Err(msg) => {
             report.validity = SignatureValidity::Error;
@@ -535,7 +998,7 @@ fn verify_one(field: &SigField, file: &[u8], index: usize) -> SignatureReport {
         }
     }
 
-    report.note = scope_note(&report.validity);
+    report.note = format!("{}. {}", scope_note(&report.validity), report.ltv.note);
     report
 }
 
@@ -547,8 +1010,9 @@ fn scope_note(validity: &SignatureValidity) -> String {
         SignatureValidity::Error => "could not verify",
     };
     format!(
-        "{base}. NOT checked: trust chain to a root CA, revocation (OCSP/CRL), \
-         certificate validity period, and timestamp tokens."
+        "{base}. Trust-chain validation to a root CA, certificate validity-period \
+         enforcement, OCSP response policy validation, and timestamp imprint/TSA trust are \
+         not verdict gates"
     )
 }
 
@@ -556,6 +1020,8 @@ struct CmsResult {
     validity: SignatureValidity,
     digest_algorithm: Option<String>,
     certificate: Option<CertInfo>,
+    timestamp_token_count: usize,
+    invalid_timestamp_token_count: usize,
 }
 
 /// Verify a detached CMS SignedData blob over `content` (the signed file bytes).
@@ -578,6 +1044,7 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
 
     let digest_oid = signer.digest_alg.oid;
     let digest_name = digest_oid_name(&digest_oid);
+    let (timestamp_token_count, invalid_timestamp_token_count) = cms_timestamp_token_counts(signer);
 
     // Find the signer certificate.
     let cert = find_signer_cert(&signed, signer);
@@ -591,6 +1058,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
                 validity: SignatureValidity::UnsupportedAlgorithm,
                 digest_algorithm: digest_name,
                 certificate: cert_info,
+                timestamp_token_count,
+                invalid_timestamp_token_count,
             })
         }
     };
@@ -625,6 +1094,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
             validity: SignatureValidity::Invalid,
             digest_algorithm: digest_name,
             certificate: cert_info,
+            timestamp_token_count,
+            invalid_timestamp_token_count,
         });
     }
 
@@ -645,6 +1116,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
             validity: SignatureValidity::UnsupportedAlgorithm,
             digest_algorithm: digest_name,
             certificate: cert_info,
+            timestamp_token_count,
+            invalid_timestamp_token_count,
         });
     }
 
@@ -663,6 +1136,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
         validity,
         digest_algorithm: digest_name,
         certificate: cert_info,
+        timestamp_token_count,
+        invalid_timestamp_token_count,
     })
 }
 
@@ -756,6 +1231,31 @@ fn signed_attr_message_digest(attrs: &x509_cert::attr::Attributes) -> Option<Vec
         }
     }
     None
+}
+
+fn cms_timestamp_token_counts(signer: &SignerInfo) -> (usize, usize) {
+    let mut valid = 0usize;
+    let mut invalid = 0usize;
+    let Some(attrs) = &signer.unsigned_attrs else {
+        return (valid, invalid);
+    };
+    for attr in attrs.iter() {
+        if attr.oid != OID_SIGNATURE_TIMESTAMP_TOKEN {
+            continue;
+        }
+        for value in attr.values.iter() {
+            let Ok(der) = value.to_der() else {
+                invalid += 1;
+                continue;
+            };
+            if ContentInfo::from_der(&der).is_ok() {
+                valid += 1;
+            } else {
+                invalid += 1;
+            }
+        }
+    }
+    (valid, invalid)
 }
 
 /// Re-encode the signed attributes as an explicit `SET OF Attribute` (tag
@@ -1001,7 +1501,11 @@ fn patch_contents_hex(out: &mut [u8], hex_start: usize, reserved_bytes: usize, c
     }
 }
 
-fn build_detached_cms(signer: &PdfSigner, content_digest: &[u8]) -> Result<Vec<u8>> {
+fn build_detached_cms(
+    signer: &PdfSigner,
+    content_digest: &[u8],
+    timestamp_token_der: Option<&[u8]>,
+) -> Result<Vec<u8>> {
     let content = EncapsulatedContentInfo {
         econtent_type: const_oid::db::rfc5911::ID_DATA,
         econtent: None,
@@ -1030,6 +1534,11 @@ fn build_detached_cms(signer: &PdfSigner, content_digest: &[u8]) -> Result<Vec<u
                 .map_err(|e| OxideError::MalformedPdf(format!("CMS signing time: {e}")))?,
         )
         .map_err(|e| OxideError::MalformedPdf(format!("CMS signed attribute: {e}")))?;
+    if let Some(token_der) = timestamp_token_der {
+        signer_info
+            .add_unsigned_attribute(signature_timestamp_attribute(token_der)?)
+            .map_err(|e| OxideError::MalformedPdf(format!("CMS unsigned attribute: {e}")))?;
+    }
 
     let mut builder = SignedDataBuilder::new(&content);
     builder
@@ -1049,6 +1558,21 @@ fn build_detached_cms(signer: &PdfSigner, content_digest: &[u8]) -> Result<Vec<u
     content_info
         .to_der()
         .map_err(|e| OxideError::MalformedPdf(format!("CMS encode: {e}")))
+}
+
+fn signature_timestamp_attribute(token_der: &[u8]) -> Result<Attribute> {
+    ContentInfo::from_der(token_der)
+        .map_err(|e| OxideError::MalformedPdf(format!("timestamp token ContentInfo: {e}")))?;
+    let value = AttributeValue::from_der(token_der)
+        .map_err(|e| OxideError::MalformedPdf(format!("timestamp token attribute: {e}")))?;
+    let mut values = SetOfVec::new();
+    values
+        .insert(value)
+        .map_err(|e| OxideError::MalformedPdf(format!("timestamp token set: {e}")))?;
+    Ok(Attribute {
+        oid: OID_SIGNATURE_TIMESTAMP_TOKEN,
+        values,
+    })
 }
 
 // ---------------------------------------------------------------------------
