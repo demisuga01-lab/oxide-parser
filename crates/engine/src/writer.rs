@@ -2249,9 +2249,10 @@ fn dependency_closure_for_linearization(
     top_pages: &BTreeSet<u32>,
 ) -> BTreeSet<u32> {
     let mut closure = BTreeSet::new();
+    let mut visited = BTreeSet::new();
     let mut stack: Vec<u32> = roots.iter().copied().collect();
     while let Some(number) = stack.pop() {
-        if !closure.insert(number) {
+        if !visited.insert(number) {
             continue;
         }
         let Some(object) = object_map.get(&number) else {
@@ -2265,10 +2266,11 @@ fn dependency_closure_for_linearization(
         {
             continue;
         }
+        closure.insert(number);
         let mut refs = BTreeSet::new();
         collect_page_local_references(object, &mut refs);
         for reference in refs {
-            if !closure.contains(&reference) {
+            if !visited.contains(&reference) {
                 stack.push(reference);
             }
         }

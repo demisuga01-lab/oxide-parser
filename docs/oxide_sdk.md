@@ -38,7 +38,7 @@ The capstone integration test suite is in
 | Workflow | Result |
 | --- | --- |
 | Create PDF -> watermark edit -> encrypt -> decrypt -> extract | Passed. Authored text and watermark survived the full flow. |
-| PDF/A conversion -> linearize -> sign -> verify | Passed at the library level. The signed output verifies cryptographically. qpdf still reports linearization hint-table warnings on the capstone CLI linearization smoke, listed below. |
+| PDF/A conversion -> linearize -> sign -> verify | Passed at the library level. The signed output verifies cryptographically. GA Prompt 1 fixed the later qpdf hint-table warnings. |
 | Fill form -> flatten -> redact | Passed. Filled values were visible, fields were removed by flattening, and the redacted value was no longer extractable. |
 
 Cross-surface extraction consistency is recorded in
@@ -65,9 +65,9 @@ library.
 | Signed PDF | `qpdf --check`, Oxide verify-sig | Clean. One RSA/SHA-256 signature reported cryptographically valid with whole-file coverage. |
 | Optimized PDF | `qpdf --check` | Clean |
 | AES-256 encrypted PDF | `qpdf --check --password=capstone` | Clean, AESv3 reported |
-| Linearized PDF | `qpdf --check`, `qpdf --show-linearization` | Recognized as linearized, but qpdf reports hint-table warnings. This is a release blocker for claiming qpdf-clean linearization. |
+| Linearized PDF | `qpdf --check`, `qpdf --show-linearization` | Clean after GA Prompt 1 across the supported fixture breadth. |
 
-The linearization warnings were:
+The Prompt 11 linearization warnings were:
 
 ```text
 object count mismatch for page 0: hint table 25, computed 23
@@ -77,6 +77,12 @@ page length mismatch for page 2: hint table 651, computed 68403
 page 2 shared object 15 in hint table but not computed list
 qpdf: operation succeeded with warnings
 ```
+
+GA Prompt 1 mapped these warnings to first-page dependency grouping: later
+page dictionaries were inserted into the first-page closure before traversal
+stopped. The fixed grouping is qpdf-clean on `minimal.pdf`, `flate.pdf`,
+`multi_stream.pdf`, `basicapi.pdf`, `tracemonkey.pdf`, and `form_160f.pdf`.
+See `docs/linearization_qpdf_clean_ga1.md`.
 
 During capstone validation, veraPDF initially rejected PDF/A output because
 the converted file did not have a non-empty trailer `/ID`. The conversion path
@@ -206,7 +212,7 @@ best elapsed time and max peak working set across the three runs.
 | PDF/A conversion example | 20.1 | 8.91 | Passed |
 | RSA signing example | 13.1 | 4.97 | Passed |
 | Optimize CLI | 12.5 | 6.04 | Passed |
-| Linearize CLI | 12.7 | 6.80 | Produced output, but qpdf reports hint-table warnings |
+| Linearize CLI | 12.7 | 6.80 | Passed; GA Prompt 1 subsequently made the hint tables qpdf-clean |
 | Encrypt AES-256 CLI | 20.3 | 6.56 | Passed |
 
 These are smoke operation benchmarks, not statistically rigorous throughput
@@ -220,7 +226,7 @@ claims.
 | OCR | Optional Tesseract-backed path | Useful self-hosted OCR without a cloud dependency. Trails ML layout systems for noisy scans and scanned tables. |
 | Authoring | Builder, pages, text, vector graphics, images, whole TrueType embedding, tables, flow layout | Enough for programmatic document generation. Trails mature iText/PDFlib/Apryse layout breadth and font subsetting depth. |
 | Editing | Watermarks, overlays, underlays, headers/footers, incremental updates, redaction, annotations, form fill/flatten | Practical editing surface exists. Redaction has extract-back tests. Advanced surgical content editing remains limited. |
-| Structural ops | Merge/split/extract/rotate/repair/optimize/encrypt/decrypt plus linearization attempt | qpdf-class for many operations; not yet qpdf-clean for Oxide linearization hints. |
+| Structural ops | Merge/split/extract/rotate/repair/optimize/encrypt/decrypt plus qpdf-clean linearization for the supported subset | qpdf-class for the covered structural operations; object-stream packing inside linearized layout remains a size optimization follow-up. |
 | PDF/A and PDF/UA | PDF/A-1b and PDF/A-2b validation/conversion path with veraPDF-pass on capstone examples; PDF/UA basic validation/best-effort tagging | Useful compliance foundation. Not a certified compliance product yet; broader veraPDF corpus and manual accessibility review are needed. |
 | Signatures | RSA/SHA-256 signing and verification over ByteRange with incremental update | Core signing capability exists. PAdES/LTV, timestamps, ECDSA breadth, and system trust-store integration remain follow-ups. |
 | Surfaces | Rust library, CLI, C ABI, WASM, HTTP server | Strong embeddability and self-hosting story. |
@@ -251,7 +257,6 @@ It trails on:
 - Certified compliance and mature accessibility workflows.
 - Signature LTV/PAdES depth and trust-store breadth.
 - Mature enterprise SDK breadth compared with iText, PDFlib, and Apryse.
-- qpdf-clean linearization hint validation.
 
 ## Release-Readiness Verdict
 
@@ -271,23 +276,21 @@ Reasons it is ready for v0.x:
 
 Release blockers before v1.0:
 
-1. Fix Oxide linearization hint streams until `qpdf --check` and
-   `qpdf --show-linearization` are warning-free on generated output.
-2. Run and publish the full renderer benchmark, then address the real-world
+1. Run and publish the full renderer benchmark, then address the real-world
    fidelity gaps in JPX, complex vectors, forms, RTL, scans, and multi-column
    layouts.
-3. Broaden PDF/A validation over a larger real corpus and keep veraPDF as the
+2. Broaden PDF/A validation over a larger real corpus and keep veraPDF as the
    oracle. PDF/UA needs manual accessibility review before any full-conformance
    claim.
-4. Complete signature follow-ups: ECDSA coverage, timestamps, PAdES/LTV, OCSP
+3. Complete signature follow-ups: ECDSA coverage, timestamps, PAdES/LTV, OCSP
    and CRL embedding, and configurable/system trust stores.
-5. Re-run packaging with a clean release branch and no dirty-tree caveat. Keep
+4. Re-run packaging with a clean release branch and no dirty-tree caveat. Keep
    `cargo publish --dry-run`, feature matrices, and docs.rs builds green.
-6. Complete a fresh license/NOTICE audit after any new crypto/font/compliance
+5. Complete a fresh license/NOTICE audit after any new crypto/font/compliance
    dependency changes.
 
 Bottom line: Oxide now has the shape of a complete, self-hostable, pure-Rust
 enterprise PDF SDK. The honest commercial positioning is strong for private,
 controlled deployments and SDK pilots today, with rendering fidelity,
-linearization hints, certified compliance, and advanced signatures as the
-remaining gaps before a v1.0-grade release claim.
+certified compliance, and advanced signatures as the remaining gaps before a
+v1.0-grade release claim.

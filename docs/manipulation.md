@@ -250,7 +250,9 @@ named destinations/name trees, page mode, page labels, and structure trees. Page
 thumbnails still return `UnsupportedFeature` and do not write an output file.
 Linearized output uses xref streams; packing regular objects into `/ObjStm`
 inside the linearized layout remains a size-optimization follow-up. The command
-will not emit a `/Linearized` file unless qpdf accepts it.
+will not emit a `/Linearized` file unless qpdf accepts it. The GA Prompt 1
+hint-table fix and qpdf-clean fixture breadth are recorded in
+`docs/linearization_qpdf_clean_ga1.md`.
 
 ## Validation
 

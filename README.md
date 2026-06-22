@@ -67,6 +67,7 @@ guidance.
 | [`docs/packaging.md`](docs/packaging.md) | Feature flags, publishing dry-runs, license audit, artifacts, release checklist. |
 | [`docs/parser_positioning.md`](docs/parser_positioning.md) | Honest positioning vs Docling / PyMuPDF / qpdf — wins **and** trails. |
 | [`docs/parser_benchmark.md`](docs/parser_benchmark.md) | The reproducible extraction-quality benchmark + numbers. |
+| [`docs/linearization_qpdf_clean_ga1.md`](docs/linearization_qpdf_clean_ga1.md) | qpdf-clean linearization hint-table fix and fixture breadth. |
 | [`docs/document_parsing.md`](docs/document_parsing.md) | The canonical `Document` model and the `parse` surface. |
 | [`docs/compliance.md`](docs/compliance.md) | PDF/A-1b/PDF/A-2b validation and bounded conversion, plus PDF/UA basic checks. |
 | [`docs/bindings.md`](docs/bindings.md) | C ABI and WebAssembly embedding. |
@@ -86,10 +87,9 @@ extraction, OCR'd-text recovery where PyMuPDF/Poppler do nothing, embeddability
 (bounded by Tesseract), pixel-faithful rendering (use Poppler/PDFium — see
 `docs/oxide_vs_poppler.md`), and the breadth of ML-model understanding on exotic
 layouts (Docling head-to-head not measured locally). Structural write operations
-are available for encrypt, rotate, optimize, repair, and linearization, though
-the capstone qpdf run still reports linearization hint-table warnings. New PDFs
-can be authored from scratch with `PdfBuilder` and `FlowDocument` (pages, text,
-vector graphics,
+are available for encrypt, rotate, optimize, repair, and qpdf-clean
+linearization for the supported structural subset. New PDFs can be authored
+from scratch with `PdfBuilder` and `FlowDocument` (pages, text, vector graphics,
 images, whole TrueType font embedding, tables, and single-column flow layout;
 see `docs/authoring.md`). Existing PDFs can be edited additively with
 watermarks, headers/footers, overlays/underlays, image stamps, and append-only

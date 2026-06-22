@@ -4,9 +4,10 @@
 //! and the CLI smoke (qpdf isn't a cargo dependency).
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use oxide_engine::crypto::{EncryptAlgorithm, EncryptParams};
-use oxide_engine::structural::{encrypt, optimize, repair, rotate_pages, Rotation};
+use oxide_engine::structural::{encrypt, linearize, optimize, repair, rotate_pages, Rotation};
 use oxide_engine::ContentEngine;
 
 fn fixture(name: &str) -> PathBuf {
@@ -22,6 +23,14 @@ fn open(name: &str) -> ContentEngine {
 
 fn open_bytes(bytes: Vec<u8>) -> ContentEngine {
     ContentEngine::open_bytes(bytes).expect("re-open written bytes")
+}
+
+fn qpdf_available() -> bool {
+    Command::new("qpdf")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 #[test]
@@ -207,6 +216,84 @@ fn optimize_recompresses_uncompressed_streams() {
         out.len()
     );
     let _ = report;
+}
+
+#[test]
+fn linearize_outputs_are_qpdf_clean_when_available() {
+    if !qpdf_available() {
+        eprintln!("NOTE: qpdf not found; skipped linearization hint-table validation");
+        return;
+    }
+
+    for name in [
+        "minimal.pdf",
+        "flate.pdf",
+        "multi_stream.pdf",
+        "basicapi.pdf",
+        "tracemonkey.pdf",
+        "form_160f.pdf",
+    ] {
+        let engine = open(name);
+        let original_pages = engine.page_count().unwrap();
+        let original_text = engine.get_page_text(1).unwrap_or_default();
+        let out = linearize::linearize(&engine).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let reparsed = open_bytes(out.clone());
+        assert_eq!(
+            reparsed.page_count().unwrap(),
+            original_pages,
+            "{name}: page count changed"
+        );
+        assert_eq!(
+            reparsed.get_page_text(1).unwrap_or_default().trim(),
+            original_text.trim(),
+            "{name}: page 1 text changed"
+        );
+
+        let temp = std::env::temp_dir().join(format!(
+            "oxide_linearize_qpdf_{}_{}.pdf",
+            std::process::id(),
+            name.replace('.', "_")
+        ));
+        std::fs::write(&temp, &out).expect("write linearized temp pdf");
+        let check = Command::new("qpdf")
+            .arg("--check")
+            .arg(&temp)
+            .output()
+            .expect("run qpdf --check");
+        let show = Command::new("qpdf")
+            .arg("--show-linearization")
+            .arg(&temp)
+            .output()
+            .expect("run qpdf --show-linearization");
+        let _ = std::fs::remove_file(&temp);
+
+        let check_output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&check.stdout),
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let show_output = format!(
+            "{}{}",
+            String::from_utf8_lossy(&show.stdout),
+            String::from_utf8_lossy(&show.stderr)
+        );
+        assert!(
+            check.status.success(),
+            "{name}: qpdf --check failed\n{check_output}"
+        );
+        assert!(
+            show.status.success(),
+            "{name}: qpdf --show-linearization failed\n{show_output}"
+        );
+        assert!(
+            !check_output.contains("WARNING") && !show_output.contains("WARNING"),
+            "{name}: qpdf reported linearization warnings\ncheck:\n{check_output}\nshow:\n{show_output}"
+        );
+        assert!(
+            check_output.contains("File is linearized"),
+            "{name}: qpdf did not report linearized output\n{check_output}"
+        );
+    }
 }
 
 // --- REPAIR -----------------------------------------------------------------
