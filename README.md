@@ -61,6 +61,8 @@ guidance.
 | Doc | What it covers |
 | --- | --- |
 | [`docs/self_hosting.md`](docs/self_hosting.md) | Running Oxide yourself: CLI, server, OCR, Docker, WASM, config. |
+| [`docs/api_overview.md`](docs/api_overview.md) | Stable Rust/API entry points and capability map. |
+| [`docs/stability.md`](docs/stability.md) | SemVer, MSRV, stable-vs-experimental policy, API drift checks. |
 | [`docs/parser_positioning.md`](docs/parser_positioning.md) | Honest positioning vs Docling / PyMuPDF / qpdf — wins **and** trails. |
 | [`docs/parser_benchmark.md`](docs/parser_benchmark.md) | The reproducible extraction-quality benchmark + numbers. |
 | [`docs/document_parsing.md`](docs/document_parsing.md) | The canonical `Document` model and the `parse` surface. |
@@ -68,6 +70,7 @@ guidance.
 | [`docs/bindings.md`](docs/bindings.md) | C ABI and WebAssembly embedding. |
 | [`docs/security.md`](docs/security.md) | Server security posture + deploy checklist. |
 | [`docs/jobs.md`](docs/jobs.md) | The async job API and its limitations. |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable API changes. |
 | [`.env.example`](.env.example) | The complete `OXIDE_*` server configuration reference. |
 
 ## What it's good at (and what it isn't)

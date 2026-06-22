@@ -60,6 +60,13 @@
 //!
 //! Runnable examples live in the crate's `examples/` directory
 //! (`cargo run --example getting_started -- input.pdf`).
+//!
+//! # Public API Stability
+//!
+//! `oxide_engine::prelude` is the curated integration surface. The crate root
+//! also exposes lower-level PDF internals for advanced users; those are useful
+//! but less stable while the crate remains pre-1.0. See `docs/api_overview.md`
+//! and `docs/stability.md` in the repository for the full policy.
 
 pub mod analysis;
 pub mod analyzer;
@@ -145,7 +152,7 @@ pub use editing::{
     ImageStampOptions, OverlayLayer, PdfEditor, RedactionOptions, WatermarkOptions,
 };
 pub use engine::{max_render_pixels, ContentEngine, PageResources, DEFAULT_MAX_RENDER_PIXELS};
-pub use error::{OxideError, Result};
+pub use error::{ErrorKind, OxideError, Result};
 pub use eval::{score, score_json, ScoreInput, ScoreOutput};
 pub use extract::{
     extract_fields, DocType, ExtractOptions, ExtractedFields, Field, FieldSource, FieldValue,
@@ -256,7 +263,7 @@ pub mod prelude {
         ImageStampOptions, OverlayLayer, PdfEditor, RedactionOptions, WatermarkOptions,
     };
     pub use crate::engine::ContentEngine;
-    pub use crate::error::{OxideError, Result};
+    pub use crate::error::{ErrorKind, OxideError, Result};
     pub use crate::eval::{score, score_json, ScoreInput, ScoreOutput};
     pub use crate::extract::{
         extract_fields, DocType, ExtractOptions, ExtractedFields, Field, FieldValue, LineItem,
