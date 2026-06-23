@@ -1,5 +1,9 @@
 # Oxide
 
+<p align="center">
+  <img src="docs/assets/oxide-github-hero.svg" alt="Oxide Enterprise PDF SDK workflow banner" width="100%" />
+</p>
+
 **A Rust-native document parser.** Oxide turns PDFs into structured, AI/RAG-ready
 output — **Markdown, JSON, semantic HTML, RAG chunks, and key-value fields** —
 with **qpdf-class structural operations** (merge / split / extract-pages), an
@@ -30,6 +34,92 @@ oxide extract-fields input.pdf --type invoice
 # What did I build? (reports engine version + whether OCR is compiled in)
 oxide --version
 ```
+
+## Step-by-step setup
+
+<details open>
+<summary><strong>1. Install prerequisites</strong></summary>
+
+- Rust stable toolchain with Cargo.
+- `qpdf` for structural validation checks.
+- Optional: Poppler and veraPDF for render/compliance validation.
+- Optional OCR: Tesseract with language data when building with `--features ocr`.
+
+```sh
+rustup update stable
+cargo --version
+qpdf --version
+```
+
+</details>
+
+<details>
+<summary><strong>2. Build the CLI</strong></summary>
+
+```sh
+cargo build --release -p oxide-cli
+
+# Windows
+target\release\oxide.exe --version
+
+# macOS/Linux
+./target/release/oxide --version
+```
+
+For scanned-page OCR support:
+
+```sh
+cargo build --release -p oxide-cli --features ocr
+```
+
+</details>
+
+<details>
+<summary><strong>3. Parse, chunk, and extract fields</strong></summary>
+
+```sh
+oxide parse input.pdf --format markdown --output output.md
+oxide parse input.pdf --format json --output output.json
+oxide chunk input.pdf --target-tokens 512 --output chunks.json
+oxide extract-fields input.pdf --type invoice --output fields.json
+```
+
+Use this path for RAG ingestion, document intelligence, and structured
+automation over digital-born PDFs.
+
+</details>
+
+<details>
+<summary><strong>4. Run structural and compliance workflows</strong></summary>
+
+```sh
+oxide optimize input.pdf -o optimized.pdf
+oxide linearize input.pdf -o fast-web-view.pdf
+oxide encrypt input.pdf -o encrypted.pdf --password change-me
+```
+
+For compliance and release validation, pair Oxide output with external checks:
+
+```sh
+qpdf --check fast-web-view.pdf
+verapdf --format text compliant.pdf
+```
+
+</details>
+
+<details>
+<summary><strong>5. Embed Oxide in your product</strong></summary>
+
+- Rust library: `oxide-engine`
+- CLI automation: `oxide`
+- C ABI: `oxide-capi`
+- Browser/WASM: `oxide-wasm`
+- Self-hosted API: `oxide-server`
+
+Start with [`docs/api_overview.md`](docs/api_overview.md) for the Rust surface
+and [`docs/self_hosting.md`](docs/self_hosting.md) for the HTTP server.
+
+</details>
 
 ## Embedding
 
@@ -72,6 +162,7 @@ guidance.
 | [`docs/compliance.md`](docs/compliance.md) | PDF/A-1b/2b/2a/3b/3a validation and bounded conversion, plus PDF/UA basic checks. |
 | [`docs/bindings.md`](docs/bindings.md) | C ABI and WebAssembly embedding. |
 | [`docs/security.md`](docs/security.md) | Server security posture + deploy checklist. |
+| [`docs/security/posture.md`](docs/security/posture.md) | Consolidated hardening posture: fuzzing, differential checks, property tests, audit gates, and residual risk. |
 | [`docs/jobs.md`](docs/jobs.md) | The async job API and its limitations. |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable API changes. |
 | [`.env.example`](.env.example) | The complete `OXIDE_*` server configuration reference. |
