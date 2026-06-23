@@ -25,11 +25,25 @@ finding is backed by quoted code at `file:line`. No source was modified.
 >   With no anchors, trust is `NotVerified` and a self-signed signature is
 >   `ValidUntrusted`, never trusted. Guarantee tests in
 >   `crates/engine/tests/signatures.rs`.
+> - **H-2 (redaction skips alternate text representations) — FIXED.** Redaction
+>   now also scrubs the redacted text from `/ActualText`//Alt in marked-content
+>   `BDC`/`DP` property lists, from struct-tree / object-graph string values, and
+>   from the raw payloads of XMP `/Metadata` and embedded-file streams (not just
+>   the stream dictionary). Tests in `editing.rs` (`h2_alt_text_tests`) and the
+>   end-to-end `redaction_scrubs_secret_from_document_metadata`.
+> - **H-4 / H-5 / H-6 (unbounded image/CCITT/JBIG2 decode allocations) — FIXED.**
+>   A configurable decode-layer pixel cap (`OXIDE_MAX_DECODE_PIXELS`, default
+>   100M, mirroring the render cap) is now enforced *before* any pixel buffer is
+>   allocated, in `build_raw_image` (H-4), the CCITT sink (H-5), and the JBIG2
+>   sink (H-6); LZW/RunLength filter output is also capped like Flate. Oversized
+>   declarations become a clean error instead of a multi-gigabyte reservation, so
+>   untrusted input is now bounded end-to-end (decode **and** render). Guarantee
+>   tests in `images::decoder::tests` and `images::ccitt::tests`.
 >
-> Still **OPEN** (scheduled for the next fix batch): H-2 (redaction does not
-> scrub alternate text representations — `/ActualText`, struct tree, XMP,
-> attachments), and H-4/H-5/H-6 (unbounded image/CCITT/JBIG2 decode
-> allocations). The Medium/Low findings below remain as recorded.
+> **All 6 High findings are now closed.** The Medium/Low findings below remain
+> as recorded (notably M-2 ByteRange rigor, M-8 pre-1.0 crypto stack, the
+> zeroize/`RsaPrivateKey` residual) and the external audit + pilot remain the
+> next trust-builders beyond code-level fixes.
 
 > **Honest framing.** This is a *systematic and prioritized* review, **not an
 > exhaustive proof of absence**. Absence of a finding in an area does not prove

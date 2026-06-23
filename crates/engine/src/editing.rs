@@ -713,6 +713,15 @@ impl PdfEditor {
                     &mut redact_report,
                     &mut changes,
                 )?;
+                // H-2: the rewriter removes visible glyphs, but a tagged PDF can
+                // also carry the same text as inline /ActualText or /Alt in a
+                // marked-content property list (BDC/DP). Scrub those here, now
+                // that this page's removed-text set is complete.
+                let rewritten = if redact_report.scrub_metadata {
+                    scrub_marked_content_alt_text(&rewritten, &redact_report.removed_text)?
+                } else {
+                    rewritten
+                };
                 let number = changes.alloc();
                 changes.insert_new_stream(number, rewritten);
                 content_refs.push(reference(number, 0));
@@ -790,7 +799,26 @@ impl PdfEditor {
         for (number, generation) in self.document.reader().object_ids() {
             let object = changes.current_object(self.document.reader(), number, generation)?;
             let mut scrubbed = object.clone();
-            if scrub_pdf_strings(&mut scrubbed, removed_text) {
+            // Scrub string values throughout the object graph: /Info, annotation
+            // /Contents, and — critically for H-2 — /ActualText and /Alt string
+            // values in tagged-PDF structure elements and marked-content property
+            // lists, wherever they live in the object graph.
+            let mut changed = scrub_pdf_strings(&mut scrubbed, removed_text);
+            // H-2 / M-7: the raw payload of an XMP /Metadata stream or an
+            // embedded-file stream can carry a duplicate of the redacted text;
+            // scrub_pdf_strings only reaches a stream's *dictionary*, never its
+            // bytes. Scrub the decoded payload here and re-store it uncompressed.
+            if let PdfObject::Stream { dict, .. } = &scrubbed {
+                if is_scrubbable_payload_stream(dict) {
+                    if let Some(rebuilt) =
+                        scrub_stream_payload(&scrubbed, self.document.reader(), removed_text)?
+                    {
+                        scrubbed = rebuilt;
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
                 changes.insert_existing(number, generation, scrubbed);
             }
         }
@@ -2981,6 +3009,112 @@ fn scrub_pdf_strings(object: &mut PdfObject, removed_text: &BTreeSet<String>) ->
     }
 }
 
+/// A stream whose raw payload (not just its dictionary) may carry a duplicate of
+/// redacted text: the XMP `/Metadata` packet and embedded-file (`/EmbeddedFile`)
+/// attachment streams.
+fn is_scrubbable_payload_stream(dict: &PdfDictionary) -> bool {
+    matches!(dict.get_name("Type"), Some(ty)
+        if ty.eq_ignore_ascii_case("Metadata") || ty.eq_ignore_ascii_case("EmbeddedFile"))
+}
+
+/// Decode a textual/embedded stream, remove every occurrence of the redacted
+/// text from its bytes, and re-store it uncompressed (so the scrub is visible to
+/// any reader). Returns `None` if nothing changed.
+fn scrub_stream_payload(
+    stream: &PdfObject,
+    reader: &PdfReader,
+    removed_text: &BTreeSet<String>,
+) -> Result<Option<PdfObject>> {
+    let PdfObject::Stream { dict, .. } = stream else {
+        return Ok(None);
+    };
+    let decoded = decode_stream_lossless(stream, reader)?;
+    let Some(scrubbed) = scrub_bytes(&decoded.data, removed_text) else {
+        return Ok(None);
+    };
+    let mut new_dict = dict.clone();
+    // Stored decoded: drop the compression filter so the bytes are read verbatim;
+    // the writer re-computes /Length.
+    new_dict.remove("Filter");
+    new_dict.remove("DecodeParms");
+    new_dict.remove("DP");
+    new_dict.remove("Length");
+    Ok(Some(PdfObject::Stream {
+        dict: new_dict,
+        raw: scrubbed,
+    }))
+}
+
+/// Remove every occurrence of each redacted string's bytes from `data`. Operates
+/// at the byte level so binary embedded-file payloads are not corrupted by lossy
+/// text conversion. Returns `None` if nothing matched.
+fn scrub_bytes(data: &[u8], removed_text: &BTreeSet<String>) -> Option<Vec<u8>> {
+    let mut current = data.to_vec();
+    let mut changed = false;
+    for secret in removed_text {
+        let needle = secret.as_bytes();
+        if needle.is_empty() {
+            continue;
+        }
+        while let Some(pos) = current
+            .windows(needle.len())
+            .position(|window| window == needle)
+        {
+            current.drain(pos..pos + needle.len());
+            changed = true;
+        }
+    }
+    changed.then_some(current)
+}
+
+/// Re-parse a (already glyph-redacted) content stream and scrub redacted text
+/// from inline marked-content alternate representations (`/ActualText`, `/Alt`)
+/// carried in `BDC`/`DP` property lists, which the glyph rewriter passes through
+/// verbatim. The parser models a content-stream dictionary as an `Operand::Array`
+/// of alternating key/value operands, so the alternate text survives as a nested
+/// `Operand::String` until scrubbed here.
+fn scrub_marked_content_alt_text(
+    content: &[u8],
+    removed_text: &BTreeSet<String>,
+) -> Result<Vec<u8>> {
+    if removed_text.is_empty() {
+        return Ok(content.to_vec());
+    }
+    let operations = ContentParser::parse(content)?;
+    let mut out = Vec::new();
+    for mut op in operations {
+        if matches!(op.operator.as_str(), "BDC" | "DP") {
+            for operand in &mut op.operands {
+                scrub_operand_strings(operand, removed_text);
+            }
+        }
+        serialize_content_operation(&op, &mut out);
+    }
+    Ok(out)
+}
+
+fn scrub_operand_strings(operand: &mut Operand, removed_text: &BTreeSet<String>) {
+    match operand {
+        Operand::String(bytes) => {
+            let text = decode_pdf_text_string(bytes);
+            let scrubbed = removed_text
+                .iter()
+                .fold(text.clone(), |acc, secret| acc.replace(secret, ""));
+            if scrubbed != text {
+                if let PdfObject::String(new_bytes) = pdf_text_string(&scrubbed) {
+                    *bytes = new_bytes;
+                }
+            }
+        }
+        Operand::Array(items) => {
+            for item in items {
+                scrub_operand_strings(item, removed_text);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn rects_intersect(a: ImageRect, b: ImageRect) -> bool {
     let ax2 = a.x + a.width;
     let ay2 = a.y + a.height;
@@ -3067,5 +3201,91 @@ fn hex_digit(value: u8) -> char {
     match value {
         0..=9 => (b'0' + value) as char,
         _ => (b'A' + (value - 10)) as char,
+    }
+}
+
+#[cfg(test)]
+mod h2_alt_text_tests {
+    use super::*;
+
+    fn removed(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Decoded text of every string operand carried by BDC/DP marked-content ops
+    /// in a serialized content stream (operands are hex-encoded on the wire, so
+    /// we re-parse and decode rather than scan the raw bytes).
+    fn marked_content_strings(content: &[u8]) -> Vec<String> {
+        fn collect(operand: &Operand, out: &mut Vec<String>) {
+            match operand {
+                Operand::String(bytes) => out.push(decode_pdf_text_string(bytes)),
+                Operand::Array(items) => items.iter().for_each(|it| collect(it, out)),
+                _ => {}
+            }
+        }
+        ContentParser::parse(content)
+            .unwrap()
+            .into_iter()
+            .filter(|op| matches!(op.operator.as_str(), "BDC" | "DP"))
+            .flat_map(|op| {
+                let mut out = Vec::new();
+                op.operands.iter().for_each(|o| collect(o, &mut out));
+                out
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scrubs_inline_actualtext_in_marked_content() {
+        // A tagged-PDF span carrying the redacted text as /ActualText (and /Alt)
+        // must have it stripped, even though the glyph rewriter passes BDC
+        // through verbatim.
+        let content = b"/Span <</ActualText (SECRET) /Alt (SECRET phrase)>> BDC (x) Tj EMC".to_vec();
+        let out = scrub_marked_content_alt_text(&content, &removed(&["SECRET"])).unwrap();
+        let alt = marked_content_strings(&out).join("|");
+        assert!(
+            !alt.contains("SECRET"),
+            "inline /ActualText leaked the redacted text: {alt:?}"
+        );
+        // The marked-content operators themselves are preserved.
+        let ops: Vec<String> = ContentParser::parse(&out)
+            .unwrap()
+            .into_iter()
+            .map(|op| op.operator)
+            .collect();
+        assert!(ops.contains(&"BDC".to_string()) && ops.contains(&"EMC".to_string()));
+    }
+
+    #[test]
+    fn marked_content_scrub_preserves_non_secret_alt_text() {
+        let content = b"/Span <</ActualText (Public)>> BDC (x) Tj EMC".to_vec();
+        let out = scrub_marked_content_alt_text(&content, &removed(&["SECRET"])).unwrap();
+        let alt = marked_content_strings(&out).join("|");
+        assert!(alt.contains("Public"), "non-secret /ActualText was lost: {alt:?}");
+    }
+
+    #[test]
+    fn scrub_bytes_removes_secret_from_xmp_like_payload() {
+        // XMP packet duplicating a redacted name in dc:creator.
+        let xmp = b"<x:xmpmeta><dc:creator>Jane SECRET Doe</dc:creator></x:xmpmeta>";
+        let scrubbed = scrub_bytes(xmp, &removed(&["SECRET"])).expect("payload changed");
+        assert!(!scrubbed.windows(6).any(|w| w == b"SECRET"));
+        // A payload with no secret is left untouched (None).
+        assert!(scrub_bytes(b"<x:xmpmeta>clean</x:xmpmeta>", &removed(&["SECRET"])).is_none());
+    }
+
+    #[test]
+    fn payload_stream_types_are_recognized() {
+        let mut meta = PdfDictionary::empty();
+        meta.insert("Type", PdfObject::Name("Metadata".to_string()));
+        assert!(is_scrubbable_payload_stream(&meta));
+
+        let mut ef = PdfDictionary::empty();
+        ef.insert("Type", PdfObject::Name("EmbeddedFile".to_string()));
+        assert!(is_scrubbable_payload_stream(&ef));
+
+        let mut page = PdfDictionary::empty();
+        page.insert("Type", PdfObject::Name("Page".to_string()));
+        assert!(!is_scrubbable_payload_stream(&page));
     }
 }

@@ -227,6 +227,44 @@ fn redaction_truly_removes_text_under_box_with_proportional_font() {
 }
 
 #[test]
+fn redaction_scrubs_secret_from_document_metadata() {
+    // H-2: redaction must remove the secret from alternate representations, not
+    // just the visible glyphs. Here the same word lives in the visible text AND
+    // in /Info /Title; after redaction it must be gone from both.
+    let mut doc = PdfBuilder::new();
+    doc.set_title("Quarterly SECRET briefing");
+    doc.add_page(PageSize::LETTER)
+        .draw_text(
+            "WWWWWWWW SECRET",
+            72.0,
+            700.0,
+            &TextStyle::standard(StandardFont::Helvetica, 20.0),
+        )
+        .unwrap();
+    let mut editor = PdfEditor::open_bytes(doc.to_bytes().unwrap()).unwrap();
+    editor
+        .redact(
+            1,
+            ImageRect::new(230.0, 693.0, 100.0, 24.0),
+            RedactionOptions::default(), // scrub_metadata defaults to true
+        )
+        .unwrap();
+    let redacted = editor.save_to_bytes(EditMode::FullRewrite).unwrap();
+
+    // Gone from extracted page text...
+    let text = ContentEngine::open_bytes(redacted.clone())
+        .unwrap()
+        .get_page_text(1)
+        .unwrap();
+    assert!(!text.contains("SECRET"), "visible text leaked: {text:?}");
+    // ...and gone from the serialized document entirely (incl. /Info /Title).
+    assert!(
+        !String::from_utf8_lossy(&redacted).contains("SECRET"),
+        "redacted text survived in document metadata/alternate representation"
+    );
+}
+
+#[test]
 fn redaction_removes_intersecting_image_invocation() {
     let mut doc = PdfBuilder::new();
     let image = doc
