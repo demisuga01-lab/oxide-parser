@@ -25,6 +25,14 @@ use std::collections::HashMap;
 use crate::error::{OxideError, Result};
 use crate::object::{PdfDictionary, PdfObject};
 use subtle::ConstantTimeEq;
+use zeroize::{Zeroize, Zeroizing};
+
+/// Heap-backed secret bytes that are wiped when dropped.
+pub type SecretBytes = Zeroizing<Vec<u8>>;
+
+pub fn secret_bytes(bytes: Vec<u8>) -> SecretBytes {
+    Zeroizing::new(bytes)
+}
 
 // ---------------------------------------------------------------------------
 // 2.1  RC4 stream cipher
@@ -353,19 +361,20 @@ fn sha512(data: &[u8]) -> [u8; 64] {
 
 pub fn r6_hash(password: &[u8], salt: &[u8], u_entry: Option<&[u8]>) -> [u8; 32] {
     // Step 1: K = SHA-256(password || salt [|| u_entry])
-    let mut seed = Vec::with_capacity(password.len() + salt.len() + 48);
+    let mut seed = secret_bytes(Vec::with_capacity(password.len() + salt.len() + 48));
     seed.extend_from_slice(password);
     seed.extend_from_slice(salt);
     if let Some(u) = u_entry {
         seed.extend_from_slice(u);
     }
-    let mut k: Vec<u8> = sha256(&seed).to_vec();
+    let mut k = secret_bytes(sha256(&seed).to_vec());
+    seed.zeroize();
 
     let mut round = 0usize;
     loop {
-        // Step a: K1 = (password || K [|| U]) × 64
+        // Step a: K1 = (password || K [|| U]) repeated 64 times.
         let unit_len = password.len() + k.len() + u_entry.map_or(0, |u| u.len());
-        let mut k1 = Vec::with_capacity(unit_len * 64);
+        let mut k1 = secret_bytes(Vec::with_capacity(unit_len * 64));
         for _ in 0..64 {
             k1.extend_from_slice(password);
             k1.extend_from_slice(&k);
@@ -378,14 +387,15 @@ pub fn r6_hash(password: &[u8], salt: &[u8], u_entry: Option<&[u8]>) -> [u8; 32]
         // K is at least 32 bytes after the initial SHA-256.
         let aes_key = &k[..16];
         let aes_iv = &k[16..32];
-        let e = aes128_cbc_encrypt_no_pad(aes_key, aes_iv, &k1);
+        let e = secret_bytes(aes128_cbc_encrypt_no_pad(aes_key, aes_iv, &k1));
+        k1.zeroize();
 
         // Step c: selector = (sum of first 16 bytes of E) mod 3
         let selector: u64 = e[..16].iter().map(|&b| b as u64).sum::<u64>() % 3;
         k = match selector {
-            0 => sha256(&e).to_vec(),
-            1 => sha384(&e).to_vec(),
-            _ => sha512(&e).to_vec(),
+            0 => secret_bytes(sha256(&e).to_vec()),
+            1 => secret_bytes(sha384(&e).to_vec()),
+            _ => secret_bytes(sha512(&e).to_vec()),
         };
 
         round += 1;
@@ -405,9 +415,9 @@ pub fn r6_hash(password: &[u8], salt: &[u8], u_entry: Option<&[u8]>) -> [u8; 32]
 
     let mut result = [0u8; 32];
     result.copy_from_slice(&k[..32]);
+    k.zeroize();
     result
 }
-
 // ---------------------------------------------------------------------------
 // 4.1  Encryption metadata
 // ---------------------------------------------------------------------------
@@ -741,9 +751,13 @@ pub fn pad_password(password: &[u8]) -> [u8; 32] {
 ///   2. MD5 the result.
 ///   3. For `R >= 3`, repeat MD5 over the first `n` bytes 50 more times.
 ///   4. Take the first `key_length / 8` bytes as the key.
-pub fn compute_encryption_key(password: &[u8], info: &EncryptionInfo, file_id: &[u8]) -> Vec<u8> {
+pub fn compute_encryption_key(
+    password: &[u8],
+    info: &EncryptionInfo,
+    file_id: &[u8],
+) -> SecretBytes {
     let key_len = (info.key_length / 8).clamp(1, 16);
-    let mut input = Vec::with_capacity(128);
+    let mut input = secret_bytes(Vec::with_capacity(128));
     input.extend_from_slice(&pad_password(password));
     input.extend_from_slice(&info.o);
     input.extend_from_slice(&(info.p as u32).to_le_bytes());
@@ -753,6 +767,7 @@ pub fn compute_encryption_key(password: &[u8], info: &EncryptionInfo, file_id: &
     }
 
     let mut hash = md5(&input);
+    input.zeroize();
 
     if info.r >= 3 {
         for _ in 0..50 {
@@ -760,37 +775,37 @@ pub fn compute_encryption_key(password: &[u8], info: &EncryptionInfo, file_id: &
         }
     }
 
-    hash[..key_len].to_vec()
+    let key = secret_bytes(hash[..key_len].to_vec());
+    hash.zeroize();
+    key
 }
-
 /// Recover the user password (or its equivalent) from an owner password for
 /// V1/V2/V4 (Algorithm 3, reverse): derive the owner RC4 key, then RC4-decrypt
 /// the `/O` entry. For R>=3 the decryption is the 20-round iterated form. The
 /// result is the padded user password, which can then be used as a user
 /// password to derive the file key. Returns the 32-byte recovered value.
-pub fn recover_user_password_from_owner(owner_pw: &[u8], info: &EncryptionInfo) -> Vec<u8> {
+pub fn recover_user_password_from_owner(owner_pw: &[u8], info: &EncryptionInfo) -> SecretBytes {
     let key_len = (info.key_length / 8).clamp(1, 16);
-    let mut rc4_key = md5(&pad_password(owner_pw)).to_vec();
+    let mut rc4_key = secret_bytes(md5(&pad_password(owner_pw)).to_vec());
     if info.r >= 3 {
         for _ in 0..50 {
-            rc4_key = md5(&rc4_key[..16]).to_vec();
+            rc4_key = secret_bytes(md5(&rc4_key[..16]).to_vec());
         }
     }
-    let rc4_key = rc4_key[..key_len].to_vec();
+    rc4_key.truncate(key_len);
 
     if info.r >= 3 {
         // Reverse the 20 RC4 rounds: applied i=1..=19 forward, so undo i=19..=0.
-        let mut result = info.o.clone();
+        let mut result = secret_bytes(info.o.clone());
         for i in (0u8..=19).rev() {
-            let xor_key: Vec<u8> = rc4_key.iter().map(|&b| b ^ i).collect();
-            result = Rc4::apply(&xor_key, &result);
+            let xor_key = secret_bytes(rc4_key.iter().map(|&b| b ^ i).collect());
+            result = secret_bytes(Rc4::apply(&xor_key, &result));
         }
         result
     } else {
-        Rc4::apply(&rc4_key, &info.o)
+        secret_bytes(Rc4::apply(&rc4_key, &info.o))
     }
 }
-
 /// Verify that `password` matches the `/U` user-password verifier (V1/V2/V4).
 ///
 /// For `R >= 3` (Algorithm 5): RC4-encrypt `MD5(PADDING + file_id)` with the
@@ -800,34 +815,28 @@ pub fn recover_user_password_from_owner(owner_pw: &[u8], info: &EncryptionInfo) 
 /// For `R == 2` (Algorithm 4): RC4-encrypt the padding string with the file key
 /// and compare all 32 bytes against `/U`.
 pub fn verify_user_password(password: &[u8], info: &EncryptionInfo, file_id: &[u8]) -> bool {
-    let mut key = compute_encryption_key(password, info, file_id);
+    let key = compute_encryption_key(password, info, file_id);
 
-    let ok = if info.r >= 3 {
-        let mut hash_input = Vec::with_capacity(32 + file_id.len());
+    if info.r >= 3 {
+        let mut hash_input = secret_bytes(Vec::with_capacity(32 + file_id.len()));
         hash_input.extend_from_slice(&PADDING);
         hash_input.extend_from_slice(file_id);
-        let hash = md5(&hash_input);
-        hash_input.fill(0);
+        let mut hash = md5(&hash_input);
+        hash_input.zeroize();
 
-        let mut result = Rc4::apply(&key, &hash);
+        let mut result = secret_bytes(Rc4::apply(&key, &hash));
+        hash.zeroize();
         for i in 1u8..=19 {
-            let xor_key: Vec<u8> = key.iter().map(|&b| b ^ i).collect();
-            result = Rc4::apply(&xor_key, &result);
+            let xor_key = secret_bytes(key.iter().map(|&b| b ^ i).collect());
+            result = secret_bytes(Rc4::apply(&xor_key, &result));
         }
 
-        let ok = result.len() >= 16 && info.u.len() >= 16 && ct_eq(&result[..16], &info.u[..16]);
-        result.fill(0);
-        ok
+        result.len() >= 16 && info.u.len() >= 16 && ct_eq(&result[..16], &info.u[..16])
     } else {
-        let mut result = Rc4::apply(&key, &PADDING);
-        let ok = result.len() == 32 && info.u.len() >= 32 && ct_eq(&result, &info.u[..32]);
-        result.fill(0);
-        ok
-    };
-    key.fill(0);
-    ok
+        let result = secret_bytes(Rc4::apply(&key, &PADDING));
+        result.len() == 32 && info.u.len() >= 32 && ct_eq(&result, &info.u[..32])
+    }
 }
-
 // ---------------------------------------------------------------------------
 // 6  Key derivation — V5 / R5 / R6 (ISO 32000-2 §7.6.4 / §7.6.5)
 // ---------------------------------------------------------------------------
@@ -859,23 +868,20 @@ pub fn verify_v5_user_password(password: &[u8], info: &EncryptionInfo) -> bool {
     let pwd = truncate_v5_password(password);
     // /U layout: [0..32] = hash, [32..40] = validation_salt, [40..48] = key_salt
     let validation_salt = &info.u[32..40];
-    let mut computed = if info.r == 6 {
-        r6_hash(pwd, validation_salt, None)
+    let computed = if info.r == 6 {
+        secret_bytes(r6_hash(pwd, validation_salt, None).to_vec())
     } else {
         // R5: plain SHA-256(password || validation_salt)
-        let mut input = Vec::with_capacity(pwd.len() + 8);
+        let mut input = secret_bytes(Vec::with_capacity(pwd.len() + 8));
         input.extend_from_slice(pwd);
         input.extend_from_slice(validation_salt);
-        let hash = sha256(&input);
-        input.fill(0);
+        let hash = secret_bytes(sha256(&input).to_vec());
+        input.zeroize();
         hash
     };
     // Compare first 32 bytes (the hash portion of /U)
-    let ok = info.u.len() >= 32 && ct_eq(&computed, &info.u[..32]);
-    computed.fill(0);
-    ok
+    info.u.len() >= 32 && ct_eq(&computed, &info.u[..32])
 }
-
 /// Verify an owner password against the V5 `/O` entry (Algorithm 2.A, owner path).
 ///
 /// Returns `true` if the owner password matches.
@@ -888,53 +894,56 @@ pub fn verify_v5_owner_password(password: &[u8], info: &EncryptionInfo) -> bool 
     let validation_salt = &info.o[32..40];
     // Owner path includes the full 48-byte /U value in the hash input.
     let u48 = &info.u[..48.min(info.u.len())];
-    let mut computed = if info.r == 6 {
-        r6_hash(pwd, validation_salt, Some(u48))
+    let computed = if info.r == 6 {
+        secret_bytes(r6_hash(pwd, validation_salt, Some(u48)).to_vec())
     } else {
-        let mut input = Vec::with_capacity(pwd.len() + 8 + u48.len());
+        let mut input = secret_bytes(Vec::with_capacity(pwd.len() + 8 + u48.len()));
         input.extend_from_slice(pwd);
         input.extend_from_slice(validation_salt);
         input.extend_from_slice(u48);
-        let hash = sha256(&input);
-        input.fill(0);
+        let hash = secret_bytes(sha256(&input).to_vec());
+        input.zeroize();
         hash
     };
-    let ok = info.o.len() >= 32 && ct_eq(&computed, &info.o[..32]);
-    computed.fill(0);
-    ok
+    info.o.len() >= 32 && ct_eq(&computed, &info.o[..32])
 }
-
 /// Derive the 32-byte file encryption key from a verified user password (V5).
 ///
 /// Algorithm 2.A step 4: intermediate_key = hash(password || U_key_salt),
 /// then file_key = AES-256-CBC-decrypt(key=intermediate_key, iv=zero, data=UE).
-pub fn derive_v5_file_key_from_user(password: &[u8], info: &EncryptionInfo) -> Result<Vec<u8>> {
+pub fn derive_v5_file_key_from_user(password: &[u8], info: &EncryptionInfo) -> Result<SecretBytes> {
     let v5 = info.v5.as_ref().ok_or_else(|| {
         OxideError::MalformedPdf("derive_v5_file_key_from_user called on non-V5 info".to_string())
     })?;
     let pwd = truncate_v5_password(password);
     // /U layout: [40..48] = key_salt
     let key_salt = &info.u[40..48];
-    let intermediate_key = if info.r == 6 {
-        r6_hash(pwd, key_salt, None)
+    let mut intermediate_key = if info.r == 6 {
+        secret_bytes(r6_hash(pwd, key_salt, None).to_vec())
     } else {
-        let mut input = Vec::with_capacity(pwd.len() + 8);
+        let mut input = secret_bytes(Vec::with_capacity(pwd.len() + 8));
         input.extend_from_slice(pwd);
         input.extend_from_slice(key_salt);
-        sha256(&input)
+        let hash = secret_bytes(sha256(&input).to_vec());
+        input.zeroize();
+        hash
     };
-    // Decrypt /UE with zero IV (no padding — 32-byte payload is exactly 2 blocks).
+    // Decrypt /UE with zero IV (no padding - 32-byte payload is exactly 2 blocks).
     let zero_iv = [0u8; 16];
     // UE is 32 bytes = 2 AES blocks, no padding needed
-    let file_key = aes256_cbc_no_pad(&intermediate_key, &zero_iv, &v5.ue)?;
-    Ok(file_key[..32].to_vec())
+    let mut file_key = secret_bytes(aes256_cbc_no_pad(&intermediate_key, &zero_iv, &v5.ue)?);
+    intermediate_key.zeroize();
+    file_key.truncate(32);
+    Ok(file_key)
 }
-
 /// Derive the 32-byte file encryption key from a verified owner password (V5).
 ///
 /// Algorithm 2.A step 7: intermediate_key = hash(password || O_key_salt || U_48),
 /// then file_key = AES-256-CBC-decrypt(key=intermediate_key, iv=zero, data=OE).
-pub fn derive_v5_file_key_from_owner(password: &[u8], info: &EncryptionInfo) -> Result<Vec<u8>> {
+pub fn derive_v5_file_key_from_owner(
+    password: &[u8],
+    info: &EncryptionInfo,
+) -> Result<SecretBytes> {
     let v5 = info.v5.as_ref().ok_or_else(|| {
         OxideError::MalformedPdf("derive_v5_file_key_from_owner called on non-V5 info".to_string())
     })?;
@@ -942,20 +951,23 @@ pub fn derive_v5_file_key_from_owner(password: &[u8], info: &EncryptionInfo) -> 
     // /O layout: [40..48] = key_salt
     let key_salt = &info.o[40..48];
     let u48 = &info.u[..48.min(info.u.len())];
-    let intermediate_key = if info.r == 6 {
-        r6_hash(pwd, key_salt, Some(u48))
+    let mut intermediate_key = if info.r == 6 {
+        secret_bytes(r6_hash(pwd, key_salt, Some(u48)).to_vec())
     } else {
-        let mut input = Vec::with_capacity(pwd.len() + 8 + u48.len());
+        let mut input = secret_bytes(Vec::with_capacity(pwd.len() + 8 + u48.len()));
         input.extend_from_slice(pwd);
         input.extend_from_slice(key_salt);
         input.extend_from_slice(u48);
-        sha256(&input)
+        let hash = secret_bytes(sha256(&input).to_vec());
+        input.zeroize();
+        hash
     };
     let zero_iv = [0u8; 16];
-    let file_key = aes256_cbc_no_pad(&intermediate_key, &zero_iv, &v5.oe)?;
-    Ok(file_key[..32].to_vec())
+    let mut file_key = secret_bytes(aes256_cbc_no_pad(&intermediate_key, &zero_iv, &v5.oe)?);
+    intermediate_key.zeroize();
+    file_key.truncate(32);
+    Ok(file_key)
 }
-
 /// Verify the /Perms block and return `true` if the magic bytes are correct.
 ///
 /// ISO 32000-2 §7.6.4.4: decrypt the 16-byte /Perms with AES-256-ECB using the
@@ -981,8 +993,8 @@ pub fn verify_v5_perms(file_key: &[u8], info: &EncryptionInfo) -> bool {
 /// PDF 32000-1 §7.6.2 Algorithm 1: append `obj_num` (3 bytes LE) and `gen_num`
 /// (2 bytes LE) to the file key, plus the literal `sAlT` for AES, then MD5. The
 /// key length is `min(file_key.len() + 5, 16)` bytes.
-pub fn object_key(file_key: &[u8], obj_num: u32, gen_num: u16, is_aes: bool) -> Vec<u8> {
-    let mut input = Vec::with_capacity(file_key.len() + 9);
+pub fn object_key(file_key: &[u8], obj_num: u32, gen_num: u16, is_aes: bool) -> SecretBytes {
+    let mut input = secret_bytes(Vec::with_capacity(file_key.len() + 9));
     input.extend_from_slice(file_key);
     input.push((obj_num & 0xFF) as u8);
     input.push(((obj_num >> 8) & 0xFF) as u8);
@@ -992,11 +1004,13 @@ pub fn object_key(file_key: &[u8], obj_num: u32, gen_num: u16, is_aes: bool) -> 
     if is_aes {
         input.extend_from_slice(b"sAlT");
     }
-    let hash = md5(&input);
+    let mut hash = md5(&input);
+    input.zeroize();
     let key_len = (file_key.len() + 5).min(16);
-    hash[..key_len].to_vec()
+    let key = secret_bytes(hash[..key_len].to_vec());
+    hash.zeroize();
+    key
 }
-
 /// Decrypt a PDF string value belonging to object `obj_num`/`gen_num`.
 ///
 /// For V5 (`is_v5 = true`): the file key is used DIRECTLY (no per-object
@@ -1191,10 +1205,10 @@ pub fn encrypt_bytes(
 #[derive(Debug, Clone)]
 pub struct EncryptParams {
     /// User password (open password). Empty = no password needed to open.
-    pub user_password: Vec<u8>,
+    pub user_password: SecretBytes,
     /// Owner password (full-permissions password). Empty defaults to the user
     /// password (a common convention).
-    pub owner_password: Vec<u8>,
+    pub owner_password: SecretBytes,
     /// Permission bits (`/P`, a signed 32-bit bitmask per ISO 32000 Table 22).
     /// Default `-1` (all bits set) grants every permission.
     pub permissions: i32,
@@ -1207,8 +1221,8 @@ pub struct EncryptParams {
 impl Default for EncryptParams {
     fn default() -> Self {
         EncryptParams {
-            user_password: Vec::new(),
-            owner_password: Vec::new(),
+            user_password: secret_bytes(Vec::new()),
+            owner_password: secret_bytes(Vec::new()),
             permissions: -1, // all bits set = grant everything
             algorithm: EncryptAlgorithm::Aes256,
             encrypt_metadata: true,
@@ -1250,7 +1264,7 @@ impl EncryptAlgorithm {
 /// The fully-derived encryption state for a write: the file key + the
 /// [`EncryptionInfo`] to serialize as the `/Encrypt` dict.
 pub struct EncryptState {
-    pub file_key: Vec<u8>,
+    pub file_key: SecretBytes,
     pub info: EncryptionInfo,
 }
 
@@ -1326,33 +1340,34 @@ fn build_legacy(
 /// password under a key derived from the owner password.
 fn compute_owner_entry(owner_pw: &[u8], user_pw: &[u8], r: u8, key_length: usize) -> Vec<u8> {
     let key_len = (key_length / 8).clamp(1, 16);
-    let mut rc4_key = md5(&pad_password(owner_pw)).to_vec();
+    let mut rc4_key = secret_bytes(md5(&pad_password(owner_pw)).to_vec());
     if r >= 3 {
         for _ in 0..50 {
-            rc4_key = md5(&rc4_key[..16]).to_vec();
+            rc4_key = secret_bytes(md5(&rc4_key[..16]).to_vec());
         }
     }
-    let rc4_key = rc4_key[..key_len].to_vec();
+    rc4_key.truncate(key_len);
     let mut result = Rc4::apply(&rc4_key, &pad_password(user_pw));
     if r >= 3 {
         for i in 1u8..=19 {
-            let xor_key: Vec<u8> = rc4_key.iter().map(|&b| b ^ i).collect();
+            let xor_key = secret_bytes(rc4_key.iter().map(|&b| b ^ i).collect());
             result = Rc4::apply(&xor_key, &result);
         }
     }
     result // 32 bytes
 }
-
 /// Algorithm 4 (R2) / 5 (R>=3): the `/U` entry from the file key.
 fn compute_user_entry(file_key: &[u8], file_id: &[u8], r: u8) -> Vec<u8> {
     if r >= 3 {
-        let mut hash_input = Vec::with_capacity(32 + file_id.len());
+        let mut hash_input = secret_bytes(Vec::with_capacity(32 + file_id.len()));
         hash_input.extend_from_slice(&PADDING);
         hash_input.extend_from_slice(file_id);
-        let hash = md5(&hash_input);
+        let mut hash = md5(&hash_input);
+        hash_input.zeroize();
         let mut result = Rc4::apply(file_key, &hash);
+        hash.zeroize();
         for i in 1u8..=19 {
-            let xor_key: Vec<u8> = file_key.iter().map(|&b| b ^ i).collect();
+            let xor_key = secret_bytes(file_key.iter().map(|&b| b ^ i).collect());
             result = Rc4::apply(&xor_key, &result);
         }
         // Pad to 32 bytes (the spec leaves the upper 16 arbitrary).
@@ -1362,41 +1377,44 @@ fn compute_user_entry(file_key: &[u8], file_id: &[u8], r: u8) -> Vec<u8> {
         Rc4::apply(file_key, &PADDING)
     }
 }
-
 /// V5 (AES-256, R6) write-side derivation: random file key, /U + /O (each a
 /// 32-byte hash + 8-byte validation salt + 8-byte key salt), /UE + /OE (the
 /// file key wrapped under the key-salt intermediate key), and /Perms.
 fn build_v5(params: &EncryptParams, owner_pw: &[u8]) -> Result<EncryptState> {
     let r = 6u8;
-    let file_key = random_bytes(32);
+    let file_key = secret_bytes(random_bytes(32));
     let user_pw = truncate_v5_password(&params.user_password);
     let owner_pw = truncate_v5_password(owner_pw);
 
     // /U = hash(pwd || valSalt) [32] || valSalt [8] || keySalt [8]
     let u_val_salt = random_bytes(8);
     let u_key_salt = random_bytes(8);
-    let u_hash = r6_hash(user_pw, &u_val_salt, None);
+    let mut u_hash = r6_hash(user_pw, &u_val_salt, None);
     let mut u = Vec::with_capacity(48);
     u.extend_from_slice(&u_hash);
+    u_hash.zeroize();
     u.extend_from_slice(&u_val_salt);
     u.extend_from_slice(&u_key_salt);
 
     // /UE = AES-256-CBC(no pad, zero IV) of file_key under hash(pwd || U_keySalt)
-    let u_inter = r6_hash(user_pw, &u_key_salt, None);
+    let mut u_inter = secret_bytes(r6_hash(user_pw, &u_key_salt, None).to_vec());
     let ue = aes256_cbc_encrypt_no_pad(&u_inter, &[0u8; 16], &file_key)?;
+    u_inter.zeroize();
 
     // /O = hash(ownerPwd || valSalt || U48) [32] || valSalt [8] || keySalt [8]
     let o_val_salt = random_bytes(8);
     let o_key_salt = random_bytes(8);
-    let o_hash = r6_hash(owner_pw, &o_val_salt, Some(&u));
+    let mut o_hash = r6_hash(owner_pw, &o_val_salt, Some(&u));
     let mut o = Vec::with_capacity(48);
     o.extend_from_slice(&o_hash);
+    o_hash.zeroize();
     o.extend_from_slice(&o_val_salt);
     o.extend_from_slice(&o_key_salt);
 
     // /OE = AES-256-CBC(no pad, zero IV) of file_key under hash(ownerPwd || O_keySalt || U48)
-    let o_inter = r6_hash(owner_pw, &o_key_salt, Some(&u));
+    let mut o_inter = secret_bytes(r6_hash(owner_pw, &o_key_salt, Some(&u)).to_vec());
     let oe = aes256_cbc_encrypt_no_pad(&o_inter, &[0u8; 16], &file_key)?;
+    o_inter.zeroize();
 
     // /Perms = AES-256-ECB(file_key) of the 16-byte permissions block.
     let perms = build_v5_perms(&file_key, params.permissions, params.encrypt_metadata)?;

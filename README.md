@@ -320,6 +320,8 @@ Pull only what you need. The default build gives you parse + render + structural
 - Differential fuzzing vs qpdf and Poppler for page count, structural validity, text similarity, and writer round-trip.
 - Property tests for round-trip identities, writer-mode equivalence, AES-256 preserve-content, and no-panic arbitrary bytes.
 - Cross-pillar hostile sweep: 265 files, 1,590 operations, 0 crashes, 0 timeouts.
+- PDF encryption secrets use zeroizing wrappers; the engine crate enforces `#![forbid(unsafe_code)]`.
+- Linux sanitizer CI covers ASan/TSan/Rust UB checks for C-ABI/crypto tests plus ASan fuzz corpus replay.
 - `cargo audit` and `cargo deny` clean against the documented `RUSTSEC-2023-0071` (RustCrypto `rsa 0.9.10`) advisory exception.
 
 Full evidence and residual-risk list: [`docs/security/posture.md`](docs/security/posture.md). Threat model: [`docs/security/threat_model.md`](docs/security/threat_model.md). Disclosure: [`SECURITY.md`](SECURITY.md).

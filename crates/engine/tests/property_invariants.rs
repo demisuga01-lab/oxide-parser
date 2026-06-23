@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use oxide_engine::authoring::{PageSize, PdfBuilder};
-use oxide_engine::crypto::{EncryptAlgorithm, EncryptParams};
+use oxide_engine::crypto::{secret_bytes, EncryptAlgorithm, EncryptParams};
 use oxide_engine::structural::{encrypt, optimize};
 use oxide_engine::{ContentEngine, StandardFont, TextStyle, WriterMode};
 use proptest::collection::vec;
@@ -109,8 +109,8 @@ proptest! {
         let engine = ContentEngine::open_bytes(bytes).expect("open generated PDF");
         let before = page_texts(&engine);
         let params = EncryptParams {
-            user_password: user_password.as_bytes().to_vec(),
-            owner_password: owner_password.as_bytes().to_vec(),
+            user_password: secret_bytes(user_password.as_bytes().to_vec()),
+            owner_password: secret_bytes(owner_password.as_bytes().to_vec()),
             algorithm: EncryptAlgorithm::Aes256,
             ..Default::default()
         };

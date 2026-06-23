@@ -10,6 +10,7 @@
 //! PDF parsing, text extraction, image decoding, and page rendering are
 //! implemented in Rust. Compression and image support come from crate
 //! dependencies and do not shell out to external PDF tools.
+#![forbid(unsafe_code)]
 //!
 //! # Getting started
 //!
@@ -140,7 +141,7 @@ pub use crypto::{
     decrypt_stream, decrypt_string, derive_v5_file_key_from_owner, derive_v5_file_key_from_user,
     encrypt_bytes, md5, object_key, r6_hash, verify_user_password, verify_v5_owner_password,
     verify_v5_perms, verify_v5_user_password, CryptMethod, EncryptAlgorithm, EncryptParams,
-    EncryptState, EncryptionInfo, Rc4, V5Fields, PADDING,
+    EncryptState, EncryptionInfo, Rc4, SecretBytes, V5Fields, PADDING,
 };
 pub use docmodel::{
     render_markdown as render_document_markdown, ClassifiedType, DocBlock, DocumentModel, ListItem,

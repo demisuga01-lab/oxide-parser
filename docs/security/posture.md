@@ -22,6 +22,7 @@ claim that those unrelated edits are release-ready.
 | Grammar-aware fuzzing | Valid-but-adversarial PDFs that reach content interpretation, renderer, editing, linearization, PDF/A, and signature validation paths | `structured_pdf` is in the fuzz target matrix. Its committed corpus replay passed, reaching 10,945 coverage/features in the smoke output. |
 | Real-world and hostile corpus sweep | Cross-pillar safety over parse, info, verify-sig, render, optimize, and linearize in isolated subprocesses | 265 files, 1,590 operations, 0 crashes, 0 timeouts, 100% crash-free and timeout-free. |
 | Dependency security and licensing | RustSec advisories, license allowlist, source policy | `.github/workflows/security-audit.yml` is live. `cargo audit` and `cargo deny` passed with the documented `RUSTSEC-2023-0071` exception. |
+| Linux sanitizer CI | ASan/TSan/Rust UB checks over C-ABI and crypto tests; ASan replay for selected fuzz corpora | `.github/workflows/sanitizers.yml` is live for PR, main, scheduled, and manual runs. Local Windows execution is not claimed. |
 
 ## Fresh Verification Evidence
 
@@ -84,8 +85,11 @@ Current guarantees and controls:
   comparison.
 - Encryption IVs, salts, file keys, and generated file IDs use OS CSPRNG-backed
   randomness.
-- Temporary password verifier buffers are zeroed where they are not returned.
-- The only current `unsafe` block inventory is the C ABI boundary documented in
+- PDF encryption passwords, derived file keys, per-object keys, reader
+  contexts, writer states, R6 intermediate buffers, and temporary verifier
+  buffers use zeroizing wrapper types.
+- The engine crate enforces `#![forbid(unsafe_code)]`; the only current
+  `unsafe` block inventory is the C ABI boundary documented in
   `docs/security/attack_surface.md`.
 
 Supporting documents:
@@ -109,25 +113,29 @@ risk is explicit:
   testing. A pilot integrator will exercise documents and workflows no local
   harness can predict.
 - `RUSTSEC-2023-0071` remains an explicit exception for RustCrypto `rsa
-  0.9.10`, which has no fixed upgrade in the current dependency line. Use of RSA
-  signing should be reviewed in the external crypto audit and revisited when a
-  fixed pure-Rust release is available.
-- Returned key material still uses ordinary `Vec<u8>` values in some internal
-  paths. Full zeroizing wrapper types are a future hardening option.
+  0.9.10`, which has no fixed upgrade in the current dependency line. RSA
+  signing is local API/CLI behavior rather than a built-in remotely timed
+  signing service, but it should be reviewed in the external crypto audit and
+  revisited when a fixed pure-Rust release or replacement is available.
+- RustCrypto `RsaPrivateKey` does not implement `Zeroize` in the current
+  dependency line, so private-key object memory wiping remains a dependency
+  limitation.
 - Live TSA/OCSP/CRL fetching, system trust-store policy, and PAdES-B-LTA
   document timestamp refresh remain deployment-sensitive follow-ups.
 - PDF/UA auto-tagging and figure alt text remain best-effort and require human
   accessibility review for certification claims.
 - Renderer output is preview/OCR-grade, not visual-proof grade. PDFium/Poppler
   class renderers remain the reference for pixel-proof workflows.
-- Standalone workspace-wide ASan was not completed on Windows. The cargo-fuzz
-  targets built and replayed cleanly under nightly instrumentation.
+- Linux sanitizer CI is wired for ASan, TSan, Rust UB checks, and ASan fuzz
+  regression replay. This Windows session did not execute the Linux sanitizer
+  matrix locally.
 
 ## Verdict
 
 The code-level hardening posture is now continuous and layered: normal tests,
 property tests, persistent private fuzzing, differential fuzzing, grammar-aware
-deep fuzzing, dependency auditing, and corpus sweeps all reinforce each other.
+deep fuzzing, dependency auditing, Linux sanitizer CI, and corpus sweeps all
+reinforce each other.
 
 That is strong engineering evidence for robustness, but it does not replace a
 human security audit or a real customer pilot. The recommended next trust

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use oxide_engine::crypto::{EncryptAlgorithm, EncryptParams};
+use oxide_engine::crypto::{secret_bytes, EncryptAlgorithm, EncryptParams};
 use oxide_engine::structural::{encrypt, linearize, optimize, repair, rotate_pages, Rotation};
 use oxide_engine::ContentEngine;
 
@@ -99,8 +99,8 @@ fn encrypt_roundtrip(algo: EncryptAlgorithm) {
     let pages = engine.page_count().unwrap();
 
     let params = EncryptParams {
-        user_password: b"open-sesame".to_vec(),
-        owner_password: b"the-owner".to_vec(),
+        user_password: secret_bytes(b"open-sesame".to_vec()),
+        owner_password: secret_bytes(b"the-owner".to_vec()),
         algorithm: algo,
         ..Default::default()
     };
@@ -353,7 +353,7 @@ fn encrypt_decrypted_content_is_deterministic() {
     // stable across two independent encryptions.
     let engine = open("tracemonkey.pdf");
     let params = EncryptParams {
-        user_password: b"pw".to_vec(),
+        user_password: secret_bytes(b"pw".to_vec()),
         algorithm: EncryptAlgorithm::Aes256,
         ..Default::default()
     };

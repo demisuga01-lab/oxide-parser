@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use oxide_engine::crypto::{EncryptAlgorithm, EncryptParams};
+use oxide_engine::crypto::{secret_bytes, EncryptAlgorithm, EncryptParams};
 use oxide_engine::structural::{encrypt, linearize};
 use oxide_engine::{
     convert_to_pdfa_checked, get_fallback_font, AuthorPageSize as PageSize, ContentEngine,
@@ -59,8 +59,8 @@ fn create_edit_encrypt_decrypt_extract_roundtrip() {
     let encrypted = encrypt(
         &edited_engine,
         &EncryptParams {
-            user_password: b"capstone-user".to_vec(),
-            owner_password: b"capstone-owner".to_vec(),
+            user_password: secret_bytes(b"capstone-user".to_vec()),
+            owner_password: secret_bytes(b"capstone-owner".to_vec()),
             algorithm: EncryptAlgorithm::Aes256,
             ..Default::default()
         },

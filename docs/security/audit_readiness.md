@@ -30,16 +30,22 @@ Oxide is prepared for a third-party security audit with the following materials.
 - Found and fixed ordinary equality comparisons in PDF password verifier paths;
   they now use constant-time comparison.
 - Zeroed temporary password-verifier buffers where they are not returned.
+- Moved PDF encryption passwords, derived file keys, per-object keys, reader
+  contexts, writer states, and R6 intermediate buffers to zeroizing wrapper
+  types.
 - Confirmed OS CSPRNG use for encryption IVs, salts, file keys, and generated
   file IDs.
-- Confirmed `unsafe` is isolated to the C ABI boundary.
+- Confirmed `unsafe` is isolated to the C ABI boundary and added
+  `#![forbid(unsafe_code)]` to the engine crate.
 - Confirmed CI wiring for cargo-audit and cargo-deny.
+- Added Linux sanitizer CI coverage for C-ABI tests, crypto regressions, and
+  ASan cargo-fuzz corpus replay.
 
 ## Remaining Human Review Items
 
 - A paid external audit has not yet been completed.
-- Returned key material still uses ordinary `Vec<u8>` values; auditors should
-  decide whether zeroizing wrapper types are required for the commercial threat
-  model.
+- RustCrypto `rsa` remains on the documented Marvin advisory exception;
+  auditors should review RSA signing exposure, replacement options, and the
+  current `RsaPrivateKey` zeroization limitation.
 - Live TSA/OCSP/CRL and system trust-store policies should be reviewed with the
   intended deployment model.

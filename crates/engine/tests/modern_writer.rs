@@ -74,7 +74,7 @@ fn encrypted_objstm_roundtrips() {
     // objects must NOT be double-encrypted. Round-trip through Oxide's reader
     // (which knows not to separately decrypt ObjStm members) must recover the
     // exact content.
-    use oxide_engine::crypto::{build_encryption, EncryptAlgorithm, EncryptParams};
+    use oxide_engine::crypto::{build_encryption, secret_bytes, EncryptAlgorithm, EncryptParams};
     use oxide_engine::{rewrite_document_objects, PdfObject, PdfWriter, WriterMode};
 
     let engine = ContentEngine::open_path(fixture("tracemonkey.pdf")).expect("open");
@@ -83,7 +83,7 @@ fn encrypted_objstm_roundtrips() {
 
     let file_id = vec![0xABu8; 16]; // fixed for the test (real encrypt randomizes)
     let params = EncryptParams {
-        user_password: b"pw".to_vec(),
+        user_password: secret_bytes(b"pw".to_vec()),
         algorithm: EncryptAlgorithm::Aes256,
         ..Default::default()
     };

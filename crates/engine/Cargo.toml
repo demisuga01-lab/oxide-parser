@@ -42,6 +42,7 @@ const-oid = "0.9"
 der = { version = "0.7", features = ["oid"] }
 spki = "0.7"
 subtle = "2"
+zeroize = "1"
 
 [features]
 default = ["parse", "render", "structural"]

@@ -1,0 +1,101 @@
+name: Sanitizers
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "fuzz/**"
+      - "scripts/ci_fuzz.py"
+      - ".github/workflows/sanitizers.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "fuzz/**"
+      - "scripts/ci_fuzz.py"
+      - ".github/workflows/sanitizers.yml"
+  schedule:
+    - cron: "41 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  rust-sanitizer-tests:
+    name: ${{ matrix.name }} tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: address-sanitizer
+            rustflags: "-Zsanitizer=address"
+            cargo_flags: "-Zbuild-std --target x86_64-unknown-linux-gnu"
+            runtime_options: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+          - name: thread-sanitizer
+            rustflags: "-Zsanitizer=thread"
+            cargo_flags: "-Zbuild-std --target x86_64-unknown-linux-gnu"
+            runtime_options: "TSAN_OPTIONS=halt_on_error=1"
+          - name: rust-ub-checks
+            rustflags: "-Zub-checks=yes"
+            cargo_flags: ""
+            runtime_options: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Run C-ABI tests under sanitizer
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          ${{ matrix.runtime_options }} cargo +nightly test ${{ matrix.cargo_flags }} -p oxide-capi --tests
+
+      - name: Run crypto regression tests under sanitizer
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: |
+          ${{ matrix.runtime_options }} cargo +nightly test ${{ matrix.cargo_flags }} -p oxide-engine crypto::tests --lib
+
+  fuzz-asan-regression:
+    name: cargo-fuzz ASan regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Cache cargo registry and fuzz artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: cargo-fuzz-asan-${{ runner.os }}-${{ hashFiles('fuzz/Cargo.lock', 'fuzz/Cargo.toml') }}
+          restore-keys: |
+            cargo-fuzz-asan-${{ runner.os }}-
+
+      - name: Install cargo-fuzz
+        run: |
+          if ! cargo fuzz --version >/dev/null 2>&1; then
+            cargo install cargo-fuzz --locked
+          fi
+
+      - name: Replay committed crypto and parser fuzz corpora under ASan
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        run: python scripts/ci_fuzz.py --targets "crypto,parse_pdf,structured_pdf" --mode regression

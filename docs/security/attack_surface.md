@@ -76,6 +76,6 @@ deployment-controlled.
 
 ## Unsafe Inventory
 
-The core engine contains no `unsafe` blocks. Unsafe usage is isolated to
+The core engine contains no `unsafe` blocks and enforces `#![forbid(unsafe_code)]`. Unsafe usage is isolated to
 `crates/oxide-capi/src/lib.rs` for FFI pointer conversion and ownership transfer.
 Tests exercise the C ABI null/error/free paths.

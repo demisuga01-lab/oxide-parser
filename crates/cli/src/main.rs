@@ -2222,7 +2222,7 @@ fn run_extract_pages(args: ExtractPagesArgs) -> Result<(), Box<dyn Error>> {
 // --- Structural-write ops (Bucket 2): encrypt / rotate / optimize / repair ---
 
 fn run_encrypt(args: EncryptArgs) -> Result<(), Box<dyn Error>> {
-    use oxide_engine::crypto::{EncryptAlgorithm, EncryptParams};
+    use oxide_engine::crypto::{secret_bytes, EncryptAlgorithm, EncryptParams};
 
     let algo = EncryptAlgorithm::parse(&args.algo)
         .ok_or_else(|| format!("unknown --algo '{}'; use aes256, aes128, or rc4", args.algo))?;
@@ -2233,8 +2233,8 @@ fn run_encrypt(args: EncryptArgs) -> Result<(), Box<dyn Error>> {
         args.owner_pw.clone()
     };
     let params = EncryptParams {
-        user_password: args.user_pw.into_bytes(),
-        owner_password: owner.into_bytes(),
+        user_password: secret_bytes(args.user_pw.into_bytes()),
+        owner_password: secret_bytes(owner.into_bytes()),
         permissions: args.permissions,
         algorithm: algo,
         encrypt_metadata: true,

@@ -6,7 +6,7 @@ use std::sync::RwLock;
 use crate::crypto::{
     compute_encryption_key, decrypt_string, derive_v5_file_key_from_owner,
     derive_v5_file_key_from_user, verify_user_password, verify_v5_owner_password, verify_v5_perms,
-    verify_v5_user_password, CryptMethod, EncryptionInfo,
+    verify_v5_user_password, CryptMethod, EncryptionInfo, SecretBytes,
 };
 use crate::error::{OxideError, Result};
 use crate::filters::decode_stream_from_dict;
@@ -29,7 +29,7 @@ pub enum XrefEntry {
 pub struct EncryptionContext {
     /// The file-wide encryption key (5 bytes for 40-bit, 16 bytes for 128-bit,
     /// or 32 bytes for V5/AES-256).
-    pub file_key: Vec<u8>,
+    pub file_key: SecretBytes,
     /// True when streams and strings are encrypted with AES-128 (`/CFM /AESV2`).
     pub is_aes: bool,
     /// True when this is a V5 (AES-256) document. For V5 the file key is used
@@ -458,7 +458,7 @@ fn setup_encryption(
         vec![password, b""]
     };
 
-    let make_ctx = |file_key: Vec<u8>| EncryptionContext {
+    let make_ctx = |file_key: SecretBytes| EncryptionContext {
         file_key,
         is_aes: info.is_aes(),
         is_v5: false,

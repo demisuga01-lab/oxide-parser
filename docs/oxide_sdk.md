@@ -333,7 +333,7 @@ Blocker status after GA1-GA5 plus GA6 verification:
 | Renderer fidelity | Cleared as a meaningful improvement: 86.94% visual pass / 91.82 weighted after Prompt 3, still preview/OCR-grade. |
 | Whole-SDK hardening | Cleared for the measured slice: 1,590 operations, 0 crashes, 0 timeouts, 0 invalid transformed outputs from qpdf-clean inputs. |
 | Signature LTV | Partially cleared: offline timestamp/DSS/CRL substrate works; live TSA/OCSP/trust-store/B-LTA and external LTV UI recognition remain known limitations. |
-| Continuous hardening | Cleared as code-level posture: all 16 fuzz target corpora replayed, property tests passed, differential smoke passed, cargo-audit and cargo-deny passed with the documented RSA advisory exception. |
+| Continuous hardening | Cleared as code-level posture: zeroizing PDF encryption secrets, engine `forbid(unsafe_code)`, sanitizer CI wiring, fuzz/property/differential gates, and cargo-audit/cargo-deny with the documented RSA advisory exception. |
 
 Known limitations for the release notes:
 
@@ -342,8 +342,9 @@ Known limitations for the release notes:
 - Signature LTV is offline-first; live revocation/timestamp fetching and
   trust-policy validation remain follow-ups.
 - RustCrypto `rsa 0.9.10` carries `RUSTSEC-2023-0071` with no fixed upgrade in
-  the current pure-Rust line. It is explicitly ignored in `deny.toml` and
-  should be reviewed during the external crypto audit.
+  the current pure-Rust line. It is explicitly ignored in `deny.toml`; RSA
+  signing is local API/CLI behavior rather than a built-in remote signing
+  oracle, and should be reviewed during the external crypto audit.
 - PDF/UA is assistive best-effort, not a certified accessibility claim.
 - Rendering remains preview/OCR-grade, not visual-proof grade.
 - Messy scanned tables and scanned KV extraction trail ML-heavy systems.

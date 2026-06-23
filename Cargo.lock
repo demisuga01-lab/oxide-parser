@@ -1306,6 +1306,7 @@ dependencies = [
  "ttf-parser 0.21.1",
  "unicode-bidi",
  "x509-cert",
+ "zeroize",
  "zip",
 ]
 
