@@ -1,203 +1,350 @@
 # Oxide
 
 <p align="center">
-  <img src="docs/assets/oxide-github-hero.svg" alt="Oxide Enterprise PDF SDK workflow banner" width="100%" />
+  <img src="docs/assets/oxide-github-hero.svg" alt="Oxide — pure-Rust PDF engine" width="100%" />
 </p>
 
-**A self-hosted PDF SDK written in Rust.** Oxide parses PDFs into structured
-Markdown, JSON, semantic HTML, RAG chunks, and key-value fields. It also covers
-authoring, editing, redaction, forms, signatures, PDF/A, structural operations,
-OCR-enabled extraction, and deployable surfaces for CLI, Rust, C ABI,
-WebAssembly, and HTTP server use.
+**A pure-Rust PDF engine.** Parse PDFs into structured Markdown, JSON, semantic HTML, RAG chunks, and key-value fields — and author, edit, sign, structurally transform, and validate them in the same engine. One static binary. Four embed surfaces. No Python runtime, no C++ render stack, no per-page API.
 
-The project is built around one canonical document model and a memory-safe core.
-The README is intentionally direct: what is implemented is linked below; what
-still needs human review or production hardening is listed in the scope section.
+```text
+  PDF ─► parse  ─► Document { blocks, tables, fields, figures, geometry }
+                 ─► Markdown · JSON · HTML · Chunks · Fields
+        author  ─► new PDF (FlowDocument, fonts, tables, images)
+        edit    ─► watermarks · redaction · forms · annotations
+        sign    ─► signed PDF (RSA/SHA-256, ByteRange, LTV substrate)
+        validate─► PDF/A-1b/2b/2a/3b/3a · PDF/UA (best-effort)
+```
+
+Oxide is built for teams that need a **self-hostable, memory-safe, embeddable** PDF stack — extraction, transformation, and governance in one Rust core, with no per-page cloud fees and no Python interpreter to ship alongside.
+
+## By the numbers
+
+Provenance: [`docs/oxide_sdk.md`](docs/oxide_sdk.md) (capstone, 2026-06-22, Windows 11, 20-core), [`docs/parser_benchmark.md`](docs/parser_benchmark.md), [`docs/security/posture.md`](docs/security/posture.md). Every figure is reproducible from `extraction-benchmark/`, `renderer-benchmark/`, and `scripts/`.
+
+| Metric | Oxide | Reference | Source |
+| --- | ---: | --- | --- |
+| Process cold start | **~7.5 ms** | 158.7 ms (Python + PyMuPDF import) | capstone |
+| Static binary size | **~12.8 MB** | Python runtime + C-extensions | capstone |
+| Reading order (multi-column report) | **1.000** Kendall-tau | n/a — Poppler/PyMuPDF aren't order-aware | benchmark |
+| Clean digital table cell-F1 / TEDS | **1.000 / 1.000** | 1.000 / 1.000 (PyMuPDF) | benchmark |
+| Invoice key-value field-F1 (digital) | **1.000** | not a feature in PyMuPDF/Poppler | benchmark |
+| OCR'd scan char-accuracy (paper) | **0.942** | 0.000 (no OCR in PyMuPDF/Poppler) | benchmark |
+| Renderer weighted score (GA4, 265-file slice) | **91.32** | Poppler reference | renderer-benchmark |
+| Hostile cross-pillar sweep | **0 crashes, 0 timeouts** (1,590 ops) | n/a | GA5 sweep |
+| PDF/A-1b/2b/2a/3b/3a | **PASS** (qpdf + veraPDF 1.30.2) | — | capstone |
+
+The renderer is preview/OCR-grade — fast and crash-safe, but it does not match Poppler/PDFium pixel fidelity. See [What it's not (yet)](#what-its-not-yet).
+
+## Why Oxide
+
+- **Pure-Rust core, single static binary.** Memory-safe against the buffer-overflow / use-after-free / type-confusion classes; no Python, no torch stack, no native C++ rendering dependency. One ~12.8 MB binary, ~7.5 ms cold start, zero runtime.
+- **One canonical model, every surface.** `parse` produces a schema-versioned `Document` (headings, paragraphs, lists, tables, figures, captions in recovered reading order, with per-page geometry and provenance). The **CLI, Rust library, C ABI, WASM, and HTTP server emit the same schema** — byte-identical extraction across all four surfaces on the same page (see [Surface consistency](#surface-consistency)). Parse once, consume anywhere.
+- **Structured extraction, not text dumps.** Markdown for RAG, JSON for lossless round-trip, semantic HTML, structure-aware RAG chunks (target token size, overlap, heading context), and key-value fields (invoice / receipt / form, with line items). Optional Tesseract OCR via an injected `OcrEngine` — OCR'd text flows through the same model.
+- **qpdf-class structural operations.** Merge, split, extract-pages, rotate, encrypt (AES-256 default), optimize, repair, and qpdf-clean linearization for the supported subset. `qpdf --check` cross-validates Oxide's split output and page counts agree.
+- **Compliance and signatures.** PDF/A-1b / 2b / 2a / 3b / 3a validation and conversion (veraPDF 1.30.2 PASS); RSA / SHA-256 signing with ByteRange coverage and incremental update; offline PAdES B-T / B-LT substrate (DSS, VRI, CRL, OCSP, timestamp tokens).
+- **Embeddable four ways.** Rust library (`oxide-engine`), CLI (`oxide`), C ABI (`oxide-capi`), WebAssembly (`oxide-wasm`, digital-born in the browser), self-hostable HTTP server (`oxide-server`).
+- **Self-hostable and private.** Documents never leave your hardware — no per-page cloud fees and no Python runtime to ship alongside. See [`docs/self_hosting.md`](docs/self_hosting.md).
+- **MIT OR Apache-2.0.** Permissive, non-copyleft — drop-in for commercial products, no GPL-family contagion.
+
+## Features
+
+| Group | Capability |
+| --- | --- |
+| **Extract** | Plain text · structured Markdown · lossless JSON · semantic HTML · RAG chunks (token-sized, heading-aware, with overlap) · key-value fields (invoice / receipt / form, line items) · tables (CSV / JSON / HTML) · images (ZIP) · attachments |
+| **Parse model** | Reading order (XY-cut) · semantic tagged-PDF path · per-page geometry · block-type classification · figures with captions · dehyphenation · ligature normalization · provenance annotations |
+| **Create** | Programmatic authoring (`FlowDocument` / `PdfBuilder`) · pages, text, vector graphics, images, tables, single-column flow layout · TrueType font embedding · standard 14 fonts |
+| **Edit** | Watermarks · overlays / underlays · headers / footers · annotations · redaction (with extract-back verification) · AcroForm fill and flatten · incremental updates |
+| **Secure** | AES-256 / AES-128 / RC4 encryption · permission flags · RSA / SHA-256 signing · ByteRange coverage · LTV substrate (DSS, VRI, CRL, OCSP, timestamp tokens) · PAdES B-B / B-T / B-LT |
+| **Convert / validate** | PDF/A-1b / 2b / 2a / 3b / 3a (veraPDF PASS) · PDF/UA assistive validation · linearization (qpdf-clean) · optimize (recompress) · repair (qpdf-clean normalize) |
+| **Render** | PNG / JPG / WebP / SVG / PostScript / EPS · `compat` (Poppler-equivalent) or `high` (linear-light) compositing · DPI and pixel caps · hostile-input safe |
+| **OCR** | Pluggable `OcrEngine` trait · bundled Tesseract backend (off by default; drives the external `tesseract` process, no linked C) · routed through the same parse pipeline |
+| **Surfaces** | Rust library · CLI · C ABI · WebAssembly · self-hostable HTTP server (auth, rate limits, resource caps, async job queue) |
 
 ## Quick start
 
+### CLI
+
 ```sh
-# Build the single-binary CLI (add --features ocr for scanned-page OCR):
+# Build the single-binary CLI (add --features full for OCR):
 cargo build --release -p oxide-cli
 
-# Parse a PDF into clean Markdown / JSON for RAG and automation:
-oxide parse input.pdf --format markdown
-oxide parse input.pdf --format json
+# Digital-born document → clean Markdown / JSON for RAG or automation:
+oxide parse input.pdf --format markdown > input.md
+oxide parse input.pdf --format json --output input.json
 
-# RAG-ready semantic chunks, and structured key-value fields:
-oxide chunk input.pdf --target-tokens 512
-oxide extract-fields input.pdf --type invoice
-
-# What did I build? (reports engine version + whether OCR is compiled in)
-oxide --version
-```
-
-## Step-by-step setup
-
-<details open>
-<summary><strong>1. Install prerequisites</strong></summary>
-
-- Rust stable toolchain with Cargo.
-- `qpdf` for structural validation checks.
-- Optional: a reference renderer for visual QA and veraPDF for compliance checks.
-- Optional OCR: Tesseract with language data when building with `--features ocr`.
-
-```sh
-rustup update stable
-cargo --version
-qpdf --version
-```
-
-</details>
-
-<details>
-<summary><strong>2. Build the CLI</strong></summary>
-
-```sh
-cargo build --release -p oxide-cli
-
-# Windows
-target\release\oxide.exe --version
-
-# macOS/Linux
-./target/release/oxide --version
-```
-
-For scanned-page OCR support:
-
-```sh
-cargo build --release -p oxide-cli --features ocr
-```
-
-</details>
-
-<details>
-<summary><strong>3. Parse, chunk, and extract fields</strong></summary>
-
-```sh
-oxide parse input.pdf --format markdown --output output.md
-oxide parse input.pdf --format json --output output.json
+# RAG-ready structure-aware chunks; structured key-value fields:
 oxide chunk input.pdf --target-tokens 512 --output chunks.json
 oxide extract-fields input.pdf --type invoice --output fields.json
-```
 
-Use this path for RAG ingestion, document intelligence, and structured
-automation over digital-born PDFs.
+# Tables, text, images, metadata, layout:
+oxide extract-tables input.pdf --format csv
+oxide extract-text input.pdf --structured --format json
+oxide extract-images input.pdf --output images.zip
+oxide info input.pdf
+oxide fonts input.pdf
+oxide analyze input.pdf                    # has text layer? scanned?
 
-</details>
-
-<details>
-<summary><strong>4. Run structural and compliance workflows</strong></summary>
-
-```sh
+# Structural and compliance operations (qpdf-validated):
 oxide optimize input.pdf -o optimized.pdf
 oxide linearize input.pdf -o fast-web-view.pdf
-oxide encrypt input.pdf -o encrypted.pdf --password change-me
+oxide encrypt input.pdf -o encrypted.pdf --user-pw change-me   # AES-256 default
+oxide verify-sig signed.pdf
+oxide merge a.pdf b.pdf -o merged.pdf
+oxide split input.pdf -o page-%d.pdf
 ```
 
-For compliance and release validation, pair Oxide output with external checks:
+Pair with external validation when you want a second pair of eyes:
 
 ```sh
 qpdf --check fast-web-view.pdf
 verapdf --format text compliant.pdf
 ```
 
-</details>
+### Rust library
 
-<details>
-<summary><strong>5. Embed Oxide in your product</strong></summary>
+```toml
+# Cargo.toml
+[dependencies]
+oxide-engine = "0.1"
+```
 
-- Rust library: `oxide-engine`
-- CLI automation: `oxide`
-- C ABI: `oxide-capi`
-- Browser/WASM: `oxide-wasm`
-- Self-hosted API: `oxide-server`
+```rust
+use oxide_engine::prelude::*;
 
-Start with [`docs/api_overview.md`](docs/api_overview.md) for the Rust surface
-and [`docs/self_hosting.md`](docs/self_hosting.md) for the HTTP server.
+fn main() -> Result<()> {
+    // Open + parse to the canonical Document model.
+    let engine = ContentEngine::open_path("input.pdf")?;
+    let doc = engine.parse_document(&ParseOptions::default())?;
 
-</details>
+    // Serialize: Markdown (RAG/AI), lossless JSON, semantic HTML.
+    println!("{}", doc.to_markdown_default());
+    let _json = doc.to_json();
 
-## Embedding
+    // RAG chunks and key-value fields on the same model.
+    let chunks = doc.chunk(&ChunkOptions::default());
+    let fields = engine.extract_fields(&ExtractOptions::default())?;
+    println!("{} chunks, {} fields on a {:?} doc",
+        chunks.chunks.len(), fields.fields.len(), fields.doc_type);
+    Ok(())
+}
+```
 
-The same canonical extraction is available four ways — parse once, consume
-anywhere:
+Authoring and signing live in the same engine via the example binaries:
 
-- **Rust library** (`oxide-engine`): `use oxide_engine::prelude::*;` then
-  `engine.parse_document(&ParseOptions::default())?.to_markdown_default()`. See
-  `crates/engine/examples/parse_to_markdown.rs`.
-- **C ABI** (`oxide-capi`): `oxide_document_parse_markdown` /
-  `oxide_document_parse_json` / `oxide_document_extract_fields_json`. See
-  [`docs/bindings.md`](docs/bindings.md).
-- **WebAssembly** (`oxide-wasm`): in-browser `parseMarkdown()` / `parseJson()` /
-  `chunk()` / `extractFieldsJson()` — digital-born only (no OCR in the browser).
-- **HTTP server** (`oxide-server`): self-hostable `POST /api/v1/parse` /
-  `/chunk` / `/extract-fields` / `/info`, with auth, rate limits, resource caps,
-  and an async job queue. See [`docs/self_hosting.md`](docs/self_hosting.md).
+```sh
+# Build a PDF from scratch (FlowDocument, fonts, tables, images).
+cargo run --example authoring -- target/authored.pdf
 
-## Self-hosting
+# Sign an existing PDF (RSA / SHA-256, ByteRange coverage, LTV substrate).
+cargo run --example sign_document -- \
+    input.pdf private-key.pem signer-cert.pem signed.pdf
 
-Run the whole stack on your own machine or VPS — documents never leave your
-hardware, no per-page cloud fees. See
-[**`docs/self_hosting.md`**](docs/self_hosting.md) for the CLI, the server (with
-and without OCR), Docker, browser-side WASM extraction, and resource/privacy
-guidance.
+# Validate + convert to PDF/A (1b/2b/2a/3b/3a) and PDF/UA best-effort.
+cargo run --example compliance -- target
+```
+
+> The authoring and signing surfaces are library-first — there is intentionally no `oxide create` / `oxide sign` CLI command. Embedding keeps the API expressive and the binary small; the CLI is for the ops a human or a cron job actually runs.
+
+### C ABI, WebAssembly, HTTP server
+
+- **C ABI** — `oxide-capi` (cdylib + staticlib). Stable exported symbols in the committed header. See [`docs/bindings.md`](docs/bindings.md).
+- **WebAssembly** — `oxide-wasm` (wasm-bindgen). In-browser `parseMarkdown()` / `parseJson()` / `chunk()` / `extractFieldsJson()` for digital-born PDFs. OCR is not in the browser build.
+- **HTTP server** — `oxide-server` (axum). Self-hostable `POST /api/v1/parse` / `/chunk` / `/extract-fields` / `/info`, with fail-closed API-key auth, rate limits, resource caps, and an async job queue. See [`docs/self_hosting.md`](docs/self_hosting.md) and [`docs/jobs.md`](docs/jobs.md).
+
+## Use cases
+
+- **RAG and LLM ingestion.** Clean Markdown + token-sized, heading-aware chunks, run locally with no per-page cloud fees. The same `Document` feeds chunkers, fields, and downstream agents.
+- **Document automation.** Invoices, receipts, forms → JSON (field-F1 1.0 on the digital invoice, honest 0.4 on the scanned variant). Line items extracted as a first-class structure, not text matching.
+- **Embedding into Rust, C, or browser apps.** One engine, four surfaces, one schema, no Python/torch runtime to ship alongside.
+- **Compliance pipelines.** Generate, validate, and convert PDF/A-1b/2b/2a/3b/3a; pair Oxide's `validate_pdfa` with veraPDF for an independent check.
+- **Self-hosted privacy.** Invoices, contracts, medical records, legal discovery — documents never leave your hardware, no per-document API fees.
+- **Long-term signed archives.** RSA / SHA-256 signing with offline PAdES B-T / B-LT substrate (DSS, VRI, CRL, OCSP, timestamp tokens); signer and verifier both pure-Rust.
+
+## Benchmarks (measured, not aspirational)
+
+### Extraction quality — vs PyMuPDF, pdftotext
+
+Char-accuracy = `1 − CER`; reading order = normalized Kendall-tau (1.0 = perfect). Scanned rows use Oxide's OCR path; PyMuPDF / Poppler have no OCR and recover nothing.
+
+| Document | Mode | Oxide char-acc | PyMuPDF | pdftotext | Oxide order |
+| --- | --- | ---: | ---: | ---: | ---: |
+| figure | digital | 0.598 | 0.990 | 0.833 | 1.000 |
+| paper | digital | 0.993 | 0.998 | 0.956 | 1.000 |
+| paper_scanned | scanned | **0.942** | 0.000 | 0.000 | 1.000 |
+| report_multicol | digital | 0.605 | 0.669 | 0.596 | **1.000** |
+| tables | digital | **1.000** | 0.877 | 0.088 | 1.000 |
+| tables_scanned | scanned | 0.632 | 0.000 | 0.000 | 1.000 |
+
+Key-value field-F1 (PyMuPDF / Poppler do not do KV extraction — Oxide-only capability):
+
+| Document | Mode | Oxide F1 | Precision | Recall |
+| --- | --- | ---: | ---: | ---: |
+| invoice | digital | **1.000** | 1.000 | 1.000 |
+| invoice_scanned | scanned | 0.400 | 0.375 | 0.429 |
+| receipt | digital | 0.750 | 1.000 | 0.600 |
+
+`qpdf` cross-validates Oxide's structural output: split parts pass `qpdf --check`, page counts agree, linearized output passes `qpdf --check` and `qpdf --show-linearization`.
+
+### Renderer fidelity (GA4, 265-file slice)
+
+| Metric | Result |
+| --- | ---: |
+| Weighted score | **91.32** |
+| Visual-page pass | 86.18% |
+| File pass | 89.06% |
+| Hostile crash / timeout / memory safety | **100% / 100% / 100%** |
+| Determinism sample (24/24 stable) | 100% |
+| Peak Oxide memory | 66.0 MB |
+| Median Poppler / Oxide speed ratio | 2.71× |
+
+Weakest real-world categories (honest disclosure, not polished away): JPEG2000 0.00%, complex vector 13.33%, multi-column 29.41%, scanned 33.33%, RTL 40.00%, forms 57.14%.
+
+### Cross-pillar hostile sweep (GA5)
+
+| Metric | Result |
+| --- | ---: |
+| Files | 265 |
+| Operations | 1,590 |
+| Crashes | **0** |
+| Timeouts | **0** |
+| Crash-free | 100.0% |
+| Timeout-free | 100.0% |
+| Invalid transformed outputs from qpdf-clean inputs | **0** |
+
+The sweep covers `info`, `parse`, `verify-sig`, first-page `render`, `optimize`, and `linearize` with a 60-second per-operation cap.
+
+### Operation smoke (single-doc, release build, best of 3)
+
+| Operation | Best ms | Peak MB |
+| --- | ---: | ---: |
+| Parse to JSON (CLI) | 95.9 | 19.0 |
+| Extract text (CLI) | 38.0 | 19.9 |
+| Render PNG ZIP (CLI) | 59.1 | 18.5 |
+| Authoring example | 23.3 | 7.7 |
+| PDF/A conversion example | 16.7 | 9.0 |
+| RSA signing example | 12.7 | 5.1 |
+| Optimize (CLI) | 9.5 | 6.1 |
+| Linearize (CLI) | 12.5 | 6.8 |
+| Encrypt AES-256 (CLI) | 20.2 | 6.6 |
+
+These are smoke operation benchmarks, not statistically rigorous throughput claims.
+
+### External validation
+
+| Output | External check | Result |
+| --- | --- | --- |
+| PDF/A-1b / 2b / 2a / 3b / 3a | veraPDF 1.30.2 | **PASS** |
+| AES-256 encrypted | `qpdf --check` | Clean (AESv3) |
+| Linearized | `qpdf --check`, `--show-linearization` | Clean |
+| Optimized | `qpdf --check` | Clean |
+| Signed (RSA / SHA-256) | `qpdf --check`, Oxide `verify-sig` | Cryptographically valid, whole-file coverage |
+| Authored | `qpdf --check`, Poppler render/extract | Clean |
+
+Reproduce with `python renderer-benchmark/scripts/renderer_benchmark.py` and `python extraction-benchmark/scripts/extraction_benchmark.py`.
+
+## Surface consistency
+
+`parse` is the same operation whether you call it from the Rust library, the CLI, the C ABI, or the HTTP server. The capstone integration test hashes the extracted text of `basicapi.pdf` page 1 across all four surfaces; the SHA-256 matches in every case. See the [Surface consistency table](docs/oxide_sdk.md#integration-results) in the capstone.
+
+## What it's not (yet)
+
+Honesty is the product. Oxide is a credible v1 candidate; it is not a panacea, and pretending otherwise would burn the trust of every serious evaluator.
+
+- **Renderer is preview / OCR-grade, not pixel-proof.** GA4 reaches a 91.32 weighted score and 86.18% visual pass on the 265-file hostile slice — a real improvement — but it still trails Poppler / MuPDF / PDFium for visual fidelity. The renderer exists to feed OCR, previews, and regression checks; if you need a pixel-perfect "this PDF will print exactly as displayed" guarantee, render with Poppler / PDFium and use Oxide for everything else.
+- **OCR is Tesseract, not an ML layout model.** Bounded by the Tesseract engine and scan quality. Scanned tables don't reconstruct as clean cell grids (cell-F1 0 on `tables_scanned`); the OCR path emits prose blocks, and the grid detector needs ruling-line graphics it can't see on a scan. For scanned tabular data, use `extract-fields --ocr` to recover values and line items. Docling's ML layout would likely do better on messy scans; Docling is not benchmarked locally and is not part of this binary.
+- **No external security audit yet.** Continuous fuzzing, differential checks, property tests, grammar-aware deep fuzzing, dependency auditing, and a cross-pillar hostile sweep are all live and green — but a paid third-party audit is the next trust-builder, especially for the signature and encryption surfaces. See [`docs/security/posture.md`](docs/security/posture.md).
+- **Signature LTV is offline-first.** Core signing + offline timestamp / DSS / CRL substrate works. Live TSA / OCSP fetching, system trust-store policy, PAdES-B-LTA archive-timestamp refresh, and ECDSA breadth remain deployment-sensitive follow-ups.
+- **PDF/UA is best-effort.** Assistive tagging is emitted, but full accessibility certification still requires manual semantic review.
+- **Per-call CLI latency** includes process spawn; for many-small-doc throughput in a long-lived process, embed the `oxide-engine` library to erase the spawn cost.
+
+## Architecture
+
+| Crate | Role |
+| --- | --- |
+| `oxide-engine` | The Rust core: parse, extract, author, edit, render, sign, validate. |
+| `oxide-cli` | The `oxide` binary — every command is a thin adapter over the engine. |
+| `oxide-server` | Self-hostable axum HTTP server with auth, rate limits, resource caps, async jobs. |
+| `oxide-capi` | C ABI wrapper (`cdylib` + `staticlib`). |
+| `oxide-wasm` | `wasm-bindgen` wrapper for in-browser digital-born extraction. |
+| `oxide-ocr-tesseract` | Tesseract OCR backend (drives the external `tesseract` process, no linked C). |
+
+One `Document` model flows through every surface. The server is intentionally **non-mutating** unless a route explicitly documents otherwise — a real safety property for a service ingesting untrusted PDFs.
+
+## Install / build
+
+Stable Rust toolchain (edition 2021). No `rust-version` pin yet — current stable.
+
+```sh
+rustup update stable
+
+# Engine (the library):
+cargo build --release -p oxide-engine
+
+# CLI (digital-born, no OCR):
+cargo build --release -p oxide-cli
+
+# CLI with OCR (Tesseract must be installed and on PATH):
+cargo build --release -p oxide-cli --features full   # CLI's `full` = ["ocr"]
+
+# Server, C ABI, WASM:
+cargo build --release -p oxide-server
+cargo build --release -p oxide-capi
+cargo build --release -p oxide-wasm
+```
+
+### Engine feature flags (`oxide-engine`)
+
+`default = ["parse", "render", "structural"]`; `full` enables everything.
+
+| Flag | Pulls in |
+| --- | --- |
+| `parse` (default) | Parser, `Document` model, text / field / table extraction |
+| `render` (default) | PNG / SVG / PostScript / EPS rendering |
+| `structural` (default) | Merge, split, encrypt, optimize, linearize, repair |
+| `extract` | Structured field / table / image extraction on top of `parse` |
+| `create` | `PdfBuilder` / `FlowDocument` authoring |
+| `edit` | Watermarks, redaction, form fill, annotations (pulls in `create` + `structural`) |
+| `sign` | RSA signing + verification + LTV substrate |
+| `pdfa` | PDF/A validation + conversion and PDF/UA checks |
+| `ocr` | Plugs the `OcrEngine` trait into the parse pipeline |
+| `fuzzing` | Exposes internal parse/decode entry points for the fuzz workspace |
+| `full` | All of the above |
+
+Pull only what you need. The default build gives you parse + render + structural ops; add `extract` for fields and chunks, `create` to author, `sign` for signing, `pdfa` for compliance.
+
+## Verification and security
+
+- Unit, integration, and doc tests across the workspace (`cargo test --workspace`).
+- Clippy clean under `-D warnings` (`cargo clippy --workspace --all-targets -- -D warnings`).
+- 16 private fuzz corpora, replayed on every push, plus a `structured_pdf` grammar-aware target reaching content interpretation, renderer, editing, linearization, PDF/A, and signature paths.
+- Differential fuzzing vs qpdf and Poppler for page count, structural validity, text similarity, and writer round-trip.
+- Property tests for round-trip identities, writer-mode equivalence, AES-256 preserve-content, and no-panic arbitrary bytes.
+- Cross-pillar hostile sweep: 265 files, 1,590 operations, 0 crashes, 0 timeouts.
+- `cargo audit` and `cargo deny` clean against the documented `RUSTSEC-2023-0071` (RustCrypto `rsa 0.9.10`) advisory exception.
+
+Full evidence and residual-risk list: [`docs/security/posture.md`](docs/security/posture.md). Threat model: [`docs/security/threat_model.md`](docs/security/threat_model.md). Disclosure: [`SECURITY.md`](SECURITY.md).
 
 ## Documentation
 
 | Doc | What it covers |
 | --- | --- |
-| [`docs/self_hosting.md`](docs/self_hosting.md) | Running Oxide yourself: CLI, server, OCR, Docker, WASM, config. |
-| [`docs/oxide_sdk.md`](docs/oxide_sdk.md) | Capstone integration, fresh benchmarks, capability matrix, and release-readiness verdict. |
-| [`docs/api_overview.md`](docs/api_overview.md) | Stable Rust/API entry points and capability map. |
-| [`docs/stability.md`](docs/stability.md) | SemVer, MSRV, stable-vs-experimental policy, API drift checks. |
-| [`docs/packaging.md`](docs/packaging.md) | Feature flags, publishing dry-runs, license audit, artifacts, release checklist. |
-| [`docs/parser_positioning.md`](docs/parser_positioning.md) | Measured capability boundaries, current strengths, and release positioning. |
+| [`docs/oxide_sdk.md`](docs/oxide_sdk.md) | Capstone: integration, benchmarks, capability matrix, release-readiness verdict. |
+| [`docs/api_overview.md`](docs/api_overview.md) | Stable Rust API entry points and capability map. |
 | [`docs/parser_benchmark.md`](docs/parser_benchmark.md) | The reproducible extraction-quality benchmark + numbers. |
-| [`docs/linearization_qpdf_clean_ga1.md`](docs/linearization_qpdf_clean_ga1.md) | qpdf-clean linearization hint-table fix and fixture breadth. |
+| [`docs/parser_positioning.md`](docs/parser_positioning.md) | Measured capability boundaries, current strengths, positioning. |
 | [`docs/document_parsing.md`](docs/document_parsing.md) | The canonical `Document` model and the `parse` surface. |
-| [`docs/compliance.md`](docs/compliance.md) | PDF/A-1b/2b/2a/3b/3a validation and bounded conversion, plus PDF/UA basic checks. |
+| [`docs/compliance.md`](docs/compliance.md) | PDF/A-1b/2b/2a/3b/3a and PDF/UA. |
+| [`docs/signatures.md`](docs/signatures.md) | RSA signing, verification, LTV substrate. |
+| [`docs/manipulation.md`](docs/manipulation.md) | Structural ops: merge, split, encrypt, optimize, linearize, repair. |
 | [`docs/bindings.md`](docs/bindings.md) | C ABI and WebAssembly embedding. |
-| [`docs/security.md`](docs/security.md) | Server security posture + deploy checklist. |
-| [`docs/security/posture.md`](docs/security/posture.md) | Consolidated hardening posture: fuzzing, differential checks, property tests, audit gates, and residual risk. |
-| [`docs/jobs.md`](docs/jobs.md) | The async job API and its limitations. |
-| [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable API changes. |
+| [`docs/self_hosting.md`](docs/self_hosting.md) | CLI, server (with and without OCR), Docker, WASM, config. |
+| [`docs/jobs.md`](docs/jobs.md) | The async job API. |
+| [`docs/packaging.md`](docs/packaging.md) | Feature flags, publishing dry-runs, license audit, release checklist. |
+| [`docs/stability.md`](docs/stability.md) | SemVer, MSRV, stable-vs-experimental policy. |
+| [`docs/security/posture.md`](docs/security/posture.md) | Consolidated hardening posture + residual risk. |
 | [`.env.example`](.env.example) | The complete `OXIDE_*` server configuration reference. |
-
-## Scope and limits
-
-Implemented and documented:
-
-- Structured extraction to Markdown, JSON, semantic HTML, chunks, and fields.
-- Programmatic PDF authoring with pages, text, graphics, images, fonts, tables,
-  and single-column flow layout.
-- Additive editing, watermarks, headers/footers, redaction, annotations, form
-  fill/flatten, and incremental update support.
-- Structural operations for merge, split, extract-pages, rotate, repair,
-  optimize, encrypt/decrypt, and linearize.
-- PDF/A-1b/2b/2a/3b/3a validation and bounded conversion paths.
-- Digital signatures with core validation plus documented LTV material support.
-- CLI, Rust library, C ABI, WebAssembly, and self-hosted HTTP server surfaces.
-
-Known limits:
-
-- Rendering is suitable for previews, OCR support, and regression checks. It is
-  not a visual-proof renderer.
-- OCR quality depends on the installed OCR backend and source scan quality.
-  Messy scanned tables and low-quality forms still need human review.
-- PDF/UA tagging is assistive and best-effort. Accessibility certification still
-  requires manual semantic review.
-- Signature LTV live TSA/OCSP trust policy and PAdES-B-LTA archival refresh are
-  follow-up areas.
-- Custom font subsetting depth, CFF/OpenType embedding breadth, and advanced
-  multi-column document layout remain active follow-ups.
-
-Measured claims and release evidence live in `docs/oxide_sdk.md`,
-`docs/security/posture.md`, and the benchmark artifacts under
-`extraction-benchmark/`.
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable API changes. |
 
 ## License
 
-MIT OR Apache-2.0 — permissive, non-copyleft. See
-[`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE), and
-[`docs/licenses.md`](docs/licenses.md) (includes bundled-font licensing).
+**MIT OR Apache-2.0** — permissive, non-copyleft. See [`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE), and [`docs/licenses.md`](docs/licenses.md) (includes bundled-font licensing).
