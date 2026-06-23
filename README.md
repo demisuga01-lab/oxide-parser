@@ -4,18 +4,15 @@
   <img src="docs/assets/oxide-github-hero.svg" alt="Oxide Enterprise PDF SDK workflow banner" width="100%" />
 </p>
 
-**A Rust-native document parser.** Oxide turns PDFs into structured, AI/RAG-ready
-output — **Markdown, JSON, semantic HTML, RAG chunks, and key-value fields** —
-with **qpdf-class structural operations** (merge / split / extract-pages), an
-**optional OCR** path for scanned pages, and a **pure-Rust core** with no Python,
-no torch/ML stack, and no Poppler/Ghostscript. One canonical document model,
-emitted identically across the CLI, the Rust library, a C ABI, WebAssembly, and a
-self-hostable HTTP server.
+**A self-hosted PDF SDK written in Rust.** Oxide parses PDFs into structured
+Markdown, JSON, semantic HTML, RAG chunks, and key-value fields. It also covers
+authoring, editing, redaction, forms, signatures, PDF/A, structural operations,
+OCR-enabled extraction, and deployable surfaces for CLI, Rust, C ABI,
+WebAssembly, and HTTP server use.
 
-> Docling-class structured extraction + qpdf-class structural ops, pure-Rust,
-> fast, safe, embeddable, and self-hostable. See
-> [`docs/parser_positioning.md`](docs/parser_positioning.md) for the honest
-> where-it-leads / where-it-trails.
+The project is built around one canonical document model and a memory-safe core.
+The README is intentionally direct: what is implemented is linked below; what
+still needs human review or production hardening is listed in the scope section.
 
 ## Quick start
 
@@ -42,7 +39,7 @@ oxide --version
 
 - Rust stable toolchain with Cargo.
 - `qpdf` for structural validation checks.
-- Optional: Poppler and veraPDF for render/compliance validation.
+- Optional: a reference renderer for visual QA and veraPDF for compliance checks.
 - Optional OCR: Tesseract with language data when building with `--features ocr`.
 
 ```sh
@@ -155,7 +152,7 @@ guidance.
 | [`docs/api_overview.md`](docs/api_overview.md) | Stable Rust/API entry points and capability map. |
 | [`docs/stability.md`](docs/stability.md) | SemVer, MSRV, stable-vs-experimental policy, API drift checks. |
 | [`docs/packaging.md`](docs/packaging.md) | Feature flags, publishing dry-runs, license audit, artifacts, release checklist. |
-| [`docs/parser_positioning.md`](docs/parser_positioning.md) | Honest positioning vs Docling / PyMuPDF / qpdf — wins **and** trails. |
+| [`docs/parser_positioning.md`](docs/parser_positioning.md) | Measured capability boundaries, current strengths, and release positioning. |
 | [`docs/parser_benchmark.md`](docs/parser_benchmark.md) | The reproducible extraction-quality benchmark + numbers. |
 | [`docs/linearization_qpdf_clean_ga1.md`](docs/linearization_qpdf_clean_ga1.md) | qpdf-clean linearization hint-table fix and fixture breadth. |
 | [`docs/document_parsing.md`](docs/document_parsing.md) | The canonical `Document` model and the `parse` surface. |
@@ -167,34 +164,37 @@ guidance.
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and notable API changes. |
 | [`.env.example`](.env.example) | The complete `OXIDE_*` server configuration reference. |
 
-## What it's good at (and what it isn't)
+## Scope and limits
 
-**Leads:** startup/footprint (single ~12 MB binary, ~6 ms cold start; no Python
-or torch), reading order on multi-column layouts, clean digital tables, key-value
-extraction, OCR'd-text recovery where PyMuPDF/Poppler do nothing, embeddability
-(Rust/C/WASM/HTTP), privacy/self-hosting, and memory safety.
+Implemented and documented:
 
-**Trails:** OCR'd-table grid reconstruction, key-value recall on messy scans
-(bounded by Tesseract), pixel-faithful rendering (use Poppler/PDFium — see
-`docs/oxide_vs_poppler.md`), and the breadth of ML-model understanding on exotic
-layouts (Docling head-to-head not measured locally). Structural write operations
-are available for encrypt, rotate, optimize, repair, and qpdf-clean
-linearization for the supported structural subset. New PDFs can be authored
-from scratch with `PdfBuilder` and `FlowDocument` (pages, text, vector graphics,
-images, whole TrueType font embedding, tables, and single-column flow layout;
-see `docs/authoring.md`). Existing PDFs can be edited additively with
-watermarks, headers/footers, overlays/underlays, image stamps, and append-only
-incremental updates that preserve the original byte prefix, plus full-rewrite
-redaction, annotation writes, and AcroForm fill/flatten (see `docs/editing.md`).
-PDF/A-1b/2b/2a/3b/3a validation, bounded PDF/A conversion for embedded-font
-documents, PDF/A-3 associated-file handling, and PDF/UA basic
-validation/best-effort tagging are available through the compliance API (see
-`docs/compliance.md`).
-Decrypt-as-write, linearized object-stream packing, custom font subsetting,
-CFF/OpenType embedding, and advanced multi-column layout remain documented
-follow-ups.
+- Structured extraction to Markdown, JSON, semantic HTML, chunks, and fields.
+- Programmatic PDF authoring with pages, text, graphics, images, fonts, tables,
+  and single-column flow layout.
+- Additive editing, watermarks, headers/footers, redaction, annotations, form
+  fill/flatten, and incremental update support.
+- Structural operations for merge, split, extract-pages, rotate, repair,
+  optimize, encrypt/decrypt, and linearize.
+- PDF/A-1b/2b/2a/3b/3a validation and bounded conversion paths.
+- Digital signatures with core validation plus documented LTV material support.
+- CLI, Rust library, C ABI, WebAssembly, and self-hosted HTTP server surfaces.
 
-All claims are reproducible via the benchmark in `extraction-benchmark/`.
+Known limits:
+
+- Rendering is suitable for previews, OCR support, and regression checks. It is
+  not a visual-proof renderer.
+- OCR quality depends on the installed OCR backend and source scan quality.
+  Messy scanned tables and low-quality forms still need human review.
+- PDF/UA tagging is assistive and best-effort. Accessibility certification still
+  requires manual semantic review.
+- Signature LTV live TSA/OCSP trust policy and PAdES-B-LTA archival refresh are
+  follow-up areas.
+- Custom font subsetting depth, CFF/OpenType embedding breadth, and advanced
+  multi-column document layout remain active follow-ups.
+
+Measured claims and release evidence live in `docs/oxide_sdk.md`,
+`docs/security/posture.md`, and the benchmark artifacts under
+`extraction-benchmark/`.
 
 ## License
 
