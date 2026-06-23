@@ -1,22 +1,14 @@
 name: Sanitizers
 
 on:
-  pull_request:
-    paths:
-      - "crates/**"
-      - "fuzz/**"
-      - "scripts/ci_fuzz.py"
-      - ".github/workflows/sanitizers.yml"
-  push:
-    branches: [main]
-    paths:
-      - "crates/**"
-      - "fuzz/**"
-      - "scripts/ci_fuzz.py"
-      - ".github/workflows/sanitizers.yml"
   schedule:
     - cron: "41 5 * * 2"
   workflow_dispatch:
+    inputs:
+      fuzz_seconds:
+        description: Seconds per target for the manual sanitizer fuzz smoke
+        required: false
+        default: "30"
 
 permissions:
   contents: read
@@ -24,10 +16,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  SANITIZER_TARGET: x86_64-unknown-linux-gnu
 
 jobs:
-  rust-sanitizer-tests:
-    name: ${{ matrix.name }} tests
+  c-abi-sanitizer-tests:
+    name: ${{ matrix.name }} C-ABI tests
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -37,49 +30,72 @@ jobs:
           - name: address-sanitizer
             rustflags: "-Zsanitizer=address"
             cargo_flags: "-Zbuild-std --target x86_64-unknown-linux-gnu"
-            runtime_options: "ASAN_OPTIONS=detect_leaks=1:abort_on_error=1"
+            asan_options: "detect_leaks=1:abort_on_error=1"
+            tsan_options: ""
           - name: thread-sanitizer
             rustflags: "-Zsanitizer=thread"
             cargo_flags: "-Zbuild-std --target x86_64-unknown-linux-gnu"
-            runtime_options: "TSAN_OPTIONS=halt_on_error=1"
-          - name: rust-ub-checks
+            asan_options: ""
+            tsan_options: "halt_on_error=1"
+          - name: rust-ub-runtime-checks
             rustflags: "-Zub-checks=yes"
             cargo_flags: ""
-            runtime_options: ""
+            asan_options: ""
+            tsan_options: ""
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install nightly Rust
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-          targets: x86_64-unknown-linux-gnu
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup +nightly target add "${SANITIZER_TARGET}"
 
       - name: Run C-ABI tests under sanitizer
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          ASAN_OPTIONS: ${{ matrix.asan_options }}
+          TSAN_OPTIONS: ${{ matrix.tsan_options }}
+        shell: bash
         run: |
-          ${{ matrix.runtime_options }} cargo +nightly test ${{ matrix.cargo_flags }} -p oxide-capi --tests
+          set -o pipefail
+          mkdir -p target/sanitizer-logs
+          cargo +nightly test ${{ matrix.cargo_flags }} --locked -p oxide-capi --tests \
+            2>&1 | tee "target/sanitizer-logs/${{ matrix.name }}-capi.log"
 
       - name: Run crypto regression tests under sanitizer
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          ASAN_OPTIONS: ${{ matrix.asan_options }}
+          TSAN_OPTIONS: ${{ matrix.tsan_options }}
+        shell: bash
         run: |
-          ${{ matrix.runtime_options }} cargo +nightly test ${{ matrix.cargo_flags }} -p oxide-engine crypto::tests --lib
+          set -o pipefail
+          cargo +nightly test ${{ matrix.cargo_flags }} --locked -p oxide-engine crypto::tests --lib \
+            2>&1 | tee "target/sanitizer-logs/${{ matrix.name }}-crypto.log"
+
+      - name: Upload sanitizer failure logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanitizer-logs-${{ matrix.name }}-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: target/sanitizer-logs
 
   fuzz-asan-regression:
     name: cargo-fuzz ASan regression
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install nightly Rust
         run: rustup toolchain install nightly --profile minimal
 
       - name: Cache cargo registry and fuzz artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry
@@ -95,7 +111,39 @@ jobs:
             cargo install cargo-fuzz --locked
           fi
 
-      - name: Replay committed crypto and parser fuzz corpora under ASan
+      - name: Replay committed fuzz corpora under ASan
         env:
           ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
-        run: python scripts/ci_fuzz.py --targets "crypto,parse_pdf,structured_pdf" --mode regression
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target/sanitizer-logs
+          python scripts/ci_fuzz.py --targets all --mode regression --sanitizer address \
+            2>&1 | tee target/sanitizer-logs/fuzz-asan-regression.log
+
+      - name: Time-boxed manual ASan fuzz smoke
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+        shell: bash
+        run: |
+          set -o pipefail
+          python scripts/ci_fuzz.py \
+            --targets all \
+            --mode smoke \
+            --seconds "${{ inputs.fuzz_seconds }}" \
+            --max-len 65536 \
+            --no-build \
+            --sanitizer address \
+            2>&1 | tee target/sanitizer-logs/fuzz-asan-smoke.log
+
+      - name: Upload sanitizer fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sanitizer-fuzz-artifacts-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            target/sanitizer-logs
+            target/ci-fuzz-artifacts
+            fuzz/artifacts

@@ -133,9 +133,7 @@ pub fn detect_skew(img: &OcrImage, max_deg: f64, step_deg: f64) -> f64 {
     while a <= max_deg + 1e-9 {
         let score = projection_variance(img, thresh, a);
         // Prefer the smaller absolute angle on a tie for stability/determinism.
-        if score > best_score
-            || (score == best_score && a.abs() < best_angle.abs())
-        {
+        if score > best_score || (score == best_score && a.abs() < best_angle.abs()) {
             best_score = score;
             best_angle = a;
         }
@@ -461,7 +459,10 @@ mod tests {
         // Sanity: a −3° tilt needs a +3° correction.
         let img2 = synthetic_lines(300, 300, -3.0);
         let angle2 = detect_skew(&img2, 10.0, 0.5);
-        assert!((angle2 - 3.0).abs() <= 1.0, "expected ~+3° correction, got {angle2}");
+        assert!(
+            (angle2 - 3.0).abs() <= 1.0,
+            "expected ~+3° correction, got {angle2}"
+        );
     }
 
     #[test]
@@ -545,7 +546,10 @@ mod tests {
         // Sauvola keeps the stroke on BOTH the dark (left) and bright (right)
         // sides — the property a single global threshold cannot achieve here.
         assert!(has_ink(&b.gray, 0..20), "no ink recovered on the dark side");
-        assert!(has_ink(&b.gray, 100..120), "no ink recovered on the bright side");
+        assert!(
+            has_ink(&b.gray, 100..120),
+            "no ink recovered on the bright side"
+        );
 
         // Demonstrate the failure mode Sauvola fixes: a global Otsu threshold
         // loses the stroke on at least one side of this uneven-lit page.

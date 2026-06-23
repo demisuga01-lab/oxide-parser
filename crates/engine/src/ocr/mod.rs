@@ -119,7 +119,10 @@ impl OcrImage {
                     luma * a + 255.0 * (1.0 - a)
                 }
                 other => {
-                    let sum: u32 = img.pixels[base..base + other].iter().map(|&v| v as u32).sum();
+                    let sum: u32 = img.pixels[base..base + other]
+                        .iter()
+                        .map(|&v| v as u32)
+                        .sum();
                     sum as f32 / other as f32
                 }
             };

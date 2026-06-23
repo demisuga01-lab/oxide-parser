@@ -256,7 +256,13 @@ fn fx_simple_article() -> Fixture {
     let mut y = 712.0;
     for p in &paras {
         c.push_str(&tx("F1", 10.0, 72.0, y, p));
-        c.push_str(&tx("F1", 10.0, 72.0, y - 13.0, "and a wrapped continuation line of body text."));
+        c.push_str(&tx(
+            "F1",
+            10.0,
+            72.0,
+            y - 13.0,
+            "and a wrapped continuation line of body text.",
+        ));
         y -= 45.0;
     }
     Fixture {
@@ -264,10 +270,26 @@ fn fx_simple_article() -> Fixture {
         pdf: page(c.as_bytes()),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "ARTICLE", ty: Ty::Title, rank: 0 },
-            GtBlock { token: "PARA1", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "PARA2", ty: Ty::Paragraph, rank: 2 },
-            GtBlock { token: "PARA3", ty: Ty::Paragraph, rank: 3 },
+            GtBlock {
+                token: "ARTICLE",
+                ty: Ty::Title,
+                rank: 0,
+            },
+            GtBlock {
+                token: "PARA1",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "PARA2",
+                ty: Ty::Paragraph,
+                rank: 2,
+            },
+            GtBlock {
+                token: "PARA3",
+                ty: Ty::Paragraph,
+                rank: 3,
+            },
         ],
     }
 }
@@ -276,20 +298,60 @@ fn fx_simple_article() -> Fixture {
 fn fx_heading_hierarchy() -> Fixture {
     let mut c = String::new();
     c.push_str(&tx("FB", 24.0, 72.0, 750.0, "H1HEAD Major Section"));
-    c.push_str(&tx("F1", 10.0, 72.0, 730.0, "BODYA introductory paragraph under the major heading here."));
-    c.push_str(&tx("F1", 10.0, 72.0, 717.0, "continuing the introductory paragraph onto a second line."));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        730.0,
+        "BODYA introductory paragraph under the major heading here.",
+    ));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        717.0,
+        "continuing the introductory paragraph onto a second line.",
+    ));
     c.push_str(&tx("FB", 16.0, 72.0, 690.0, "H2HEAD Subsection"));
-    c.push_str(&tx("F1", 10.0, 72.0, 670.0, "BODYB another body paragraph under the subsection heading."));
-    c.push_str(&tx("F1", 10.0, 72.0, 657.0, "with its own wrapped continuation line of prose text."));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        670.0,
+        "BODYB another body paragraph under the subsection heading.",
+    ));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        657.0,
+        "with its own wrapped continuation line of prose text.",
+    ));
     Fixture {
         name: "heading_hierarchy",
         pdf: page(c.as_bytes()),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "H1HEAD", ty: Ty::Heading, rank: 0 },
-            GtBlock { token: "BODYA", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "H2HEAD", ty: Ty::Heading, rank: 2 },
-            GtBlock { token: "BODYB", ty: Ty::Paragraph, rank: 3 },
+            GtBlock {
+                token: "H1HEAD",
+                ty: Ty::Heading,
+                rank: 0,
+            },
+            GtBlock {
+                token: "BODYA",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "H2HEAD",
+                ty: Ty::Heading,
+                rank: 2,
+            },
+            GtBlock {
+                token: "BODYB",
+                ty: Ty::Paragraph,
+                rank: 3,
+            },
         ],
     }
 }
@@ -298,8 +360,21 @@ fn fx_heading_hierarchy() -> Fixture {
 fn fx_bulleted_list() -> Fixture {
     let mut c: Vec<u8> = Vec::new();
     c.extend_from_slice(tx("FB", 18.0, 72.0, 750.0, "LISTDOC Title").as_bytes());
-    c.extend_from_slice(tx("F1", 10.0, 72.0, 725.0, "INTRO paragraph before the list begins here on its line.").as_bytes());
-    let items = ["ITEMA first bullet point", "ITEMB second bullet point", "ITEMC third bullet point"];
+    c.extend_from_slice(
+        tx(
+            "F1",
+            10.0,
+            72.0,
+            725.0,
+            "INTRO paragraph before the list begins here on its line.",
+        )
+        .as_bytes(),
+    );
+    let items = [
+        "ITEMA first bullet point",
+        "ITEMB second bullet point",
+        "ITEMC third bullet point",
+    ];
     let mut y = 700.0;
     for it in items {
         c.extend_from_slice(format!("BT /F1 10 Tf 1 0 0 1 72 {y:.1} Tm (").as_bytes());
@@ -307,16 +382,41 @@ fn fx_bulleted_list() -> Fixture {
         c.extend_from_slice(format!(" {it}) Tj ET\n").as_bytes());
         y -= 16.0;
     }
-    c.extend_from_slice(tx("F1", 10.0, 72.0, y - 10.0, "OUTRO paragraph after the list closing the section.").as_bytes());
+    c.extend_from_slice(
+        tx(
+            "F1",
+            10.0,
+            72.0,
+            y - 10.0,
+            "OUTRO paragraph after the list closing the section.",
+        )
+        .as_bytes(),
+    );
     Fixture {
         name: "bulleted_list",
         pdf: page(&c),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "LISTDOC", ty: Ty::Title, rank: 0 },
-            GtBlock { token: "INTRO", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "ITEMA", ty: Ty::List, rank: 2 },
-            GtBlock { token: "OUTRO", ty: Ty::Paragraph, rank: 3 },
+            GtBlock {
+                token: "LISTDOC",
+                ty: Ty::Title,
+                rank: 0,
+            },
+            GtBlock {
+                token: "INTRO",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "ITEMA",
+                ty: Ty::List,
+                rank: 2,
+            },
+            GtBlock {
+                token: "OUTRO",
+                ty: Ty::Paragraph,
+                rank: 3,
+            },
         ],
     }
 }
@@ -325,7 +425,11 @@ fn fx_bulleted_list() -> Fixture {
 fn fx_ordered_list() -> Fixture {
     let mut c = String::new();
     c.push_str(&tx("FB", 18.0, 72.0, 750.0, "STEPS Procedure"));
-    let items = ["1. STEPA prepare the workspace first", "2. STEPB assemble the parts in order", "3. STEPC verify the final result"];
+    let items = [
+        "1. STEPA prepare the workspace first",
+        "2. STEPB assemble the parts in order",
+        "3. STEPC verify the final result",
+    ];
     let mut y = 720.0;
     for it in items {
         c.push_str(&tx("F1", 10.0, 72.0, y, it));
@@ -336,8 +440,16 @@ fn fx_ordered_list() -> Fixture {
         pdf: page(c.as_bytes()),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "STEPS", ty: Ty::Title, rank: 0 },
-            GtBlock { token: "STEPA", ty: Ty::List, rank: 1 },
+            GtBlock {
+                token: "STEPS",
+                ty: Ty::Title,
+                rank: 0,
+            },
+            GtBlock {
+                token: "STEPA",
+                ty: Ty::List,
+                rank: 1,
+            },
         ],
     }
 }
@@ -354,9 +466,21 @@ fn fx_figure_caption() -> Fixture {
     );
     let mut c = String::new();
     c.push_str(&tx("FB", 18.0, 72.0, 750.0, "FIGDOC Report"));
-    c.push_str(&tx("F1", 10.0, 72.0, 728.0, "BODY1 paragraph introducing the figure that follows below."));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        728.0,
+        "BODY1 paragraph introducing the figure that follows below.",
+    ));
     c.push_str("q 300 0 0 180 72 520 cm /Im0 Do Q\n");
-    c.push_str(&tx("F1", 9.0, 72.0, 504.0, "Figure 1: CAPTOK quarterly revenue chart"));
+    c.push_str(&tx(
+        "F1",
+        9.0,
+        72.0,
+        504.0,
+        "Figure 1: CAPTOK quarterly revenue chart",
+    ));
     b.add_stream("", c.as_bytes());
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
@@ -369,9 +493,21 @@ fn fx_figure_caption() -> Fixture {
         pdf: b.build(),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "FIGDOC", ty: Ty::Title, rank: 0 },
-            GtBlock { token: "BODY1", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "CAPTOK", ty: Ty::Caption, rank: 3 },
+            GtBlock {
+                token: "FIGDOC",
+                ty: Ty::Title,
+                rank: 0,
+            },
+            GtBlock {
+                token: "BODY1",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "CAPTOK",
+                ty: Ty::Caption,
+                rank: 3,
+            },
         ],
     }
 }
@@ -392,7 +528,13 @@ fn fx_running_elements() -> Fixture {
     for p in 1..=3usize {
         let mut c = String::new();
         c.push_str(&tx("F1", 9.0, 72.0, 765.0, "RUNHEAD Quarterly Bulletin"));
-        c.push_str(&tx("F1", 10.0, 72.0, 420.0, &format!("PG{p}BODY content unique to this page only here.")));
+        c.push_str(&tx(
+            "F1",
+            10.0,
+            72.0,
+            420.0,
+            &format!("PG{p}BODY content unique to this page only here."),
+        ));
         c.push_str(&tx("F1", 9.0, 300.0, 30.0, &format!("{p}")));
         b.add_stream("", c.as_bytes());
     }
@@ -402,8 +544,16 @@ fn fx_running_elements() -> Fixture {
         pdf: b.build(),
         pages: vec![1, 2, 3],
         gt: vec![
-            GtBlock { token: "RUNHEAD", ty: Ty::Header, rank: 0 },
-            GtBlock { token: "PG1BODY", ty: Ty::Paragraph, rank: 1 },
+            GtBlock {
+                token: "RUNHEAD",
+                ty: Ty::Header,
+                rank: 0,
+            },
+            GtBlock {
+                token: "PG1BODY",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
         ],
     }
 }
@@ -412,11 +562,19 @@ fn fx_running_elements() -> Fixture {
 ///    order; H1 + list + figure.
 fn fx_tagged() -> Fixture {
     let mc = |mcid: i64, tag: &str, x: f64, y: f64, s: &str| -> String {
-        format!("/{tag} <</MCID {mcid}>> BDC\nBT /F1 10 Tf 1 0 0 1 {x:.1} {y:.1} Tm ({s}) Tj ET\nEMC\n")
+        format!(
+            "/{tag} <</MCID {mcid}>> BDC\nBT /F1 10 Tf 1 0 0 1 {x:.1} {y:.1} Tm ({s}) Tj ET\nEMC\n"
+        )
     };
     let mut content = String::new();
     content.push_str(&mc(0, "H1", 72.0, 740.0, "TTITLE Tagged Heading"));
-    content.push_str(&mc(1, "P", 320.0, 700.0, "TRIGHT right column paragraph text"));
+    content.push_str(&mc(
+        1,
+        "P",
+        320.0,
+        700.0,
+        "TRIGHT right column paragraph text",
+    ));
     content.push_str(&mc(2, "P", 72.0, 700.0, "TLEFT left column paragraph text"));
     content.push_str(&mc(3, "Lbl", 90.0, 670.0, "TITEM one"));
 
@@ -441,10 +599,26 @@ fn fx_tagged() -> Fixture {
         pdf: b.build(),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "TTITLE", ty: Ty::Heading, rank: 0 },
-            GtBlock { token: "TLEFT", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "TRIGHT", ty: Ty::Paragraph, rank: 2 },
-            GtBlock { token: "TITEM", ty: Ty::List, rank: 3 },
+            GtBlock {
+                token: "TTITLE",
+                ty: Ty::Heading,
+                rank: 0,
+            },
+            GtBlock {
+                token: "TLEFT",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "TRIGHT",
+                ty: Ty::Paragraph,
+                rank: 2,
+            },
+            GtBlock {
+                token: "TITEM",
+                ty: Ty::List,
+                rank: 3,
+            },
         ],
     }
 }
@@ -500,9 +674,21 @@ end";
         pages: vec![1],
         gt: vec![
             // tokens are the Hebrew decodings
-            GtBlock { token: "\u{05D0}\u{05D1}", ty: Ty::Heading, rank: 0 },
-            GtBlock { token: "\u{05D2}\u{05D3}", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "\u{05D4}\u{05D5}", ty: Ty::Paragraph, rank: 2 },
+            GtBlock {
+                token: "\u{05D0}\u{05D1}",
+                ty: Ty::Heading,
+                rank: 0,
+            },
+            GtBlock {
+                token: "\u{05D2}\u{05D3}",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "\u{05D4}\u{05D5}",
+                ty: Ty::Paragraph,
+                rank: 2,
+            },
         ],
     }
 }
@@ -513,21 +699,61 @@ end";
 fn fx_magazine_sidebar() -> Fixture {
     let mut c = String::new();
     c.push_str(&tx("FB", 26.0, 72.0, 752.0, "MAGHEAD Cover Feature"));
-    c.push_str(&tx("F1", 10.0, 72.0, 722.0, "LEAD paragraph of the feature article opening the story here."));
-    c.push_str(&tx("F1", 10.0, 72.0, 709.0, "continuing the lead with a second wrapped line of prose text."));
-    c.push_str(&tx("F1", 10.0, 72.0, 696.0, "and a third line bringing the opening paragraph to a close."));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        722.0,
+        "LEAD paragraph of the feature article opening the story here.",
+    ));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        709.0,
+        "continuing the lead with a second wrapped line of prose text.",
+    ));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        696.0,
+        "and a third line bringing the opening paragraph to a close.",
+    ));
     // a callout further down, bold + larger => reads as a sub-heading/heading
     c.push_str(&tx("FB", 14.0, 72.0, 640.0, "CALLOUT Key Takeaway"));
-    c.push_str(&tx("F1", 10.0, 72.0, 620.0, "BODYEND closing paragraph wrapping up the feature article."));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        620.0,
+        "BODYEND closing paragraph wrapping up the feature article.",
+    ));
     Fixture {
         name: "magazine_sidebar",
         pdf: page(c.as_bytes()),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "MAGHEAD", ty: Ty::Title, rank: 0 },
-            GtBlock { token: "LEAD", ty: Ty::Paragraph, rank: 1 },
-            GtBlock { token: "CALLOUT", ty: Ty::Heading, rank: 2 },
-            GtBlock { token: "BODYEND", ty: Ty::Paragraph, rank: 3 },
+            GtBlock {
+                token: "MAGHEAD",
+                ty: Ty::Title,
+                rank: 0,
+            },
+            GtBlock {
+                token: "LEAD",
+                ty: Ty::Paragraph,
+                rank: 1,
+            },
+            GtBlock {
+                token: "CALLOUT",
+                ty: Ty::Heading,
+                rank: 2,
+            },
+            GtBlock {
+                token: "BODYEND",
+                ty: Ty::Paragraph,
+                rank: 3,
+            },
         ],
     }
 }
@@ -552,15 +778,33 @@ fn fx_ruled_table() -> Fixture {
     c.push_str(&tx("F1", 9.0, 180.0, 692.0, "Score"));
     c.push_str(&tx("F1", 9.0, 80.0, 667.0, "TCELLA"));
     c.push_str(&tx("F1", 9.0, 180.0, 667.0, "99"));
-    c.push_str(&tx("F1", 10.0, 72.0, 620.0, "AFTERTBL paragraph following the results table here."));
+    c.push_str(&tx(
+        "F1",
+        10.0,
+        72.0,
+        620.0,
+        "AFTERTBL paragraph following the results table here.",
+    ));
     Fixture {
         name: "ruled_table",
         pdf: page(c.as_bytes()),
         pages: vec![1],
         gt: vec![
-            GtBlock { token: "TBLDOC", ty: Ty::Title, rank: 0 },
-            GtBlock { token: "TCELLA", ty: Ty::Table, rank: 1 },
-            GtBlock { token: "AFTERTBL", ty: Ty::Paragraph, rank: 2 },
+            GtBlock {
+                token: "TBLDOC",
+                ty: Ty::Title,
+                rank: 0,
+            },
+            GtBlock {
+                token: "TCELLA",
+                ty: Ty::Table,
+                rank: 1,
+            },
+            GtBlock {
+                token: "AFTERTBL",
+                ty: Ty::Paragraph,
+                rank: 2,
+            },
         ],
     }
 }

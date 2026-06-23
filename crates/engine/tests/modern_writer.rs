@@ -22,18 +22,28 @@ fn write_mode(name: &str, mode: WriterMode) -> Vec<u8> {
 fn doc_signature(bytes: &[u8]) -> (usize, Vec<String>) {
     let e = ContentEngine::open_bytes(bytes.to_vec()).expect("re-open written bytes");
     let n = e.page_count().unwrap();
-    let texts = (1..=n).map(|p| e.get_page_text(p).unwrap().trim().to_string()).collect();
+    let texts = (1..=n)
+        .map(|p| e.get_page_text(p).unwrap().trim().to_string())
+        .collect();
     (n, texts)
 }
 
 #[test]
 fn all_modes_roundtrip_identically() {
-    for name in ["tracemonkey.pdf", "basicapi.pdf", "multi_stream.pdf", "form_160f.pdf"] {
+    for name in [
+        "tracemonkey.pdf",
+        "basicapi.pdf",
+        "multi_stream.pdf",
+        "form_160f.pdf",
+    ] {
         let classic = doc_signature(&write_mode(name, WriterMode::ClassicXref));
         let xref = doc_signature(&write_mode(name, WriterMode::XrefStream));
         let objstm = doc_signature(&write_mode(name, WriterMode::XrefStreamWithObjStm));
 
-        assert_eq!(classic.0, xref.0, "{name}: page count classic vs xref-stream");
+        assert_eq!(
+            classic.0, xref.0,
+            "{name}: page count classic vs xref-stream"
+        );
         assert_eq!(classic.0, objstm.0, "{name}: page count classic vs objstm");
         assert_eq!(classic.1, xref.1, "{name}: text classic vs xref-stream");
         assert_eq!(classic.1, objstm.1, "{name}: text classic vs objstm");
@@ -45,10 +55,16 @@ fn xref_stream_output_declares_xref_type() {
     // The output must contain a /Type /XRef stream and point startxref at it.
     let bytes = write_mode("tracemonkey.pdf", WriterMode::XrefStream);
     let s = String::from_utf8_lossy(&bytes);
-    assert!(s.contains("/Type /XRef") || s.contains("/Type/XRef"), "has an XRef stream");
+    assert!(
+        s.contains("/Type /XRef") || s.contains("/Type/XRef"),
+        "has an XRef stream"
+    );
     assert!(s.contains("startxref"), "has startxref");
     // No classic xref table keyword line should head the cross-ref section.
-    assert!(!s.contains("\nxref\n"), "must not emit a classic xref table");
+    assert!(
+        !s.contains("\nxref\n"),
+        "must not emit a classic xref table"
+    );
 }
 
 #[test]
@@ -58,7 +74,7 @@ fn objstm_output_declares_objstm_and_is_smaller() {
     let classic = write_mode("form_160f.pdf", WriterMode::ClassicXref);
     let objstm = write_mode("form_160f.pdf", WriterMode::XrefStreamWithObjStm);
     let s = String::from_utf8_lossy(&objstm);
-    assert!(s.contains("/ObjStm") , "has an object stream");
+    assert!(s.contains("/ObjStm"), "has an object stream");
     assert!(
         objstm.len() < classic.len(),
         "objstm output ({}) should be smaller than classic ({})",
@@ -111,7 +127,11 @@ fn encrypted_objstm_roundtrips() {
     // With the password: exact content recovered.
     let re = ContentEngine::open_bytes_with_password(bytes, b"pw").expect("open w/ pw");
     assert_eq!(re.page_count().unwrap(), pages);
-    assert_eq!(re.get_page_text(1).unwrap().trim(), plain_text.trim(), "decrypted content matches");
+    assert_eq!(
+        re.get_page_text(1).unwrap().trim(),
+        plain_text.trim(),
+        "decrypted content matches"
+    );
 }
 
 #[test]

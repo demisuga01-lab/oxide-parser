@@ -4,8 +4,8 @@
 //! exactly, with zero heuristics — the highest-confidence KV source. Many
 //! government and business forms are AcroForms.
 
-use crate::extract::{Field, FieldSource, FieldValue, ValueHint};
 use crate::extract::value::normalize;
+use crate::extract::{Field, FieldSource, FieldValue, ValueHint};
 use crate::info::decode_pdf_text_string;
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
@@ -220,7 +220,12 @@ fn rect_of(dict: &PdfDictionary, reader: &PdfReader) -> Option<[f64; 4]> {
     for (i, item) in arr.iter().enumerate() {
         v[i] = reader.resolve(item.clone()).ok()?.as_number()?;
     }
-    Some([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])])
+    Some([
+        v[0].min(v[2]),
+        v[1].min(v[3]),
+        v[0].max(v[2]),
+        v[1].max(v[3]),
+    ])
 }
 
 fn inherited_object(dict: &PdfDictionary, reader: &PdfReader, key: &str) -> Option<PdfObject> {
@@ -285,7 +290,9 @@ impl WidgetPageIndex {
                 let Some(pd) = page_obj.as_dict() else {
                     continue;
                 };
-                let Some(annots) = pd.get("Annots").and_then(|a| reader.resolve(a.clone()).ok())
+                let Some(annots) = pd
+                    .get("Annots")
+                    .and_then(|a| reader.resolve(a.clone()).ok())
                 else {
                     continue;
                 };

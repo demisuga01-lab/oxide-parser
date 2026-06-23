@@ -5,6 +5,10 @@ repository is private and commercially distributed.
 
 The workflow is `.github/workflows/fuzz.yml`.
 
+The sanitizer gate is separate: `.github/workflows/sanitizers.yml` runs on a
+schedule or manual dispatch so ASan/TSan/UB-check coverage can be heavier than
+the pull-request fuzz smoke.
+
 ## What Runs
 
 Every pull request and push to `main` runs each cargo-fuzz target in its own
@@ -47,6 +51,7 @@ The continuous job covers:
 - `pdfa`
 - `editing`
 - `signature_validation`
+- `structured_pdf`
 
 These include the GA5 attack surfaces: signature validation, modern writer
 round-trip, PDF/A conversion, editing/redaction/forms, and linearization.
@@ -133,3 +138,16 @@ runs without changing YAML.
 The goal is not to prove every input safe in a single PR. The goal is to make
 the GA5 clean sweep permanent: known regressions fail quickly, and scheduled
 coverage keeps compounding in the private corpus over time.
+
+## Sanitizer Gate
+
+The Linux sanitizer workflow covers:
+
+- C-ABI tests under AddressSanitizer;
+- C-ABI tests under ThreadSanitizer because the workspace uses parallel code;
+- C-ABI and crypto tests with nightly Rust UB runtime checks;
+- all committed fuzz corpora replayed through cargo-fuzz with ASan.
+
+Rust's sanitizer flag supports ASan and TSan directly. The undefined-behavior
+lane uses nightly `-Zub-checks=yes` rather than claiming a separate Rust
+`-Zsanitizer=undefined` mode.

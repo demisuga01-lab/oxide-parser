@@ -109,7 +109,11 @@ impl Default for ClassifyConfig {
 /// Classify a single page. Never errors on a malformed page — on failure it
 /// returns a low-confidence [`PageSource::Scanned`] (the safe default: routes to
 /// OCR, which can still try, rather than silently emitting nothing as text).
-pub fn classify_page(engine: &ContentEngine, page: usize, cfg: &ClassifyConfig) -> PageClassification {
+pub fn classify_page(
+    engine: &ContentEngine,
+    page: usize,
+    cfg: &ClassifyConfig,
+) -> PageClassification {
     classify_page_inner(engine, page, cfg).unwrap_or(PageClassification {
         page: page as u32,
         source: PageSource::Scanned,
@@ -237,7 +241,10 @@ pub fn classify_document(
     } else {
         pages.to_vec()
     };
-    Ok(list.iter().map(|&p| classify_page(engine, p, cfg)).collect())
+    Ok(list
+        .iter()
+        .map(|&p| classify_page(engine, p, cfg))
+        .collect())
 }
 
 /// Names of the page's top-level *image* XObjects (never Form XObjects) — the

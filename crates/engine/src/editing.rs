@@ -11,14 +11,14 @@ use crate::content::{
 };
 use crate::document::{PdfDocument, PdfPage};
 use crate::engine::PageResources;
-use crate::fonts::FontResolver;
-use crate::text::collector::extract_char_codes;
 use crate::error::{OxideError, Result};
 use crate::filters::{decode_stream_lossless, flate_encode};
+use crate::fonts::FontResolver;
 use crate::images::decoder::{ImageDecoder, RawImage};
 use crate::info::decode_pdf_text_string;
 use crate::object::{PdfDictionary, PdfObject};
 use crate::reader::PdfReader;
+use crate::text::collector::extract_char_codes;
 use crate::writer::{
     write_incremental_update, IncrementalObject, OutputObject, PdfWriter, WriterMode,
 };
@@ -3240,7 +3240,8 @@ mod h2_alt_text_tests {
         // A tagged-PDF span carrying the redacted text as /ActualText (and /Alt)
         // must have it stripped, even though the glyph rewriter passes BDC
         // through verbatim.
-        let content = b"/Span <</ActualText (SECRET) /Alt (SECRET phrase)>> BDC (x) Tj EMC".to_vec();
+        let content =
+            b"/Span <</ActualText (SECRET) /Alt (SECRET phrase)>> BDC (x) Tj EMC".to_vec();
         let out = scrub_marked_content_alt_text(&content, &removed(&["SECRET"])).unwrap();
         let alt = marked_content_strings(&out).join("|");
         assert!(
@@ -3261,7 +3262,10 @@ mod h2_alt_text_tests {
         let content = b"/Span <</ActualText (Public)>> BDC (x) Tj EMC".to_vec();
         let out = scrub_marked_content_alt_text(&content, &removed(&["SECRET"])).unwrap();
         let alt = marked_content_strings(&out).join("|");
-        assert!(alt.contains("Public"), "non-secret /ActualText was lost: {alt:?}");
+        assert!(
+            alt.contains("Public"),
+            "non-secret /ActualText was lost: {alt:?}"
+        );
     }
 
     #[test]

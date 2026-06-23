@@ -20,21 +20,23 @@ fn text_pdf(lines: &[&str]) -> Vec<u8> {
 
     add("<< /Type /Catalog /Pages 2 0 R >>".to_string());
     add("<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string());
-    add(
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+    add("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
          /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
-            .to_string(),
-    );
+        .to_string());
     let mut c = String::new();
     let mut y = 720.0;
     for line in lines {
-        c.push_str(&format!("BT /F1 24 Tf 1 0 0 1 72 {y:.1} Tm ({line}) Tj ET\n"));
+        c.push_str(&format!(
+            "BT /F1 24 Tf 1 0 0 1 72 {y:.1} Tm ({line}) Tj ET\n"
+        ));
         y -= 40.0;
     }
     let content = format!("<< /Length {} >>\nstream\n{}\nendstream", c.len(), c);
     add(content);
-    add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
-        .to_string());
+    add(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+            .to_string(),
+    );
 
     // Serialize.
     let mut pdf = Vec::new();
@@ -47,7 +49,9 @@ fn text_pdf(lines: &[&str]) -> Vec<u8> {
         pdf.extend_from_slice(b"\nendobj\n");
     }
     let xref = pdf.len();
-    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+    pdf.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+    );
     for off in &offsets {
         pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
@@ -89,7 +93,11 @@ fn image_only_pdf(gray: &[u8], w: u32, h: u32) -> Vec<u8> {
     );
     let content = format!("q {page_w} 0 0 {page_h} 0 0 cm /Im0 Do Q\n");
     objects.push(
-        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()).into_bytes(),
+        format!(
+            "<< /Length {} >>\nstream\n{content}\nendstream",
+            content.len()
+        )
+        .into_bytes(),
     );
     let mut img = format!(
         "<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
@@ -111,9 +119,8 @@ fn image_only_pdf(gray: &[u8], w: u32, h: u32) -> Vec<u8> {
         pdf.extend_from_slice(b"\nendobj\n");
     }
     let xref = pdf.len();
-    let _ = pdf.write_all(
-        format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
-    );
+    let _ =
+        pdf.write_all(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
     for off in &offsets {
         pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
     }
@@ -253,7 +260,10 @@ fn extract_fields_on_an_ocrd_scanned_invoice() {
         ..Default::default()
     };
     let result = engine.extract_fields(&opts).unwrap();
-    eprintln!("--- fields from OCR'd scanned invoice ---\n{}", result.to_json());
+    eprintln!(
+        "--- fields from OCR'd scanned invoice ---\n{}",
+        result.to_json()
+    );
 
     assert_eq!(result.doc_type, DocType::Invoice);
     // The same profile + spatial engine recovered fields from OCR'd text.
@@ -310,7 +320,10 @@ fn chunk_an_ocrd_scanned_document() {
         })
         .unwrap();
 
-    let set = doc.chunk(&ChunkOptions { target_tokens: 100, ..Default::default() });
+    let set = doc.chunk(&ChunkOptions {
+        target_tokens: 100,
+        ..Default::default()
+    });
     eprintln!("--- chunks from OCR'd scan ---\n{}", set.to_json());
 
     assert!(!set.chunks.is_empty(), "OCR'd document should chunk");
@@ -320,5 +333,8 @@ fn chunk_an_ocrd_scanned_document() {
         .iter()
         .filter(|w| all.contains(*w))
         .count();
-    assert!(hits >= 3, "expected OCR'd text in chunks, found {hits}/5:\n{all}");
+    assert!(
+        hits >= 3,
+        "expected OCR'd text in chunks, found {hits}/5:\n{all}"
+    );
 }

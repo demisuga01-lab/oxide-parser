@@ -199,12 +199,7 @@ fn block_to_element(page: usize, block: LayoutBlock) -> SemanticElement {
         actual_text: None,
         lang: None,
         page: Some(page),
-        bbox: Some([
-            block.bbox.x0,
-            block.bbox.y0,
-            block.bbox.x1,
-            block.bbox.y1,
-        ]),
+        bbox: Some([block.bbox.x0, block.bbox.y0, block.bbox.x1, block.bbox.y1]),
         mcids: Vec::new(),
         children: Vec::new(),
     }

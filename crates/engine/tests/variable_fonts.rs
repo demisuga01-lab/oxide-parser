@@ -71,13 +71,19 @@ fn glyph_at_weight(font: &[u8], wght: f32) -> (Vec<PathSegment>, f64) {
         VariationRequest::none().with_axis(AXIS_WGHT, wght)
     };
     let (path, advance) = extract_glyph_path_for_simple_var(font, 0x41, 'A', None, &req);
-    (path.expect("glyph A should have an outline").segments, advance)
+    (
+        path.expect("glyph A should have an outline").segments,
+        advance,
+    )
 }
 
 #[test]
 fn synthetic_font_is_detected_as_variable_with_wght_axis() {
     let font = build_weight_variable_font();
-    assert!(variations::is_variable(&font), "synthetic font must be variable");
+    assert!(
+        variations::is_variable(&font),
+        "synthetic font must be variable"
+    );
     let axes = variations::axes(&font);
     assert_eq!(axes.len(), 1, "one axis");
     let (tag, min, def, max) = axes[0];
@@ -96,7 +102,10 @@ fn different_weights_interpolate_different_outlines() {
     let heavy = path_bounds(&heavy_segs);
 
     // The default instance is the un-expanded square (~100..400 on each axis).
-    assert!((light.2 - light.0 - 300.0).abs() < 2.0, "default width ~300: {light:?}");
+    assert!(
+        (light.2 - light.0 - 300.0).abs() < 2.0,
+        "default width ~300: {light:?}"
+    );
 
     // At max weight the gvar deltas expand the glyph: strictly larger area, and a
     // genuinely different point set (interpolation actually ran).
@@ -106,7 +115,10 @@ fn different_weights_interpolate_different_outlines() {
         area(light),
         area(heavy)
     );
-    assert_ne!(light_segs, heavy_segs, "outline points must differ between weights");
+    assert_ne!(
+        light_segs, heavy_segs,
+        "outline points must differ between weights"
+    );
 }
 
 #[test]
@@ -116,7 +128,10 @@ fn advance_reflects_hvar_metrics_variation() {
     let (_, adv_heavy) = glyph_at_weight(&font, 900.0);
 
     // Synthetic hmtx advance is 600 for gid1 (units/em 1000 => 600 per-mille).
-    assert!((adv_default - 600.0).abs() < 1.0, "default advance ~600: {adv_default}");
+    assert!(
+        (adv_default - 600.0).abs() < 1.0,
+        "default advance ~600: {adv_default}"
+    );
     // HVAR adds +300 at peak weight => ~900 per-mille.
     assert!(
         adv_heavy > adv_default + 100.0,

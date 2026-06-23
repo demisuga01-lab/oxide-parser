@@ -35,8 +35,15 @@ fn full_page_image_no_text_is_scanned() {
 fn full_page_image_with_invisible_text_is_searchable_scan() {
     // The common scanner-OCR case: full-page image + an invisible text layer.
     let (src, conf) = decide(800, 0.10, 0.99, true, &cfg());
-    assert_eq!(src, PageSource::DigitalBornOverImage, "uses the existing text layer");
-    assert!(conf >= 0.9, "invisible-text searchable scan is near-certain");
+    assert_eq!(
+        src,
+        PageSource::DigitalBornOverImage,
+        "uses the existing text layer"
+    );
+    assert!(
+        conf >= 0.9,
+        "invisible-text searchable scan is near-certain"
+    );
 }
 
 #[test]
@@ -71,7 +78,11 @@ fn thresholds_are_configurable() {
     let (default_src, _) = decide(0, 0.0, 0.80, false, &ClassifyConfig::default());
     assert_eq!(default_src, PageSource::Scanned);
     let (strict_src, _) = decide(0, 0.0, 0.80, false, &strict);
-    assert_eq!(strict_src, PageSource::Scanned, "still no text → scanned either way");
+    assert_eq!(
+        strict_src,
+        PageSource::Scanned,
+        "still no text → scanned either way"
+    );
     // With text present, the strict config keeps it digital-born (image < 0.95).
     let (strict_text, _) = decide(400, 0.10, 0.80, false, &strict);
     assert_eq!(strict_text, PageSource::DigitalBorn);

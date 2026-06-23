@@ -8,7 +8,9 @@ struct PdfBuilder {
 }
 impl PdfBuilder {
     fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
     fn add(&mut self, body: &str) -> usize {
         self.objects.push(body.as_bytes().to_vec());

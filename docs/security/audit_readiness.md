@@ -38,8 +38,9 @@ Oxide is prepared for a third-party security audit with the following materials.
 - Confirmed `unsafe` is isolated to the C ABI boundary and added
   `#![forbid(unsafe_code)]` to the engine crate.
 - Confirmed CI wiring for cargo-audit and cargo-deny.
-- Added Linux sanitizer CI coverage for C-ABI tests, crypto regressions, and
-  ASan cargo-fuzz corpus replay.
+- Added scheduled/manual Linux sanitizer CI coverage for C-ABI tests, crypto
+  regressions, Rust UB runtime checks, TSan checks, and ASan cargo-fuzz corpus
+  replay.
 
 ## Remaining Human Review Items
 

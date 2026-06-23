@@ -23,7 +23,10 @@ fn norm_key(k: &str) -> String {
 }
 
 fn norm_value(v: &str) -> String {
-    v.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
+    v.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 /// Field-level precision/recall/F1. A gold field is recovered when a predicted
@@ -34,7 +37,10 @@ pub fn field_f1(reference: &[KvField], predicted: &[KvField]) -> Prf {
     // keep all candidates so a correct value among them counts).
     let mut pred_by_key: HashMap<String, Vec<String>> = HashMap::new();
     for f in predicted {
-        pred_by_key.entry(norm_key(&f.key)).or_default().push(norm_value(&f.value));
+        pred_by_key
+            .entry(norm_key(&f.key))
+            .or_default()
+            .push(norm_value(&f.value));
     }
     let mut used: HashMap<String, usize> = HashMap::new();
 
@@ -85,7 +91,10 @@ mod tests {
     use super::*;
 
     fn kv(k: &str, v: &str) -> KvField {
-        KvField { key: k.into(), value: v.into() }
+        KvField {
+            key: k.into(),
+            value: v.into(),
+        }
     }
 
     #[test]
@@ -132,9 +141,15 @@ mod tests {
 
     #[test]
     fn block_type_accuracy_basics() {
-        let r: Vec<String> = ["heading", "paragraph", "table", "figure"].iter().map(|s| s.to_string()).collect();
+        let r: Vec<String> = ["heading", "paragraph", "table", "figure"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(block_type_accuracy(&r, &r), 1.0);
-        let p: Vec<String> = ["heading", "paragraph", "paragraph", "figure"].iter().map(|s| s.to_string()).collect();
+        let p: Vec<String> = ["heading", "paragraph", "paragraph", "figure"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(block_type_accuracy(&r, &p), 0.75);
         let empty: Vec<String> = vec![];
         assert_eq!(block_type_accuracy(&empty, &empty), 1.0);

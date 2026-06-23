@@ -19,7 +19,9 @@ struct PdfBuilder {
 }
 impl PdfBuilder {
     fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
     fn add(&mut self, body: &str) -> usize {
         self.objects.push(body.as_bytes().to_vec());
@@ -40,7 +42,9 @@ impl PdfBuilder {
             pdf.extend_from_slice(b"\nendobj\n");
         }
         let xref = pdf.len();
-        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
         for off in &offsets {
             pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
         }
@@ -59,8 +63,13 @@ impl PdfBuilder {
 /// One text-show op at a baseline position.
 fn text_at(c: &mut String, x: f64, y: f64, size: f64, s: &str) {
     // Escape parens for the literal string.
-    let esc = s.replace('\\', "\\\\").replace('(', "\\(").replace(')', "\\)");
-    c.push_str(&format!("BT /F1 {size} Tf 1 0 0 1 {x:.1} {y:.1} Tm ({esc}) Tj ET\n"));
+    let esc = s
+        .replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)");
+    c.push_str(&format!(
+        "BT /F1 {size} Tf 1 0 0 1 {x:.1} {y:.1} Tm ({esc}) Tj ET\n"
+    ));
 }
 
 // ── digital invoice fixture ──────────────────────────────────────────────────
@@ -185,7 +194,11 @@ fn acroform_fields_extracted_exactly_with_tu_labels() {
     let engine = ContentEngine::open_bytes(acroform_pdf()).unwrap();
     let result = engine.extract_fields(&ExtractOptions::default()).unwrap();
 
-    assert_eq!(result.doc_type, DocType::Form, "AcroForm doc detected as Form");
+    assert_eq!(
+        result.doc_type,
+        DocType::Form,
+        "AcroForm doc detected as Form"
+    );
 
     // The /TU label is preferred over /T as the key.
     let name = result.get("Applicant Name").expect("applicant name field");
@@ -259,7 +272,11 @@ fn invoice_line_items_mapped_from_table_columns() {
     );
     let first = &result.line_items[0];
     assert!(
-        first.description.as_deref().unwrap_or("").contains("Widget"),
+        first
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("Widget"),
         "first item description: {:?}",
         first.description
     );
@@ -320,7 +337,10 @@ fn json_output_is_machine_readable() {
         .unwrap();
     let json = r.to_json();
     // Typed values serialize with their tag.
-    assert!(json.contains("\"type\": \"amount\""), "amount type tag present:\n{json}");
+    assert!(
+        json.contains("\"type\": \"amount\""),
+        "amount type tag present:\n{json}"
+    );
     assert!(json.contains("\"type\": \"date\""), "date type tag present");
     assert!(json.contains("\"doc_type\": \"invoice\""));
     assert!(json.contains("\"line_items\""));

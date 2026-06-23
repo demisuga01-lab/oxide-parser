@@ -19,6 +19,9 @@ on:
         required: false
         default: "512"
 
+permissions:
+  contents: read
+
 jobs:
   property-tests:
     name: oxide-engine property invariants
@@ -27,13 +30,16 @@ jobs:
     env:
       PROPTEST_CASES: ${{ github.event_name == 'pull_request' && '64' || github.event_name == 'push' && '64' || github.event.inputs.cases || '512' }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
             ~/.cargo/registry

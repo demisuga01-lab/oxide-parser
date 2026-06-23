@@ -160,9 +160,21 @@ fn feat(
     italic: bool,
     gap_above: f64,
 ) -> BlockFeatures {
-    let first = block.lines.first().map(|l| l.text.clone()).unwrap_or_default();
-    let last = block.lines.last().map(|l| l.text.clone()).unwrap_or_default();
-    let wc: usize = block.lines.iter().map(|l| l.text.split_whitespace().count()).sum();
+    let first = block
+        .lines
+        .first()
+        .map(|l| l.text.clone())
+        .unwrap_or_default();
+    let last = block
+        .lines
+        .last()
+        .map(|l| l.text.clone())
+        .unwrap_or_default();
+    let wc: usize = block
+        .lines
+        .iter()
+        .map(|l| l.text.split_whitespace().count())
+        .sum();
     BlockFeatures {
         font_size: block.font_size,
         size_ratio: block.font_size / doc.body_size,
@@ -314,13 +326,19 @@ fn c5_enumerated_list_with_continuation() {
     let list = try_group_list(&block, 1, 12.0).expect("should group");
     assert!(list.ordered);
     assert_eq!(list.items.len(), 3);
-    assert!(list.items[0].text.contains("second line"), "continuation merged");
+    assert!(
+        list.items[0].text.contains("second line"),
+        "continuation merged"
+    );
 }
 
 #[test]
 fn c10_lone_numbered_line_is_not_a_list() {
     let block = lblock("1. Introduction", 50.0, 700.0, 200.0, 712.0, 10.0);
-    assert!(try_group_list(&block, 1, 12.0).is_none(), "single line is not a list");
+    assert!(
+        try_group_list(&block, 1, 12.0).is_none(),
+        "single line is not a list"
+    );
 }
 
 // ── finer line→block segmentation: list-marker transition splits ───────────────
@@ -368,10 +386,17 @@ fn c12_wrapped_list_item_continuation_stays_in_list_block() {
         seg("\u{2022} second item", 50.0, 668.0),
     ];
     let blocks = lines_to_blocks(lines, line_h);
-    assert_eq!(blocks.len(), 1, "wrapped continuation stays in the one list block");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "wrapped continuation stays in the one list block"
+    );
     let list = try_group_list(&blocks[0], 1, line_h).expect("groups as a list");
     assert_eq!(list.items.len(), 2);
-    assert!(list.items[0].text.contains("second indented line"), "continuation merged");
+    assert!(
+        list.items[0].text.contains("second indented line"),
+        "continuation merged"
+    );
 }
 
 // ── figures + caption linkage ────────────────────────────────────────────────
@@ -388,7 +413,11 @@ fn f6_adjacent_image_tiles_merge_order_independent() {
     let m2 = merge_image_rects(&[b, a], 12.0);
     assert_eq!(m1.len(), 1, "two adjacent tiles merge");
     assert_eq!(m2.len(), 1);
-    assert_eq!(bbox_to_array(&m1[0]), bbox_to_array(&m2[0]), "order independent");
+    assert_eq!(
+        bbox_to_array(&m1[0]),
+        bbox_to_array(&m2[0]),
+        "order independent"
+    );
     assert!((m1[0].x0 - 50.0).abs() < 0.1 && (m1[0].x1 - 250.0).abs() < 0.1);
 }
 
@@ -457,7 +486,11 @@ fn f3_caption_links_to_prefixed_block_below_figure() {
     assert_eq!(blocks[1].classified, ClassifiedType::Caption);
     assert_eq!(blocks[1].figure_id, Some(0));
     assert_eq!(blocks[0].caption_id, Some(1));
-    assert_eq!(blocks[2].classified, ClassifiedType::Paragraph, "far block untouched");
+    assert_eq!(
+        blocks[2].classified,
+        ClassifiedType::Paragraph,
+        "far block untouched"
+    );
 }
 
 // ── running header/footer/page-number ─────────────────────────────────────────
@@ -490,7 +523,13 @@ fn h1_repeated_top_text_becomes_header() {
     for p in 1..=4usize {
         dims.insert(p, (612.0, 792.0));
         // top band: y near 760 (>= 792*0.88 = 697)
-        blocks.push(running_block(p - 1, p, "ACME Quarterly Report", 760.0, 775.0));
+        blocks.push(running_block(
+            p - 1,
+            p,
+            "ACME Quarterly Report",
+            760.0,
+            775.0,
+        ));
     }
     detect_running_elements(&mut blocks, &dims, 4);
     for b in &blocks {
@@ -620,8 +659,16 @@ fn rot_chunk_90_swaps_width_and_height_into_upright_run() {
     // side) becomes the upright advance/width; the glyph height (10 = original
     // font_size, the shorter side) stays the upright font_size — so a rotated
     // horizontal run looks like an ordinary upright run to the segmenter.
-    assert!((c.width - 100.0).abs() < 1e-6, "upright width = run length: {}", c.width);
-    assert!((c.font_size - 10.0).abs() < 1e-6, "upright font_size = glyph height: {}", c.font_size);
+    assert!(
+        (c.width - 100.0).abs() < 1e-6,
+        "upright width = run length: {}",
+        c.width
+    );
+    assert!(
+        (c.font_size - 10.0).abs() < 1e-6,
+        "upright font_size = glyph height: {}",
+        c.font_size
+    );
 }
 
 // The serde-shape (D-Serde: `#[serde(flatten)]` over the internally-tagged

@@ -144,8 +144,14 @@ pub async fn parse(multipart: Multipart) -> ServerResult<Response> {
         }
     };
 
-    let (engine, pages) = open_and_pages(&file, fields.password.as_deref(), fields.pages.as_deref())?;
-    tracing::info!(pdf_size = file.len(), pages = pages.len(), format, "processing parse request");
+    let (engine, pages) =
+        open_and_pages(&file, fields.password.as_deref(), fields.pages.as_deref())?;
+    tracing::info!(
+        pdf_size = file.len(),
+        pages = pages.len(),
+        format,
+        "processing parse request"
+    );
 
     let config = crate::config::get_config();
     let format_owned = format.to_string();
@@ -157,14 +163,25 @@ pub async fn parse(multipart: Multipart) -> ServerResult<Response> {
         let doc = engine.parse_document(&opts)?;
         let out = match format_owned.as_str() {
             "json" => ("application/json", doc.to_json()),
-            "html" => ("text/html; charset=utf-8", doc.to_html(&SerializeOptions::default())),
-            _ => ("text/markdown; charset=utf-8", doc.to_markdown(&SerializeOptions::default())),
+            "html" => (
+                "text/html; charset=utf-8",
+                doc.to_html(&SerializeOptions::default()),
+            ),
+            _ => (
+                "text/markdown; charset=utf-8",
+                doc.to_markdown(&SerializeOptions::default()),
+            ),
         };
         Ok::<(&'static str, String), ServerError>(out)
     })
     .await??;
 
-    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, content_type)],
+        body,
+    )
+        .into_response())
 }
 
 /// `POST /api/v1/chunk` — RAG-ready semantic chunks as JSON.
@@ -174,11 +191,15 @@ pub async fn chunk(multipart: Multipart) -> ServerResult<Response> {
 
     let target_tokens = parse_usize(fields.target_tokens.as_deref(), "target_tokens")?;
     let overlap = parse_usize(fields.overlap.as_deref(), "overlap")?;
-    let keep_furniture =
-        crate::params::parse_bool_param(fields.keep_furniture.as_deref(), false)?;
+    let keep_furniture = crate::params::parse_bool_param(fields.keep_furniture.as_deref(), false)?;
 
-    let (engine, pages) = open_and_pages(&file, fields.password.as_deref(), fields.pages.as_deref())?;
-    tracing::info!(pdf_size = file.len(), pages = pages.len(), "processing chunk request");
+    let (engine, pages) =
+        open_and_pages(&file, fields.password.as_deref(), fields.pages.as_deref())?;
+    tracing::info!(
+        pdf_size = file.len(),
+        pages = pages.len(),
+        "processing chunk request"
+    );
 
     let config = crate::config::get_config();
     let body = run_with_timeout(config, move |_cancel| {
@@ -201,7 +222,12 @@ pub async fn chunk(multipart: Multipart) -> ServerResult<Response> {
     })
     .await??;
 
-    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response())
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response())
 }
 
 /// `POST /api/v1/extract-fields` — structured key-value fields as JSON.
@@ -217,8 +243,13 @@ pub async fn extract_fields(multipart: Multipart) -> ServerResult<Response> {
         .filter(|s| !s.is_empty() && *s != "auto")
         .and_then(DocType::parse);
 
-    let (engine, pages) = open_and_pages(&file, fields.password.as_deref(), fields.pages.as_deref())?;
-    tracing::info!(pdf_size = file.len(), pages = pages.len(), "processing extract-fields request");
+    let (engine, pages) =
+        open_and_pages(&file, fields.password.as_deref(), fields.pages.as_deref())?;
+    tracing::info!(
+        pdf_size = file.len(),
+        pages = pages.len(),
+        "processing extract-fields request"
+    );
 
     let config = crate::config::get_config();
     let body = run_with_timeout(config, move |_cancel| {
@@ -232,7 +263,12 @@ pub async fn extract_fields(multipart: Multipart) -> ServerResult<Response> {
     })
     .await??;
 
-    Ok((StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "application/json")], body).into_response())
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response())
 }
 
 /// `POST /api/v1/info` — document metadata (pdfinfo-style) as JSON.
@@ -261,9 +297,11 @@ pub async fn info(multipart: Multipart) -> ServerResult<Response> {
 fn parse_usize(s: Option<&str>, label: &str) -> ServerResult<Option<usize>> {
     match s.map(str::trim).filter(|s| !s.is_empty()) {
         None => Ok(None),
-        Some(v) => v
-            .parse::<usize>()
-            .map(Some)
-            .map_err(|_| ServerError::InvalidParameter(format!("{} must be a non-negative integer, got '{}'", label, v))),
+        Some(v) => v.parse::<usize>().map(Some).map_err(|_| {
+            ServerError::InvalidParameter(format!(
+                "{} must be a non-negative integer, got '{}'",
+                label, v
+            ))
+        }),
     }
 }

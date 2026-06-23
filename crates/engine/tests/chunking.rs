@@ -17,7 +17,10 @@ fn tracemonkey() -> ContentEngine {
 fn chunks_a_real_paper_into_sensible_passages() {
     let engine = tracemonkey();
     let doc = engine
-        .parse_document(&ParseOptions { omit_furniture: false, ..Default::default() })
+        .parse_document(&ParseOptions {
+            omit_furniture: false,
+            ..Default::default()
+        })
         .unwrap();
     let set = doc.chunk(&ChunkOptions {
         target_tokens: 300,
@@ -25,7 +28,10 @@ fn chunks_a_real_paper_into_sensible_passages() {
         ..Default::default()
     });
 
-    assert!(set.chunks.len() > 10, "a 17-page paper should yield many chunks");
+    assert!(
+        set.chunks.len() > 10,
+        "a 17-page paper should yield many chunks"
+    );
     assert_eq!(set.target_tokens, 300);
 
     // Indices are contiguous from 0.
@@ -39,7 +45,10 @@ fn chunks_a_real_paper_into_sensible_passages() {
     let mut toks: Vec<usize> = set.chunks.iter().map(|c| c.tokens).collect();
     toks.sort_unstable();
     let median = toks[toks.len() / 2];
-    assert!((120..=360).contains(&median), "median chunk tokens = {median}");
+    assert!(
+        (120..=360).contains(&median),
+        "median chunk tokens = {median}"
+    );
     let within = set.chunks.iter().filter(|c| c.tokens <= 360).count();
     assert!(
         within * 100 / set.chunks.len() >= 80,
@@ -48,7 +57,10 @@ fn chunks_a_real_paper_into_sensible_passages() {
     );
     for c in &set.chunks {
         if c.tokens > 360 {
-            assert!(c.oversized, "an over-target chunk must be flagged oversized");
+            assert!(
+                c.oversized,
+                "an over-target chunk must be flagged oversized"
+            );
         }
     }
 
@@ -61,7 +73,11 @@ fn chunks_a_real_paper_into_sensible_passages() {
 
     // Heading context: many chunks carry a section path, and a chunk that opens
     // with its own heading does not print that heading twice.
-    let with_section = set.chunks.iter().filter(|c| !c.section_path.is_empty()).count();
+    let with_section = set
+        .chunks
+        .iter()
+        .filter(|c| !c.section_path.is_empty())
+        .count();
     assert!(with_section > 0, "some chunks should carry a section path");
     for c in &set.chunks {
         if let Some(last) = c.section_path.last() {
@@ -78,7 +94,11 @@ fn chunking_is_deterministic_on_a_real_pdf() {
     let opts = ChunkOptions::default();
     let a = doc.chunk(&opts);
     let b = doc.chunk(&opts);
-    assert_eq!(a.to_json(), b.to_json(), "same doc + opts → identical chunks");
+    assert_eq!(
+        a.to_json(),
+        b.to_json(),
+        "same doc + opts → identical chunks"
+    );
 }
 
 #[test]

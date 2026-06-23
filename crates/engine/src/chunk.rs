@@ -301,7 +301,9 @@ fn render_piece(b: &Block, doc: &Document) -> Option<(String, &'static str, bool
         BlockKind::List { .. } => Some((serialize_block_markdown(b, doc), "list", false)),
         BlockKind::Header { .. } => Some((serialize_block_markdown(b, doc), "header", false)),
         BlockKind::Footer { .. } => Some((serialize_block_markdown(b, doc), "footer", false)),
-        BlockKind::PageNumber { .. } => Some((serialize_block_markdown(b, doc), "page_number", false)),
+        BlockKind::PageNumber { .. } => {
+            Some((serialize_block_markdown(b, doc), "page_number", false))
+        }
     }
 }
 
@@ -336,7 +338,9 @@ fn push_chunk(
     let prefix = if opts.heading_context && !section.is_empty() {
         let starts_with_own_heading = pieces
             .first()
-            .map(|p| p.heading_level.is_some() && strip_md_heading(&p.text) == *section.last().unwrap())
+            .map(|p| {
+                p.heading_level.is_some() && strip_md_heading(&p.text) == *section.last().unwrap()
+            })
             .unwrap_or(false);
         let ctx = if starts_with_own_heading {
             &section[..section.len() - 1]
@@ -394,10 +398,18 @@ fn push_owned_chunk(
         index: 0,
         text,
         tokens,
-        pages: if piece.page != 0 { vec![piece.page] } else { vec![] },
+        pages: if piece.page != 0 {
+            vec![piece.page]
+        } else {
+            vec![]
+        },
         section_path: section.to_vec(),
         block_kinds: vec![piece.kind.to_string()],
-        bboxes: if piece.bbox != [0.0; 4] { vec![piece.bbox] } else { vec![] },
+        bboxes: if piece.bbox != [0.0; 4] {
+            vec![piece.bbox]
+        } else {
+            vec![]
+        },
         is_table_or_figure: piece.atomic,
         oversized: tokens > opts.target_tokens,
     });

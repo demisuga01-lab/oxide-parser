@@ -88,7 +88,11 @@ fn rotate_preserves_text_content() {
     let re = open_bytes(out);
     let after = re.get_page_text(1).unwrap();
     // Rotation does not change the text stream, only the /Rotate flag.
-    assert_eq!(before.trim(), after.trim(), "text content unchanged by rotation");
+    assert_eq!(
+        before.trim(),
+        after.trim(),
+        "text content unchanged by rotation"
+    );
 }
 
 // --- ENCRYPT ----------------------------------------------------------------
@@ -120,7 +124,11 @@ fn encrypt_roundtrip(algo: EncryptAlgorithm) {
     // Opening WITH the user password recovers the content exactly.
     let re = ContentEngine::open_bytes_with_password(encrypted.clone(), b"open-sesame")
         .expect("open with user password");
-    assert_eq!(re.page_count().unwrap(), pages, "{algo:?}: page count preserved");
+    assert_eq!(
+        re.page_count().unwrap(),
+        pages,
+        "{algo:?}: page count preserved"
+    );
     assert_eq!(
         re.get_page_text(1).unwrap().trim(),
         plain_text.trim(),
@@ -141,7 +149,10 @@ fn encrypt_roundtrip(algo: EncryptAlgorithm) {
             .get_page_text(1)
             .map(|t| t.trim() != plain_text.trim())
             .unwrap_or(true);
-    assert!(rejected, "{algo:?}: wrong password must not recover the content");
+    assert!(
+        rejected,
+        "{algo:?}: wrong password must not recover the content"
+    );
 }
 
 #[test]
@@ -174,7 +185,11 @@ fn optimize_preserves_content_and_pages() {
         let (out, report) = optimize(&engine).expect("optimize");
         let re = open_bytes(out);
 
-        assert_eq!(re.page_count().unwrap(), pages, "{name}: page count preserved");
+        assert_eq!(
+            re.page_count().unwrap(),
+            pages,
+            "{name}: page count preserved"
+        );
         for p in 1..=pages {
             assert_eq!(
                 re.get_page_text(p).unwrap().trim(),
@@ -199,7 +214,10 @@ fn optimize_is_visually_safe() {
     let (out, _r) = optimize(&engine).expect("optimize");
     let re = open_bytes(out);
     let opt_png = re.render_page_png_fast(1, 100).unwrap();
-    assert_eq!(orig_png, opt_png, "optimize must not change rendered output");
+    assert_eq!(
+        orig_png, opt_png,
+        "optimize must not change rendered output"
+    );
 }
 
 #[test]
@@ -207,7 +225,9 @@ fn optimize_recompresses_uncompressed_streams() {
     // multi_stream.pdf has uncompressed content; optimize should recompress >=1
     // stream and not grow the file.
     let engine = open("multi_stream.pdf");
-    let original = std::fs::metadata(fixture("multi_stream.pdf")).unwrap().len() as usize;
+    let original = std::fs::metadata(fixture("multi_stream.pdf"))
+        .unwrap()
+        .len() as usize;
     let (out, report) = optimize(&engine).expect("optimize");
     // Output should not be larger than the input (GC + recompression).
     assert!(
@@ -316,10 +336,7 @@ fn repair_handles_recoverable_damage() {
     // These categories open via the reader's recovery; repair must persist a
     // clean copy that re-parses. (Skip gracefully if the corpus isn't present.)
     let mut tested = 0;
-    for name in [
-        "hostile_003_missing-eof.pdf",
-        "hostile_006_huge-length.pdf",
-    ] {
+    for name in ["hostile_003_missing-eof.pdf", "hostile_006_huge-length.pdf"] {
         let Some(bytes) = hostile(name) else { continue };
         // Only assert repair succeeds for files the reader can already open.
         if ContentEngine::open_bytes(bytes.clone()).is_err() {
@@ -327,13 +344,19 @@ fn repair_handles_recoverable_damage() {
         }
         let repaired = repair(bytes, b"").unwrap_or_else(|e| panic!("{name}: repair failed: {e}"));
         let re = open_bytes(repaired);
-        assert!(re.page_count().unwrap() >= 1, "{name}: repaired file has pages");
+        assert!(
+            re.page_count().unwrap() >= 1,
+            "{name}: repaired file has pages"
+        );
         tested += 1;
     }
     // If the corpus is absent, the test is a no-op (documented); when present at
     // least one category should exercise repair.
     if hostile("hostile_003_missing-eof.pdf").is_some() {
-        assert!(tested >= 1, "expected at least one recoverable hostile fixture");
+        assert!(
+            tested >= 1,
+            "expected at least one recoverable hostile fixture"
+        );
     }
 }
 
@@ -341,7 +364,10 @@ fn repair_handles_recoverable_damage() {
 fn repair_clean_file_roundtrips() {
     // Repairing an already-clean file is a faithful copy.
     let bytes = std::fs::read(fixture("flate.pdf")).unwrap();
-    let pages = ContentEngine::open_bytes(bytes.clone()).unwrap().page_count().unwrap();
+    let pages = ContentEngine::open_bytes(bytes.clone())
+        .unwrap()
+        .page_count()
+        .unwrap();
     let repaired = repair(bytes, b"").expect("repair clean file");
     let re = open_bytes(repaired);
     assert_eq!(re.page_count().unwrap(), pages);

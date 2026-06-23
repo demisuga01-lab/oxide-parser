@@ -22,7 +22,7 @@ claim that those unrelated edits are release-ready.
 | Grammar-aware fuzzing | Valid-but-adversarial PDFs that reach content interpretation, renderer, editing, linearization, PDF/A, and signature validation paths | `structured_pdf` is in the fuzz target matrix. Its committed corpus replay passed, reaching 10,945 coverage/features in the smoke output. |
 | Real-world and hostile corpus sweep | Cross-pillar safety over parse, info, verify-sig, render, optimize, and linearize in isolated subprocesses | 265 files, 1,590 operations, 0 crashes, 0 timeouts, 100% crash-free and timeout-free. |
 | Dependency security and licensing | RustSec advisories, license allowlist, source policy | `.github/workflows/security-audit.yml` is live. `cargo audit` and `cargo deny` passed with the documented `RUSTSEC-2023-0071` exception. |
-| Linux sanitizer CI | ASan/TSan/Rust UB checks over C-ABI and crypto tests; ASan replay for selected fuzz corpora | `.github/workflows/sanitizers.yml` is live for PR, main, scheduled, and manual runs. Local Windows execution is not claimed. |
+| Linux sanitizer CI | ASan/TSan/Rust UB checks over C-ABI and crypto tests; ASan replay for all committed fuzz corpora | `.github/workflows/sanitizers.yml` is live for scheduled and manual runs. Local Windows execution is not claimed. |
 
 ## Fresh Verification Evidence
 
@@ -144,8 +144,8 @@ risk is explicit:
 - Renderer output is preview/OCR-grade, not visual-proof grade. PDFium/Poppler
   class renderers remain the reference for pixel-proof workflows.
 - Linux sanitizer CI is wired for ASan, TSan, Rust UB checks, and ASan fuzz
-  regression replay. This Windows session did not execute the Linux sanitizer
-  matrix locally.
+  regression replay across all committed fuzz corpora. This Windows session did
+  not execute the Linux sanitizer matrix locally.
 
 ## Verdict
 

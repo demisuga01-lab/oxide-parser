@@ -1,0 +1,305 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag/name to use for manual dry-run artifact names
+        required: true
+        default: "v0.0.0-dry-run"
+      create_github_release:
+        description: Create or publish a GitHub Release for release_tag
+        required: false
+        type: boolean
+        default: false
+      build_docker:
+        description: Build the optional oxide-server Docker image
+        required: false
+        type: boolean
+        default: false
+      push_docker:
+        description: Push the optional Docker image to GHCR
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
+jobs:
+  release-gate:
+    name: full release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run workspace tests
+        run: cargo test --workspace --locked
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Install audit tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Check RustSec advisories
+        run: cargo audit --deny warnings --ignore RUSTSEC-2023-0071
+
+      - name: Check dependency policy
+        run: cargo deny check advisories licenses bans sources
+
+  crate-publish-dry-run:
+    name: crate publish dry-run
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: release-gate
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Dry-run publishable crates
+        shell: bash
+        run: |
+          cargo publish -p oxide-engine --dry-run --locked
+          engine_version="$(awk -F '"' '/^version = / {print $2; exit}' crates/engine/Cargo.toml)"
+          if cargo search oxide-engine --limit 5 | grep -E "^oxide-engine = \"${engine_version}\"" >/dev/null; then
+            cargo publish -p oxide-cli --dry-run --locked
+            cargo publish -p oxide-server --dry-run --locked
+          else
+            {
+              echo "### Crate publish dry-run"
+              echo
+              echo "- oxide-engine: cargo publish --dry-run passed."
+              echo "- oxide-cli: deferred until oxide-engine ${engine_version} exists in crates.io."
+              echo "- oxide-server: deferred until oxide-engine ${engine_version} exists in crates.io."
+              echo
+              echo "Cargo verifies publishable path dependencies against the registry."
+              echo "For the first crates.io release, publish oxide-engine manually first,"
+              echo "then rerun the release workflow or dry-run oxide-cli and oxide-server."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::oxide-cli and oxide-server publish dry-runs are deferred until oxide-engine ${engine_version} exists in crates.io."
+          fi
+
+  build-cli:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    needs: release-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: oxide-linux-x86_64-musl
+            package: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: oxide-macos-x86_64
+            package: tar
+          - os: macos-14
+            target: aarch64-apple-darwin
+            artifact: oxide-macos-aarch64
+            package: tar
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: oxide-windows-x86_64
+            package: zip
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install Linux musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build release CLI
+        run: cargo build --release --locked -p oxide-cli --target ${{ matrix.target }}
+
+      - name: Package Unix artifact
+        if: matrix.package == 'tar'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          name="${ARTIFACT}-${RELEASE_TAG}"
+          staging="target/package/${name}"
+          mkdir -p "${staging}" dist
+          cp "target/${TARGET}/release/oxide" "${staging}/oxide"
+          cp README.md CHANGELOG.md "${staging}/"
+          for license in LICENSE LICENSE-MIT LICENSE-APACHE; do
+            if [ -f "${license}" ]; then
+              cp "${license}" "${staging}/"
+            fi
+          done
+          tar -czf "dist/${name}.tar.gz" -C "${staging}" .
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          else
+            (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          fi
+
+      - name: Package Windows artifact
+        if: matrix.package == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $name = "$env:ARTIFACT-$env:RELEASE_TAG"
+          $staging = Join-Path "target/package" $name
+          New-Item -ItemType Directory -Force -Path $staging, "dist" | Out-Null
+          Copy-Item "target/$env:TARGET/release/oxide.exe" (Join-Path $staging "oxide.exe")
+          Copy-Item "README.md", "CHANGELOG.md" $staging
+          foreach ($license in @("LICENSE", "LICENSE-MIT", "LICENSE-APACHE")) {
+            if (Test-Path $license) {
+              Copy-Item $license $staging
+            }
+          }
+          $archive = Join-Path "dist" "$name.zip"
+          Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $archive -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Out-File -Encoding ascii "$archive.sha256"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.artifact }}
+          if-no-files-found: error
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  docker-image:
+    name: optional Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: release-gate
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_docker }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build Docker image
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/oxide-server:${{ env.RELEASE_TAG }}
+        run: docker build -t "$IMAGE" .
+
+      - name: Push Docker image
+        if: ${{ inputs.push_docker }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/oxide-server:${{ env.RELEASE_TAG }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE"
+
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs:
+      - crate-publish-dry-run
+      - build-cli
+    if: ${{ github.event_name == 'push' || inputs.create_github_release }}
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          tag="${RELEASE_TAG}"
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::Release tag ${tag} does not exist."
+            exit 1
+          fi
+          changelog="$(awk '/^## Unreleased/{flag=1; next} /^## /{flag=0} flag {print}' CHANGELOG.md | sed '/^[[:space:]]*$/d' || true)"
+          previous_tag="$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null || true)"
+          {
+            echo "## ${tag}"
+            echo
+            if [ -n "${changelog}" ]; then
+              echo "### Changelog"
+              echo "${changelog}"
+              echo
+            fi
+            echo "### Verification"
+            echo "- Full release gate passed in this workflow."
+            echo "- Crate publish dry-run job completed; see the workflow summary for dependent crate first-release status."
+            echo "- SHA-256 checksum files are attached next to each binary archive."
+            echo
+            echo "### Commits"
+            if [ -n "${previous_tag}" ]; then
+              git log --oneline "${previous_tag}..${tag}"
+            else
+              git log --oneline -20 "${tag}"
+            fi
+          } > release-notes.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prerelease=()
+          if [[ "${RELEASE_TAG}" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "${RELEASE_TAG}" release-assets/* \
+            --verify-tag \
+            --title "${RELEASE_TAG}" \
+            --notes-file release-notes.md \
+            "${prerelease[@]}"

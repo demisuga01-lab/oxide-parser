@@ -169,7 +169,10 @@ impl std::fmt::Debug for ExtractOptions {
             .field("doc_type", &self.doc_type)
             .field("pages", &self.pages)
             .field("min_confidence", &self.min_confidence)
-            .field("ocr", &self.ocr.as_ref().map(|e| e.name()).unwrap_or("none"))
+            .field(
+                "ocr",
+                &self.ocr.as_ref().map(|e| e.name()).unwrap_or("none"),
+            )
             .finish()
     }
 }
@@ -182,9 +185,7 @@ impl ExtractedFields {
 
     /// Look up the first field with the given key (case-insensitive).
     pub fn get(&self, key: &str) -> Option<&Field> {
-        self.fields
-            .iter()
-            .find(|f| f.key.eq_ignore_ascii_case(key))
+        self.fields.iter().find(|f| f.key.eq_ignore_ascii_case(key))
     }
 }
 

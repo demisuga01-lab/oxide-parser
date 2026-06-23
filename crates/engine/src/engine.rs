@@ -313,10 +313,7 @@ impl ContentEngine {
     /// table/header/footer/page-number) and placed in a robust reading order
     /// (tagged-PDF authored order when present, else a geometric precedence
     /// graph). A capability beyond Poppler's CLIs. See [`crate::docmodel`].
-    pub fn build_document_model(
-        &self,
-        pages: &[usize],
-    ) -> Result<crate::docmodel::DocumentModel> {
+    pub fn build_document_model(&self, pages: &[usize]) -> Result<crate::docmodel::DocumentModel> {
         crate::docmodel::build_document_model(self, pages)
     }
 
@@ -350,9 +347,9 @@ impl ContentEngine {
     pub(crate) fn page_dimensions(&self, page_number: usize) -> Result<(f64, f64)> {
         self.validate_page(page_number)?;
         let pages = self.doc.get_pages()?;
-        let page = pages.get(page_number - 1).ok_or_else(|| {
-            OxideError::MalformedPdf(format!("page {page_number} out of range"))
-        })?;
+        let page = pages
+            .get(page_number - 1)
+            .ok_or_else(|| OxideError::MalformedPdf(format!("page {page_number} out of range")))?;
         let b = page.crop_box;
         Ok(((b[2] - b[0]).abs(), (b[3] - b[1]).abs()))
     }
@@ -363,9 +360,9 @@ impl ContentEngine {
     pub(crate) fn page_rotation(&self, page_number: usize) -> Result<i32> {
         self.validate_page(page_number)?;
         let pages = self.doc.get_pages()?;
-        let page = pages.get(page_number - 1).ok_or_else(|| {
-            OxideError::MalformedPdf(format!("page {page_number} out of range"))
-        })?;
+        let page = pages
+            .get(page_number - 1)
+            .ok_or_else(|| OxideError::MalformedPdf(format!("page {page_number} out of range")))?;
         Ok(page.rotate.rem_euclid(360))
     }
 
@@ -374,9 +371,9 @@ impl ContentEngine {
     pub(crate) fn page_crop_box(&self, page_number: usize) -> Result<[f64; 4]> {
         self.validate_page(page_number)?;
         let pages = self.doc.get_pages()?;
-        let page = pages.get(page_number - 1).ok_or_else(|| {
-            OxideError::MalformedPdf(format!("page {page_number} out of range"))
-        })?;
+        let page = pages
+            .get(page_number - 1)
+            .ok_or_else(|| OxideError::MalformedPdf(format!("page {page_number} out of range")))?;
         Ok(page.crop_box)
     }
 
@@ -389,9 +386,9 @@ impl ContentEngine {
     pub(crate) fn page_links(&self, page_number: usize) -> Result<Vec<([f64; 4], String)>> {
         self.validate_page(page_number)?;
         let pages = self.doc.get_pages()?;
-        let page = pages.get(page_number - 1).ok_or_else(|| {
-            OxideError::MalformedPdf(format!("page {page_number} out of range"))
-        })?;
+        let page = pages
+            .get(page_number - 1)
+            .ok_or_else(|| OxideError::MalformedPdf(format!("page {page_number} out of range")))?;
         let reader = self.doc.reader();
         let page_obj = reader.get_and_resolve(page.object_number, page.generation_number)?;
         let Some(page_dict) = page_obj.as_dict() else {
@@ -844,10 +841,7 @@ fn page_rotation_u32(rotation: i32) -> u32 {
 
 /// Parse an annotation `/Rect` `[x0 y0 x1 y1]` (resolving indirect refs and
 /// normalizing so `x0<=x1, y0<=y1`). `None` if it is not a 4-number array.
-fn rect_from_obj(
-    obj: Option<&crate::object::PdfObject>,
-    reader: &PdfReader,
-) -> Option<[f64; 4]> {
+fn rect_from_obj(obj: Option<&crate::object::PdfObject>, reader: &PdfReader) -> Option<[f64; 4]> {
     let resolved = reader.resolve(obj?.clone()).ok()?;
     let arr = resolved.as_array()?;
     if arr.len() != 4 {
@@ -858,7 +852,12 @@ fn rect_from_obj(
         let n = reader.resolve(item.clone()).ok()?;
         v[i] = n.as_number()?;
     }
-    Some([v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])])
+    Some([
+        v[0].min(v[2]),
+        v[1].min(v[3]),
+        v[0].max(v[2]),
+        v[1].max(v[3]),
+    ])
 }
 
 /// Extract the URI from a `/Link` annotation: either its `/A << /S /URI /URI … >>`

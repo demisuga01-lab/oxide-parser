@@ -22,7 +22,9 @@ struct PdfBuilder {
 }
 impl PdfBuilder {
     fn new() -> Self {
-        Self { objects: Vec::new() }
+        Self {
+            objects: Vec::new(),
+        }
     }
     fn add(&mut self, body: &str) -> usize {
         self.objects.push(body.as_bytes().to_vec());
@@ -96,7 +98,10 @@ struct MockOcrEngine {
 impl OcrEngine for MockOcrEngine {
     fn recognize(&self, image: &OcrImage, _opts: &OcrOptions) -> oxide_engine::Result<OcrPage> {
         // The seam must hand us a valid preprocessed image.
-        assert!(image.is_valid(), "seam handed an invalid image to the engine");
+        assert!(
+            image.is_valid(),
+            "seam handed an invalid image to the engine"
+        );
         assert_eq!(image.width, 612, "rendered at 72 DPI → 612px wide");
         assert_eq!(image.height, 792, "rendered at 72 DPI → 792px tall");
 
@@ -122,7 +127,15 @@ impl OcrEngine for MockOcrEngine {
         // paragraph, exercising the SAME geometric classifier the digital path
         // uses. Lines are 16px apart (tight leading → one block).
         let body_lines: &[&[&str]] = &[
-            &["This", "is", "ordinary", "recognized", "body", "prose", "text"],
+            &[
+                "This",
+                "is",
+                "ordinary",
+                "recognized",
+                "body",
+                "prose",
+                "text",
+            ],
             &["that", "the", "shared", "layout", "pipeline", "classifies"],
             &["exactly", "as", "though", "it", "had", "come", "from", "a"],
             &["born-digital", "content", "stream", "instead", "of", "OCR."],
@@ -183,7 +196,10 @@ fn ocr_words_flow_through_shared_pipeline_to_typed_blocks() {
 
     let md = doc.to_markdown(&SerializeOptions::default());
     // The recognized text survives into the output, in reading order.
-    assert!(md.contains("Quarterly Report"), "heading text present:\n{md}");
+    assert!(
+        md.contains("Quarterly Report"),
+        "heading text present:\n{md}"
+    );
     assert!(
         md.contains("ordinary recognized body prose"),
         "body text present:\n{md}"
@@ -249,7 +265,10 @@ fn no_ocr_engine_degrades_to_placeholder() {
     let engine = ContentEngine::open_bytes(scanned_page()).unwrap();
     let doc = engine.parse_document(&ParseOptions::default()).unwrap();
     let md = doc.to_markdown(&SerializeOptions::default());
-    assert!(md.contains("scanned page 1"), "placeholder note present:\n{md}");
+    assert!(
+        md.contains("scanned page 1"),
+        "placeholder note present:\n{md}"
+    );
     assert_ne!(doc.source, SourceInfo::Ocr);
 }
 

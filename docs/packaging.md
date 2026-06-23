@@ -104,12 +104,15 @@ override.
 ## Release Checklist
 
 1. Update crate versions and `CHANGELOG.md`.
-2. Run `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`.
+2. Run `cargo fmt --all -- --check`, `cargo test --workspace --locked`, and
+   `cargo clippy --workspace --all-targets --locked -- -D warnings`.
 3. Run feature matrix checks listed below.
-4. Run `cargo publish --dry-run` for publishable crates.
-5. Run `cargo deny check licenses sources` if cargo-deny is installed.
-6. Build release CLI, C ABI, WASM package, and Docker image.
-7. Tag the release after dry-runs and artifacts are verified.
+4. Run `cargo publish --dry-run --locked` for publishable crates.
+5. Run `cargo audit --deny warnings --ignore RUSTSEC-2023-0071` and
+   `cargo deny check advisories licenses bans sources`.
+6. Build release CLI, C ABI, WASM package, and Docker image as needed.
+7. Tag the release after dry-runs and artifacts are verified. See
+   `docs/release.md` for the automated tag-to-GitHub-Release pipeline.
 
 Feature matrix:
 

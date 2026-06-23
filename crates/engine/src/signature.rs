@@ -1108,8 +1108,7 @@ fn verify_one(
             report.certificate = result.certificate;
             report.trust = trust;
             report.ltv = ltv;
-            report.status =
-                overall_status(&report.validity, &report.trust, &report.coverage);
+            report.status = overall_status(&report.validity, &report.trust, &report.coverage);
         }
         Err(msg) => {
             report.validity = SignatureValidity::Error;
@@ -1184,11 +1183,7 @@ fn evaluate_trust(
 /// True if `signer` chains to one of `anchors`, either by being a pinned anchor
 /// itself or via a path through the embedded `chain`, with every link verified
 /// by an actual certificate-signature check.
-fn chains_to_anchor(
-    signer: &Certificate,
-    chain: &[Certificate],
-    anchors: &[Certificate],
-) -> bool {
+fn chains_to_anchor(signer: &Certificate, chain: &[Certificate], anchors: &[Certificate]) -> bool {
     const MAX_CHAIN_DEPTH: usize = 10;
     if anchors.iter().any(|anchor| same_cert(anchor, signer)) {
         return true;

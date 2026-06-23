@@ -1433,7 +1433,10 @@ async fn chunk_returns_chunkset_json() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(json["chunks"].is_array(), "chunk response must have a chunks array");
+    assert!(
+        json["chunks"].is_array(),
+        "chunk response must have a chunks array"
+    );
     assert!(json["schema_version"].is_string());
 }
 
@@ -1454,7 +1457,10 @@ async fn extract_fields_returns_json_on_acroform() {
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(json["fields"].is_array(), "extract-fields must return a fields array");
+    assert!(
+        json["fields"].is_array(),
+        "extract-fields must return a fields array"
+    );
     let fields = json["fields"].as_array().unwrap();
     assert!(!fields.is_empty(), "AcroForm document should yield fields");
 }
@@ -1477,7 +1483,10 @@ async fn info_returns_metadata_json() {
     let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(json.is_object(), "info must return a JSON object");
-    assert!(json.get("page_count").is_some(), "info must report page_count");
+    assert!(
+        json.get("page_count").is_some(),
+        "info must report page_count"
+    );
 }
 
 #[tokio::test]

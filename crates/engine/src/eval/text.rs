@@ -165,7 +165,10 @@ mod tests {
         let s = reading_order_similarity(&r, &p);
         assert!((s - 5.0 / 6.0).abs() < 1e-9, "got {s}");
         // unknown items in prediction are ignored.
-        let p2: Vec<String> = ["a", "z", "b", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let p2: Vec<String> = ["a", "z", "b", "c", "d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(reading_order_similarity(&r, &p2), 1.0);
     }
 

@@ -9,9 +9,7 @@
 //! `document_model.rs`) whose correct structure is known by construction, so the
 //! assertions are exact rather than eyeballed. No full renderer benchmark.
 
-use oxide_engine::{
-    ContentEngine, PageSource, ParseOptions, SerializeOptions, SourceInfo,
-};
+use oxide_engine::{ContentEngine, PageSource, ParseOptions, SerializeOptions, SourceInfo};
 
 // ════════════════════════════════════════════════════════════════════════════
 // Minimal PDF builder (shared shape with the rest of the engine test suite)
@@ -80,9 +78,7 @@ fn one_page(font_resources: &str, content: &[u8]) -> Vec<u8> {
     ));
     b.add_stream("", content);
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
-    b.add(
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
-    );
+    b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
     b.build()
 }
 
@@ -150,8 +146,20 @@ fn figure_with_caption() -> Vec<u8> {
     );
     let mut c = String::new();
     c.push_str("q 300 0 0 200 72 480 cm /Im0 Do Q\n");
-    c.push_str(&text("F1", 9.0, 72.0, 462.0, "Figure 1: revenue chart by quarter"));
-    c.push_str(&text("F1", 10.0, 72.0, 120.0, "Unrelated body text far below the figure region."));
+    c.push_str(&text(
+        "F1",
+        9.0,
+        72.0,
+        462.0,
+        "Figure 1: revenue chart by quarter",
+    ));
+    c.push_str(&text(
+        "F1",
+        10.0,
+        72.0,
+        120.0,
+        "Unrelated body text far below the figure region.",
+    ));
     b.add_stream("", c.as_bytes());
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
@@ -166,12 +174,26 @@ fn figure_with_caption() -> Vec<u8> {
 /// A tagged PDF (H1 + two paragraphs + a list) — the tags-first path.
 fn tagged_pdf() -> Vec<u8> {
     let mcid_text = |mcid: i64, tag: &str, x: f64, y: f64, s: &str| -> String {
-        format!("/{tag} <</MCID {mcid}>> BDC\nBT /F1 10 Tf 1 0 0 1 {x:.1} {y:.1} Tm ({s}) Tj ET\nEMC\n")
+        format!(
+            "/{tag} <</MCID {mcid}>> BDC\nBT /F1 10 Tf 1 0 0 1 {x:.1} {y:.1} Tm ({s}) Tj ET\nEMC\n"
+        )
     };
     let mut content = String::new();
     content.push_str(&mcid_text(0, "H1", 72.0, 740.0, "Tagged Document Title"));
-    content.push_str(&mcid_text(1, "P", 320.0, 700.0, "Right column paragraph text"));
-    content.push_str(&mcid_text(2, "P", 72.0, 700.0, "Left column paragraph text"));
+    content.push_str(&mcid_text(
+        1,
+        "P",
+        320.0,
+        700.0,
+        "Right column paragraph text",
+    ));
+    content.push_str(&mcid_text(
+        2,
+        "P",
+        72.0,
+        700.0,
+        "Left column paragraph text",
+    ));
     content.push_str(&mcid_text(3, "Lbl", 90.0, 670.0, "Alpha"));
     content.push_str(&mcid_text(4, "Lbl", 90.0, 655.0, "Beta"));
 
@@ -213,7 +235,11 @@ fn p1_digital_born_heading_and_paragraph_to_markdown() {
     let md = doc.to_markdown(&SerializeOptions::default());
     // Heading rendered as a Markdown heading; body present as prose.
     assert!(md.contains("Introduction Heading"), "md:\n{md}");
-    assert!(md.lines().any(|l| l.starts_with('#') && l.contains("Introduction")), "md:\n{md}");
+    assert!(
+        md.lines()
+            .any(|l| l.starts_with('#') && l.contains("Introduction")),
+        "md:\n{md}"
+    );
     assert!(md.contains("ordinary running prose"), "md:\n{md}");
 }
 
@@ -244,7 +270,10 @@ fn p3_furniture_omitted_by_default_kept_in_pages() {
 
     let md = doc.to_markdown(&SerializeOptions::default());
     // The repeated banner is furniture → stripped from the body/markdown.
-    assert!(!md.contains("ACME Annual Report"), "furniture stripped:\n{md}");
+    assert!(
+        !md.contains("ACME Annual Report"),
+        "furniture stripped:\n{md}"
+    );
     // Body content per page survives.
     assert!(md.contains("unique to page 1"), "md:\n{md}");
 
@@ -263,12 +292,19 @@ fn p4_figure_and_caption_linked_and_rendered_once() {
 
     let html = doc.to_html(&SerializeOptions::default());
     assert!(html.contains("<figure>"), "html:\n{html}");
-    assert!(html.contains("<figcaption>"), "caption linked under figure:\n{html}");
+    assert!(
+        html.contains("<figcaption>"),
+        "caption linked under figure:\n{html}"
+    );
     assert!(html.contains("Figure 1: revenue chart"), "html:\n{html}");
 
     let md = doc.to_markdown(&SerializeOptions::default());
     // The caption text appears exactly once (under the figure, not duplicated).
-    assert_eq!(md.matches("Figure 1: revenue chart").count(), 1, "md:\n{md}");
+    assert_eq!(
+        md.matches("Figure 1: revenue chart").count(),
+        1,
+        "md:\n{md}"
+    );
 }
 
 #[test]
@@ -361,8 +397,20 @@ fn rotated_page() -> Vec<u8> {
     );
     let mut c = String::new();
     c.push_str(&text("FB", 18.0, 72.0, 740.0, "Rotated Heading"));
-    c.push_str(&text("F1", 10.0, 72.0, 712.0, "Body text on a page that is rotated ninety degrees."));
-    c.push_str(&text("F1", 10.0, 72.0, 698.0, "It must still extract and read in the right order."));
+    c.push_str(&text(
+        "F1",
+        10.0,
+        72.0,
+        712.0,
+        "Body text on a page that is rotated ninety degrees.",
+    ));
+    c.push_str(&text(
+        "F1",
+        10.0,
+        72.0,
+        698.0,
+        "It must still extract and read in the right order.",
+    ));
     b.add_stream("", c.as_bytes());
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
@@ -406,8 +454,14 @@ fn p8_searchable_scan_uses_existing_text_layer_not_ocr() {
     let doc = engine.parse_document(&ParseOptions::default()).unwrap();
     assert_eq!(doc.pages[0].source, PageSource::DigitalBornOverImage);
     let md = doc.to_markdown(&SerializeOptions::default());
-    assert!(md.contains("Invisible OCR layer text"), "uses text layer:\n{md}");
-    assert!(!md.contains("scanned page"), "must not be treated as a pure scan:\n{md}");
+    assert!(
+        md.contains("Invisible OCR layer text"),
+        "uses text layer:\n{md}"
+    );
+    assert!(
+        !md.contains("scanned page"),
+        "must not be treated as a pure scan:\n{md}"
+    );
 }
 
 #[test]
@@ -417,7 +471,10 @@ fn p9_rotated_page_text_recovered_in_order() {
     assert_eq!(doc.pages[0].source, PageSource::DigitalBorn);
     let md = doc.to_markdown(&SerializeOptions::default());
     assert!(md.contains("Rotated Heading"), "heading recovered:\n{md}");
-    assert!(md.contains("rotated ninety degrees"), "body recovered:\n{md}");
+    assert!(
+        md.contains("rotated ninety degrees"),
+        "body recovered:\n{md}"
+    );
     let h = md.find("Rotated Heading").unwrap();
     let body = md.find("rotated ninety degrees").unwrap();
     assert!(h < body, "heading before body:\n{md}");
@@ -450,8 +507,14 @@ fn p11_mixed_document_per_page_routing() {
     );
     b.add_stream(
         "",
-        text("F1", 12.0, 72.0, 700.0, "This is a born-digital first page with real selectable text content.")
-            .as_bytes(),
+        text(
+            "F1",
+            12.0,
+            72.0,
+            700.0,
+            "This is a born-digital first page with real selectable text content.",
+        )
+        .as_bytes(),
     );
     b.add_stream("", b"q 612 0 0 792 0 0 cm /Im0 Do Q\n");
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");

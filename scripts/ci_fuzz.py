@@ -63,11 +63,17 @@ def parse_targets(raw: str) -> list[str]:
     return targets
 
 
-def build_target(target: str) -> None:
-    run(["cargo", "+nightly", "fuzz", "build", target])
+def fuzz_sanitizer_args(sanitizer: str | None) -> list[str]:
+    if not sanitizer:
+        return []
+    return ["--sanitizer", sanitizer]
 
 
-def replay_regressions(target: str) -> None:
+def build_target(target: str, sanitizer: str | None) -> None:
+    run(["cargo", "+nightly", "fuzz", "build", *fuzz_sanitizer_args(sanitizer), target])
+
+
+def replay_regressions(target: str, sanitizer: str | None) -> None:
     corpus = FUZZ / "corpus" / target
     if not has_seed(corpus):
         print(f"skip {target}: no committed regression/seed corpus", flush=True)
@@ -78,6 +84,7 @@ def replay_regressions(target: str) -> None:
             "+nightly",
             "fuzz",
             "run",
+            *fuzz_sanitizer_args(sanitizer),
             target,
             f"corpus/{target}",
             "--",
@@ -87,7 +94,7 @@ def replay_regressions(target: str) -> None:
     )
 
 
-def timed_fuzz(target: str, seconds: int, max_len: int) -> None:
+def timed_fuzz(target: str, seconds: int, max_len: int, sanitizer: str | None) -> None:
     (FUZZ / "corpus" / target).mkdir(parents=True, exist_ok=True)
     run(
         [
@@ -95,6 +102,7 @@ def timed_fuzz(target: str, seconds: int, max_len: int) -> None:
             "+nightly",
             "fuzz",
             "run",
+            *fuzz_sanitizer_args(sanitizer),
             target,
             "--",
             f"-max_total_time={seconds}",
@@ -114,6 +122,7 @@ def main() -> None:
     )
     parser.add_argument("--seconds", type=int, default=45)
     parser.add_argument("--max-len", type=int, default=65536)
+    parser.add_argument("--sanitizer", help="Optional cargo-fuzz sanitizer, such as address")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--print-targets", action="store_true")
     args = parser.parse_args()
@@ -126,13 +135,13 @@ def main() -> None:
     for target in targets:
         print(f"== {target} ({args.mode}) ==", flush=True)
         if not args.no_build:
-            build_target(target)
+            build_target(target, args.sanitizer)
         if args.mode == "build":
             continue
         if args.mode == "regression":
-            replay_regressions(target)
+            replay_regressions(target, args.sanitizer)
         else:
-            timed_fuzz(target, args.seconds, args.max_len)
+            timed_fuzz(target, args.seconds, args.max_len, args.sanitizer)
 
 
 if __name__ == "__main__":

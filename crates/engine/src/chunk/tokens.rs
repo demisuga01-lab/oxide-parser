@@ -143,7 +143,11 @@ mod tests {
         let est = estimate_tokens(text);
         let actual = 126.0;
         let err = (est as f64 - actual).abs() / actual;
-        assert!(err < 0.25, "estimate {est} vs ~126 ({:.0}% off)", err * 100.0);
+        assert!(
+            err < 0.25,
+            "estimate {est} vs ~126 ({:.0}% off)",
+            err * 100.0
+        );
     }
 
     #[test]

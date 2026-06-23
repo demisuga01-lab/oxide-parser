@@ -2016,8 +2016,7 @@ impl<'a> RenderState<'a> {
         };
         // For Type0 fonts the descriptor lives on the descendant CIDFont.
         let descriptor = if detect_font_subtype(font_dict) == FontSubtype::Type0 {
-            get_descendant_font(font_dict, reader)
-                .and_then(|d| resolve_descriptor(&d, reader))
+            get_descendant_font(font_dict, reader).and_then(|d| resolve_descriptor(&d, reader))
         } else {
             resolve_descriptor(font_dict, reader)
         };
@@ -2116,7 +2115,10 @@ fn resolve_descriptor(
     font_dict: &PdfDictionary,
     reader: &crate::reader::PdfReader,
 ) -> Option<PdfDictionary> {
-    match reader.resolve(font_dict.get("FontDescriptor")?.clone()).ok()? {
+    match reader
+        .resolve(font_dict.get("FontDescriptor")?.clone())
+        .ok()?
+    {
         PdfObject::Dictionary(dict) => Some(dict),
         _ => None,
     }

@@ -126,7 +126,11 @@ fn render_block_md(b: &Block, doc: &Document, out: &mut String) {
             render_list_md(*ordered, items, out);
             out.push('\n');
         }
-        BlockKind::Figure { alt, image, caption } => {
+        BlockKind::Figure {
+            alt,
+            image,
+            caption,
+        } => {
             render_figure_md(alt.as_deref(), image.as_ref(), out);
             if let Some(cid) = caption {
                 if let Some(cap) = doc.block(*cid) {
@@ -183,9 +187,7 @@ fn render_list_md(ordered: bool, items: &[ListEntry], out: &mut String) {
 
 fn render_figure_md(alt: Option<&str>, image: Option<&ImageRef>, out: &mut String) {
     let alt = alt.filter(|s| !s.is_empty()).unwrap_or("Figure");
-    let href = image
-        .and_then(|im| im.path.clone())
-        .unwrap_or_default();
+    let href = image.and_then(|im| im.path.clone()).unwrap_or_default();
     out.push_str(&format!("![{}]({})\n", md_escape(alt), href));
 }
 
@@ -242,10 +244,7 @@ fn table_md(t: &Table) -> String {
         // Degenerate table: fall back to a fenced CSV so nothing is lost.
         return format!("```csv\n{}```\n", t.to_csv());
     }
-    let has_spans = t
-        .cells
-        .iter()
-        .any(|c| c.rowspan > 1 || c.colspan > 1);
+    let has_spans = t.cells.iter().any(|c| c.rowspan > 1 || c.colspan > 1);
     let mut out = String::new();
     if has_spans {
         out.push_str("<!-- table: row/col spans flattened to a grid -->\n");
@@ -338,7 +337,11 @@ fn render_block_html(b: &Block, doc: &Document, opts: &SerializeOptions, out: &m
             }
             out.push_str(&format!("</{tag}>\n"));
         }
-        BlockKind::Figure { alt, image, caption } => {
+        BlockKind::Figure {
+            alt,
+            image,
+            caption,
+        } => {
             out.push_str(&format!("<figure{prov}>\n"));
             let src = image.as_ref().and_then(|im| im.path.clone());
             let alt_s = alt.as_deref().unwrap_or("Figure");
@@ -350,10 +353,7 @@ fn render_block_html(b: &Block, doc: &Document, opts: &SerializeOptions, out: &m
             if let Some(cid) = caption {
                 if let Some(cap) = doc.block(*cid) {
                     if let BlockKind::Caption { text, .. } = &cap.kind {
-                        out.push_str(&format!(
-                            "<figcaption>{}</figcaption>\n",
-                            inline_html(text)
-                        ));
+                        out.push_str(&format!("<figcaption>{}</figcaption>\n", inline_html(text)));
                     }
                 }
             }

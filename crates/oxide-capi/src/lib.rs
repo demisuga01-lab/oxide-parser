@@ -551,7 +551,9 @@ mod tests {
         let mut json = std::ptr::null_mut();
         let status = unsafe { oxide_document_parse_json(doc, &mut json, &mut error) };
         assert_eq!(status, OXIDE_STATUS_OK);
-        let parsed = unsafe { CStr::from_ptr(json) }.to_string_lossy().into_owned();
+        let parsed = unsafe { CStr::from_ptr(json) }
+            .to_string_lossy()
+            .into_owned();
         assert!(parsed.contains("schema_version"), "json was: {parsed}");
         assert!(parsed.contains("Hello C API"));
         unsafe { oxide_string_free(json) };
@@ -567,7 +569,10 @@ mod tests {
         let fields_json = unsafe { CStr::from_ptr(fields) }
             .to_string_lossy()
             .into_owned();
-        assert!(fields_json.contains("schema_version"), "fields: {fields_json}");
+        assert!(
+            fields_json.contains("schema_version"),
+            "fields: {fields_json}"
+        );
         unsafe { oxide_string_free(fields) };
 
         unsafe { oxide_document_free(doc) };

@@ -9,7 +9,12 @@ fn block(id: usize, page: u32, ro: u32, kind: BlockKind) -> Block {
     Block {
         id,
         page,
-        bbox: [50.0, 700.0 - ro as f64 * 20.0, 300.0, 720.0 - ro as f64 * 20.0],
+        bbox: [
+            50.0,
+            700.0 - ro as f64 * 20.0,
+            300.0,
+            720.0 - ro as f64 * 20.0,
+        ],
         reading_order: ro,
         confidence: 0.9,
         kind,
@@ -17,11 +22,26 @@ fn block(id: usize, page: u32, ro: u32, kind: BlockKind) -> Block {
 }
 
 fn heading(id: usize, ro: u32, level: u8, text: &str) -> Block {
-    block(id, 1, ro, BlockKind::Heading { level, text: InlineText::plain(text) })
+    block(
+        id,
+        1,
+        ro,
+        BlockKind::Heading {
+            level,
+            text: InlineText::plain(text),
+        },
+    )
 }
 
 fn para(id: usize, ro: u32, text: &str) -> Block {
-    block(id, 1, ro, BlockKind::Paragraph { text: InlineText::plain(text) })
+    block(
+        id,
+        1,
+        ro,
+        BlockKind::Paragraph {
+            text: InlineText::plain(text),
+        },
+    )
 }
 
 fn doc(blocks: Vec<Block>) -> Document {
@@ -41,8 +61,13 @@ fn doc(blocks: Vec<Block>) -> Document {
 
 /// ~`words` words of filler prose.
 fn prose(words: usize) -> String {
-    let bank = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"];
-    (0..words).map(|i| bank[i % bank.len()]).collect::<Vec<_>>().join(" ")
+    let bank = [
+        "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+    ];
+    (0..words)
+        .map(|i| bank[i % bank.len()])
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
@@ -55,7 +80,10 @@ fn splits_at_heading_boundaries() {
         heading(2, 2, 1, "Section Two"),
         para(3, 3, &prose(20)),
     ]);
-    let set = d.chunk(&ChunkOptions { overlap_tokens: 0, ..Default::default() });
+    let set = d.chunk(&ChunkOptions {
+        overlap_tokens: 0,
+        ..Default::default()
+    });
     // Two sections → at least two chunks, each carrying its own heading.
     assert!(set.chunks.len() >= 2, "got {} chunks", set.chunks.len());
     assert!(set.chunks[0].text.contains("Section One"));
@@ -142,23 +170,46 @@ fn table_is_isolated_and_never_split() {
     let d = doc(vec![
         heading(0, 0, 1, "Data"),
         para(1, 1, &prose(10)),
-        block(2, 1, 2, BlockKind::Table { table, caption: None }),
+        block(
+            2,
+            1,
+            2,
+            BlockKind::Table {
+                table,
+                caption: None,
+            },
+        ),
         para(3, 3, &prose(10)),
     ]);
-    let set = d.chunk(&ChunkOptions { overlap_tokens: 0, ..Default::default() });
+    let set = d.chunk(&ChunkOptions {
+        overlap_tokens: 0,
+        ..Default::default()
+    });
     // Exactly one chunk is the table, flagged, and it contains the whole grid.
     let table_chunks: Vec<&Chunk> = set.chunks.iter().filter(|c| c.is_table_or_figure).collect();
     assert_eq!(table_chunks.len(), 1, "one isolated table chunk");
     let tc = table_chunks[0];
-    assert!(tc.text.contains("| A | B |"), "table grid intact:\n{}", tc.text);
-    assert!(tc.text.contains("| 3 | 4 |"), "all rows present:\n{}", tc.text);
+    assert!(
+        tc.text.contains("| A | B |"),
+        "table grid intact:\n{}",
+        tc.text
+    );
+    assert!(
+        tc.text.contains("| 3 | 4 |"),
+        "all rows present:\n{}",
+        tc.text
+    );
 }
 
 #[test]
 fn overlap_carries_trailing_context() {
     let mut blocks = vec![heading(0, 0, 1, "S")];
     for i in 0..10 {
-        blocks.push(para(i + 1, (i + 1) as u32, &format!("paragraph number {i} {}", prose(15))));
+        blocks.push(para(
+            i + 1,
+            (i + 1) as u32,
+            &format!("paragraph number {i} {}", prose(15)),
+        ));
     }
     let d = doc(blocks);
     let no_overlap = d.chunk(&ChunkOptions {
@@ -177,21 +228,39 @@ fn overlap_carries_trailing_context() {
     });
     assert!(no_overlap.chunks.len() > 1 && with_overlap.chunks.len() > 1);
     // With overlap, the start of chunk 2 repeats the tail of chunk 1.
-    let c1_tail: Vec<&str> = no_overlap.chunks[0].text.split_whitespace().rev().take(5).collect();
+    let c1_tail: Vec<&str> = no_overlap.chunks[0]
+        .text
+        .split_whitespace()
+        .rev()
+        .take(5)
+        .collect();
     let c2 = &with_overlap.chunks[1].text;
     let repeated = c1_tail.iter().filter(|w| c2.contains(**w)).count();
-    assert!(repeated >= 1, "overlap should repeat trailing context:\n{c2}");
+    assert!(
+        repeated >= 1,
+        "overlap should repeat trailing context:\n{c2}"
+    );
 }
 
 #[test]
 fn heading_context_prepended_with_path() {
     let d = doc(vec![
-        block(0, 1, 0, BlockKind::Title { text: InlineText::plain("Doc Title") }),
+        block(
+            0,
+            1,
+            0,
+            BlockKind::Title {
+                text: InlineText::plain("Doc Title"),
+            },
+        ),
         heading(1, 1, 1, "Chapter"),
         heading(2, 2, 2, "Subsection"),
         para(3, 3, &prose(20)),
     ]);
-    let set = d.chunk(&ChunkOptions { overlap_tokens: 0, ..Default::default() });
+    let set = d.chunk(&ChunkOptions {
+        overlap_tokens: 0,
+        ..Default::default()
+    });
     // The paragraph's chunk carries the full heading path prefix.
     let body_chunk = set
         .chunks
@@ -205,7 +274,11 @@ fn heading_context_prepended_with_path() {
     );
     assert_eq!(
         body_chunk.section_path,
-        vec!["Doc Title".to_string(), "Chapter".to_string(), "Subsection".to_string()],
+        vec![
+            "Doc Title".to_string(),
+            "Chapter".to_string(),
+            "Subsection".to_string()
+        ],
         "section path nests title > chapter > subsection"
     );
 }
@@ -213,7 +286,10 @@ fn heading_context_prepended_with_path() {
 #[test]
 fn metadata_is_populated() {
     let d = doc(vec![heading(0, 0, 1, "Sec"), para(1, 1, &prose(30))]);
-    let set = d.chunk(&ChunkOptions { overlap_tokens: 0, ..Default::default() });
+    let set = d.chunk(&ChunkOptions {
+        overlap_tokens: 0,
+        ..Default::default()
+    });
     assert_eq!(set.title.as_deref(), Some("Test Doc"));
     let c = &set.chunks[0];
     assert_eq!(c.index, 0);
@@ -226,9 +302,23 @@ fn metadata_is_populated() {
 #[test]
 fn furniture_excluded_by_default() {
     let d = doc(vec![
-        block(0, 1, 0, BlockKind::Header { text: InlineText::plain("RUNNING HEAD") }),
+        block(
+            0,
+            1,
+            0,
+            BlockKind::Header {
+                text: InlineText::plain("RUNNING HEAD"),
+            },
+        ),
         para(1, 1, "Real body content here."),
-        block(2, 1, 2, BlockKind::Footer { text: InlineText::plain("page footer") }),
+        block(
+            2,
+            1,
+            2,
+            BlockKind::Footer {
+                text: InlineText::plain("page footer"),
+            },
+        ),
     ]);
     let set = d.chunk(&ChunkOptions::default());
     let all: String = set.chunks.iter().map(|c| c.text.clone()).collect();
@@ -248,7 +338,11 @@ fn deterministic_same_doc_same_chunks() {
     let opts = ChunkOptions::default();
     let a = d.chunk(&opts);
     let b = d.chunk(&opts);
-    assert_eq!(a.to_json(), b.to_json(), "same doc + opts → identical chunks");
+    assert_eq!(
+        a.to_json(),
+        b.to_json(),
+        "same doc + opts → identical chunks"
+    );
 }
 
 #[test]
@@ -262,8 +356,22 @@ fn empty_document_yields_no_chunks() {
 fn pages_span_recorded_across_a_chunk() {
     // Two small paragraphs on different pages packed into one chunk.
     let d = doc(vec![
-        block(0, 1, 0, BlockKind::Paragraph { text: InlineText::plain(prose(10)) }),
-        block(1, 2, 1, BlockKind::Paragraph { text: InlineText::plain(prose(10)) }),
+        block(
+            0,
+            1,
+            0,
+            BlockKind::Paragraph {
+                text: InlineText::plain(prose(10)),
+            },
+        ),
+        block(
+            1,
+            2,
+            1,
+            BlockKind::Paragraph {
+                text: InlineText::plain(prose(10)),
+            },
+        ),
     ]);
     let set = d.chunk(&ChunkOptions {
         target_tokens: 1000, // pack both into one chunk

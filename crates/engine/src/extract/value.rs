@@ -99,7 +99,9 @@ pub enum ValueHint {
 pub fn normalize(raw: &str, hint: ValueHint) -> FieldValue {
     let s = raw.trim();
     if s.is_empty() {
-        return FieldValue::Text { text: String::new() };
+        return FieldValue::Text {
+            text: String::new(),
+        };
     }
 
     // When a hint is given, try it first so ambiguous strings resolve the way
@@ -161,7 +163,9 @@ pub fn normalize(raw: &str, hint: ValueHint) -> FieldValue {
         return FieldValue::Number { value };
     }
 
-    FieldValue::Text { text: s.to_string() }
+    FieldValue::Text {
+        text: s.to_string(),
+    }
 }
 
 // ── dates ────────────────────────────────────────────────────────────────────
@@ -187,7 +191,10 @@ fn parse_numeric_date(s: &str) -> Option<String> {
     if parts.len() != 3 {
         return None;
     }
-    let nums: Vec<i64> = parts.iter().map(|p| p.trim().parse::<i64>().ok()).collect::<Option<_>>()?;
+    let nums: Vec<i64> = parts
+        .iter()
+        .map(|p| p.trim().parse::<i64>().ok())
+        .collect::<Option<_>>()?;
     let (a, b, c) = (nums[0], nums[1], nums[2]);
 
     // Decide which field is the year.
@@ -229,7 +236,10 @@ fn parse_textual_date(s: &str) -> Option<String> {
         let tl = t.to_ascii_lowercase();
         if let Some(m) = month_from_name(&tl) {
             month = Some(m);
-        } else if let Ok(n) = t.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<i64>() {
+        } else if let Ok(n) = t
+            .trim_end_matches(|c: char| !c.is_ascii_digit())
+            .parse::<i64>()
+        {
             if t.len() == 4 && (1900..=2200).contains(&n) {
                 year = Some(n);
             } else if (1..=31).contains(&n) && day.is_none() {
@@ -275,7 +285,20 @@ fn valid_ymd(y: i64, m: i64, d: i64) -> bool {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) || !(1..=9999).contains(&y) {
         return false;
     }
-    let dim = [31, if leap(y) { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let dim = [
+        31,
+        if leap(y) { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     d <= dim[(m - 1) as usize]
 }
 
@@ -332,7 +355,9 @@ pub fn parse_amount(s: &str) -> Option<(f64, Option<String>)> {
     // A leading/trailing 3-letter ISO code.
     if currency.is_none() {
         let up = rest.to_ascii_uppercase();
-        for code in ["USD", "EUR", "GBP", "JPY", "INR", "CAD", "AUD", "CHF", "KRW"] {
+        for code in [
+            "USD", "EUR", "GBP", "JPY", "INR", "CAD", "AUD", "CHF", "KRW",
+        ] {
             if let Some(r) = up.strip_prefix(code) {
                 currency = Some(code.to_string());
                 rest = &rest[code.len()..];
@@ -367,14 +392,17 @@ pub fn parse_amount(s: &str) -> Option<(f64, Option<String>)> {
 /// grouped/decimal shape, so a bare integer (e.g. a year or a count) is not
 /// swallowed as money.
 fn parse_amount_strict(s: &str) -> Option<(f64, Option<String>)> {
-    let has_currency_symbol = s.chars().any(|c| {
-        matches!(c, '$' | '€' | '£' | '¥' | '₹' | '₩')
-    }) || {
-        let up = s.to_ascii_uppercase();
-        ["USD", "EUR", "GBP", "JPY", "INR", "CAD", "AUD", "CHF", "KRW"]
+    let has_currency_symbol = s
+        .chars()
+        .any(|c| matches!(c, '$' | '€' | '£' | '¥' | '₹' | '₩'))
+        || {
+            let up = s.to_ascii_uppercase();
+            [
+                "USD", "EUR", "GBP", "JPY", "INR", "CAD", "AUD", "CHF", "KRW",
+            ]
             .iter()
             .any(|c| up.contains(c))
-    };
+        };
     let has_decimal = s.contains('.') || s.contains(',');
     if !has_currency_symbol && !has_decimal {
         return None;
@@ -401,7 +429,13 @@ fn looks_like_money(s: &str) -> bool {
         (None, None) => None,
     };
     match dec_pos {
-        Some(p) => trimmed[p + 1..].chars().filter(|c| c.is_ascii_digit()).count() == 2,
+        Some(p) => {
+            trimmed[p + 1..]
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .count()
+                == 2
+        }
         None => false,
     }
 }
@@ -547,8 +581,14 @@ mod tests {
     #[test]
     fn amounts_normalize_with_currency() {
         assert_eq!(parse_amount("$42.00"), Some((42.00, Some("USD".into()))));
-        assert_eq!(parse_amount("$1,234.50"), Some((1234.50, Some("USD".into()))));
-        assert_eq!(parse_amount("€1.234,50"), Some((1234.50, Some("EUR".into()))));
+        assert_eq!(
+            parse_amount("$1,234.50"),
+            Some((1234.50, Some("USD".into())))
+        );
+        assert_eq!(
+            parse_amount("€1.234,50"),
+            Some((1234.50, Some("EUR".into())))
+        );
         assert_eq!(parse_amount("USD 99.99"), Some((99.99, Some("USD".into()))));
         assert_eq!(parse_amount("1500"), Some((1500.0, None)));
         // Negative and parenthesized amounts keep the currency and the sign.
@@ -558,30 +598,59 @@ mod tests {
 
     #[test]
     fn normalize_picks_sensible_types() {
-        assert!(matches!(normalize("$42.00", ValueHint::Any), FieldValue::Amount { value, .. } if value == 42.0));
-        assert!(matches!(normalize("7.5%", ValueHint::Any), FieldValue::Percent { value } if value == 7.5));
-        assert!(matches!(normalize("a@b.com", ValueHint::Any), FieldValue::Email { .. }));
-        assert!(matches!(normalize("Jan 15, 2024", ValueHint::Any), FieldValue::Date { .. }));
+        assert!(
+            matches!(normalize("$42.00", ValueHint::Any), FieldValue::Amount { value, .. } if value == 42.0)
+        );
+        assert!(
+            matches!(normalize("7.5%", ValueHint::Any), FieldValue::Percent { value } if value == 7.5)
+        );
+        assert!(matches!(
+            normalize("a@b.com", ValueHint::Any),
+            FieldValue::Email { .. }
+        ));
+        assert!(matches!(
+            normalize("Jan 15, 2024", ValueHint::Any),
+            FieldValue::Date { .. }
+        ));
         // A bare integer is a Number, NOT an amount (no currency/decimal cue).
-        assert!(matches!(normalize("2024", ValueHint::Any), FieldValue::Number { value } if value == 2024.0));
+        assert!(
+            matches!(normalize("2024", ValueHint::Any), FieldValue::Number { value } if value == 2024.0)
+        );
         // Free text stays text.
-        assert!(matches!(normalize("Acme Corporation", ValueHint::Any), FieldValue::Text { .. }));
+        assert!(matches!(
+            normalize("Acme Corporation", ValueHint::Any),
+            FieldValue::Text { .. }
+        ));
     }
 
     #[test]
     fn hint_biases_ambiguous_strings() {
         // "1500" under an Amount field becomes money; under no hint stays Number.
-        assert!(matches!(normalize("1500", ValueHint::Amount), FieldValue::Amount { value, .. } if value == 1500.0));
-        assert!(matches!(normalize("1500", ValueHint::Any), FieldValue::Number { .. }));
+        assert!(
+            matches!(normalize("1500", ValueHint::Amount), FieldValue::Amount { value, .. } if value == 1500.0)
+        );
+        assert!(matches!(
+            normalize("1500", ValueHint::Any),
+            FieldValue::Number { .. }
+        ));
     }
 
     #[test]
     fn phone_requires_phone_shape_unhinted() {
-        assert!(matches!(normalize("+1 (555) 123-4567", ValueHint::Any), FieldValue::Phone { .. }));
+        assert!(matches!(
+            normalize("+1 (555) 123-4567", ValueHint::Any),
+            FieldValue::Phone { .. }
+        ));
         // A bare 10-digit string unhinted is a Number, not a phone.
-        assert!(matches!(normalize("5551234567", ValueHint::Any), FieldValue::Number { .. }));
+        assert!(matches!(
+            normalize("5551234567", ValueHint::Any),
+            FieldValue::Number { .. }
+        ));
         // But with the Phone hint it parses as a phone.
-        assert!(matches!(normalize("5551234567", ValueHint::Phone), FieldValue::Phone { .. }));
+        assert!(matches!(
+            normalize("5551234567", ValueHint::Phone),
+            FieldValue::Phone { .. }
+        ));
     }
 
     #[test]

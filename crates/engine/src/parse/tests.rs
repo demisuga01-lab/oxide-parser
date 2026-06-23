@@ -119,7 +119,10 @@ fn inline_link_survives_to_markdown_and_html() {
         pages: vec![],
     };
     let md = doc.to_markdown(&SerializeOptions::default());
-    assert!(md.contains("[**the site**](https://example.com/a%20b)"), "md: {md}");
+    assert!(
+        md.contains("[**the site**](https://example.com/a%20b)"),
+        "md: {md}"
+    );
     let html = doc.to_html(&SerializeOptions::default());
     assert!(
         html.contains("<a href=\"https://example.com/a b\"><strong>the site</strong></a>"),
@@ -152,7 +155,11 @@ fn page_breaks_marked_when_enabled() {
     let dims = vec![(1, 612.0, 792.0), (2, 612.0, 792.0)];
     let doc = assemble(
         &[b0, b1],
-        DocumentMetadata { page_count: 2, pdf_version: "1.7".into(), ..Default::default() },
+        DocumentMetadata {
+            page_count: 2,
+            pdf_version: "1.7".into(),
+            ..Default::default()
+        },
         SourceInfo::DigitalBorn,
         &dims,
         &[],
@@ -162,23 +169,41 @@ fn page_breaks_marked_when_enabled() {
 
     // Off by default: no marker.
     let plain = doc.to_markdown(&SerializeOptions::default());
-    assert!(!plain.contains("<!-- page 2 -->"), "no marker by default:\n{plain}");
+    assert!(
+        !plain.contains("<!-- page 2 -->"),
+        "no marker by default:\n{plain}"
+    );
 
     // On: a marker between the two pages' blocks.
     let marked = doc.to_markdown(&SerializeOptions {
         mark_page_breaks: true,
         ..Default::default()
     });
-    assert!(marked.contains("<!-- page 2 -->"), "page marker present:\n{marked}");
+    assert!(
+        marked.contains("<!-- page 2 -->"),
+        "page marker present:\n{marked}"
+    );
     let p1 = marked.find("On page one").unwrap();
     let mark = marked.find("<!-- page 2 -->").unwrap();
     let p2 = marked.find("On page two").unwrap();
-    assert!(p1 < mark && mark < p2, "marker sits between pages:\n{marked}");
+    assert!(
+        p1 < mark && mark < p2,
+        "marker sits between pages:\n{marked}"
+    );
 
     // HTML uses an <hr> with data-page.
-    let html = doc.to_html(&SerializeOptions { mark_page_breaks: true, ..Default::default() });
-    assert!(html.contains("<hr class=\"page-break\" data-page=\"2\">"), "html hr:\n{html}");
-    assert!(html.contains("<article>") && html.contains("</article>"), "semantic article wrapper");
+    let html = doc.to_html(&SerializeOptions {
+        mark_page_breaks: true,
+        ..Default::default()
+    });
+    assert!(
+        html.contains("<hr class=\"page-break\" data-page=\"2\">"),
+        "html hr:\n{html}"
+    );
+    assert!(
+        html.contains("<article>") && html.contains("</article>"),
+        "semantic article wrapper"
+    );
 }
 
 #[test]
@@ -186,10 +211,19 @@ fn provenance_annotations_when_enabled() {
     let b = blk(0, 1, 0, ClassifiedType::Paragraph, "Traceable text.");
     let doc = assemble_default(&[b]);
 
-    let md = doc.to_markdown(&SerializeOptions { include_provenance: true, ..Default::default() });
-    assert!(md.contains("<!-- @page=1 bbox="), "md provenance comment:\n{md}");
+    let md = doc.to_markdown(&SerializeOptions {
+        include_provenance: true,
+        ..Default::default()
+    });
+    assert!(
+        md.contains("<!-- @page=1 bbox="),
+        "md provenance comment:\n{md}"
+    );
 
-    let html = doc.to_html(&SerializeOptions { include_provenance: true, ..Default::default() });
+    let html = doc.to_html(&SerializeOptions {
+        include_provenance: true,
+        ..Default::default()
+    });
     assert!(html.contains("data-page=\"1\""), "html data-page:\n{html}");
     assert!(html.contains("data-bbox="), "html data-bbox:\n{html}");
 
@@ -202,7 +236,13 @@ fn provenance_annotations_when_enabled() {
 fn paragraph_lines_flow_into_one_block() {
     // A paragraph whose source text has embedded line breaks must render as one
     // flowing line (newlines collapsed to spaces), not N separate lines.
-    let b = blk(0, 1, 0, ClassifiedType::Paragraph, "first line\nsecond line\nthird line");
+    let b = blk(
+        0,
+        1,
+        0,
+        ClassifiedType::Paragraph,
+        "first line\nsecond line\nthird line",
+    );
     let md = assemble_default(&[b]).to_markdown(&SerializeOptions::default());
     assert!(
         md.contains("first line second line third line"),
@@ -214,13 +254,33 @@ fn paragraph_lines_flow_into_one_block() {
 fn list_renders_ordered_and_unordered() {
     let mut ul = blk(0, 1, 0, ClassifiedType::List { ordered: false }, "");
     ul.items = vec![
-        ListItem { text: "• first".into(), bbox: [0.0; 4], marker: Some("•".into()), ordered: false },
-        ListItem { text: "• second".into(), bbox: [0.0; 4], marker: Some("•".into()), ordered: false },
+        ListItem {
+            text: "• first".into(),
+            bbox: [0.0; 4],
+            marker: Some("•".into()),
+            ordered: false,
+        },
+        ListItem {
+            text: "• second".into(),
+            bbox: [0.0; 4],
+            marker: Some("•".into()),
+            ordered: false,
+        },
     ];
     let mut ol = blk(1, 1, 1, ClassifiedType::List { ordered: true }, "");
     ol.items = vec![
-        ListItem { text: "1. alpha".into(), bbox: [0.0; 4], marker: Some("1.".into()), ordered: true },
-        ListItem { text: "2. beta".into(), bbox: [0.0; 4], marker: Some("2.".into()), ordered: true },
+        ListItem {
+            text: "1. alpha".into(),
+            bbox: [0.0; 4],
+            marker: Some("1.".into()),
+            ordered: true,
+        },
+        ListItem {
+            text: "2. beta".into(),
+            bbox: [0.0; 4],
+            marker: Some("2.".into()),
+            ordered: true,
+        },
     ];
     let md = assemble_default(&[ul, ol]).to_markdown(&SerializeOptions::default());
     assert!(md.contains("- first"), "md: {md}");
@@ -236,10 +296,50 @@ fn list_renders_ordered_and_unordered() {
 
 fn small_table() -> Table {
     let cells = vec![
-        TableCell { row: 0, col: 0, rowspan: 1, colspan: 1, text: "H1".into(), bbox: [0.0; 4], is_header: true, header_scope: None, nested_tables: vec![] },
-        TableCell { row: 0, col: 1, rowspan: 1, colspan: 1, text: "H2".into(), bbox: [0.0; 4], is_header: true, header_scope: None, nested_tables: vec![] },
-        TableCell { row: 1, col: 0, rowspan: 1, colspan: 1, text: "a".into(), bbox: [0.0; 4], is_header: false, header_scope: None, nested_tables: vec![] },
-        TableCell { row: 1, col: 1, rowspan: 1, colspan: 1, text: "b".into(), bbox: [0.0; 4], is_header: false, header_scope: None, nested_tables: vec![] },
+        TableCell {
+            row: 0,
+            col: 0,
+            rowspan: 1,
+            colspan: 1,
+            text: "H1".into(),
+            bbox: [0.0; 4],
+            is_header: true,
+            header_scope: None,
+            nested_tables: vec![],
+        },
+        TableCell {
+            row: 0,
+            col: 1,
+            rowspan: 1,
+            colspan: 1,
+            text: "H2".into(),
+            bbox: [0.0; 4],
+            is_header: true,
+            header_scope: None,
+            nested_tables: vec![],
+        },
+        TableCell {
+            row: 1,
+            col: 0,
+            rowspan: 1,
+            colspan: 1,
+            text: "a".into(),
+            bbox: [0.0; 4],
+            is_header: false,
+            header_scope: None,
+            nested_tables: vec![],
+        },
+        TableCell {
+            row: 1,
+            col: 1,
+            rowspan: 1,
+            colspan: 1,
+            text: "b".into(),
+            bbox: [0.0; 4],
+            is_header: false,
+            header_scope: None,
+            nested_tables: vec![],
+        },
     ];
     Table {
         rows: vec![vec!["H1".into(), "H2".into()], vec!["a".into(), "b".into()]],
@@ -428,7 +528,9 @@ fn dehyphenate_off_by_default_on_in_options() {
     let b = blk(0, 1, 0, ClassifiedType::Paragraph, "frag- mented");
     // default: unchanged
     let plain = assemble_default(std::slice::from_ref(&b));
-    assert!(plain.to_markdown(&SerializeOptions::default()).contains("frag- mented"));
+    assert!(plain
+        .to_markdown(&SerializeOptions::default())
+        .contains("frag- mented"));
     // with option
     let opts = ParseOptions {
         dehyphenate: true,
@@ -450,7 +552,9 @@ fn ligature_normalization_maps_presentation_forms() {
         ..Default::default()
     };
     let doc = assemble_with_opts(&[b], &opts);
-    assert!(doc.to_markdown(&SerializeOptions::default()).contains("final"));
+    assert!(doc
+        .to_markdown(&SerializeOptions::default())
+        .contains("final"));
 }
 
 // ── link attachment ───────────────────────────────────────────────────────────

@@ -185,9 +185,7 @@ fn run_with_timeout(binary: &Path, args: &[String], timeout: Duration) -> Result
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
-            OxideError::UnsupportedFeature(format!(
-                "failed to launch tesseract at {binary:?}: {e}"
-            ))
+            OxideError::UnsupportedFeature(format!("failed to launch tesseract at {binary:?}: {e}"))
         })?;
 
     // Move the pipe handles onto reader threads so neither can block the child.

@@ -280,7 +280,11 @@ fn self_signed_signature_is_valid_but_not_trusted_by_default() {
     // misread as "trusted" — exactly the over-trust this fixes.)
     let engine = ContentEngine::open_bytes(sign_minimal_with_test_signer()).unwrap();
     let r = &engine.verify_signatures().unwrap()[0];
-    assert_eq!(r.validity, SignatureValidity::Valid, "integrity must verify");
+    assert_eq!(
+        r.validity,
+        SignatureValidity::Valid,
+        "integrity must verify"
+    );
     assert_eq!(
         r.trust,
         SignatureTrust::NotVerified,

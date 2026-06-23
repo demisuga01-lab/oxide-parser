@@ -105,9 +105,7 @@ fn one_page(font_resources: &str, content: &[u8]) -> Vec<u8> {
     // Fonts (objects 5+): Helvetica + Helvetica-Bold, both WinAnsi-encoded (so a
     // single 0x95 byte decodes to a bullet, and a name with "Bold" => is_bold).
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
-    b.add(
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
-    );
+    b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
     b.build()
 }
 
@@ -159,7 +157,13 @@ fn dump(model: &DocumentModel) -> String {
 /// `dm7`; see deferrals in the summary.)
 fn title_then_paragraphs() -> Vec<u8> {
     let mut c = String::new();
-    c.push_str(&text("FB", 22.0, 72.0, 750.0, "The Spanning Document Title"));
+    c.push_str(&text(
+        "FB",
+        22.0,
+        72.0,
+        750.0,
+        "The Spanning Document Title",
+    ));
     let paras = [
         [
             "First paragraph opening line of ordinary prose",
@@ -235,9 +239,21 @@ fn figure_with_caption() -> Vec<u8> {
     // Image is a 300x200 box at (72,480); caption "Figure 1: ..." just below it.
     let mut c = String::new();
     c.push_str("q 300 0 0 200 72 480 cm /Im0 Do Q\n");
-    c.push_str(&text("F1", 9.0, 72.0, 462.0, "Figure 1: revenue chart by quarter"));
+    c.push_str(&text(
+        "F1",
+        9.0,
+        72.0,
+        462.0,
+        "Figure 1: revenue chart by quarter",
+    ));
     // Some far-away body text that must NOT be linked as the caption.
-    c.push_str(&text("F1", 10.0, 72.0, 120.0, "Unrelated body text far below the figure region."));
+    c.push_str(&text(
+        "F1",
+        10.0,
+        72.0,
+        120.0,
+        "Unrelated body text far below the figure region.",
+    ));
     b.add_stream("", c.as_bytes());
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
     b.add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
@@ -290,20 +306,32 @@ fn running_header_and_page_numbers() -> Vec<u8> {
 /// contradicts the interleaved stream order, a list, and a figure.
 fn tagged_pdf() -> Vec<u8> {
     let mcid_text = |mcid: i64, tag: &str, x: f64, y: f64, s: &str| -> String {
-        format!("/{tag} <</MCID {mcid}>> BDC\nBT /F1 10 Tf 1 0 0 1 {x:.1} {y:.1} Tm ({s}) Tj ET\nEMC\n")
+        format!(
+            "/{tag} <</MCID {mcid}>> BDC\nBT /F1 10 Tf 1 0 0 1 {x:.1} {y:.1} Tm ({s}) Tj ET\nEMC\n"
+        )
     };
     let mut content = String::new();
     content.push_str(&mcid_text(0, "H1", 72.0, 740.0, "Tagged Document Title"));
     // Stream order: right column emitted before left, but tags author L before R.
-    content.push_str(&mcid_text(1, "P", 320.0, 700.0, "Right column paragraph text"));
-    content.push_str(&mcid_text(2, "P", 72.0, 700.0, "Left column paragraph text"));
+    content.push_str(&mcid_text(
+        1,
+        "P",
+        320.0,
+        700.0,
+        "Right column paragraph text",
+    ));
+    content.push_str(&mcid_text(
+        2,
+        "P",
+        72.0,
+        700.0,
+        "Left column paragraph text",
+    ));
     content.push_str(&mcid_text(3, "Lbl", 90.0, 670.0, "Alpha"));
     content.push_str(&mcid_text(4, "Lbl", 90.0, 655.0, "Beta"));
 
     let mut b = PdfBuilder::new();
-    b.add(
-        "<< /Type /Catalog /Pages 2 0 R /MarkInfo << /Marked true >> /StructTreeRoot 6 0 R >>",
-    );
+    b.add("<< /Type /Catalog /Pages 2 0 R /MarkInfo << /Marked true >> /StructTreeRoot 6 0 R >>");
     b.add("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
     b.add(
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
@@ -410,7 +438,10 @@ fn dm1_title_then_paragraphs_in_top_to_bottom_order() {
         t.classified,
         ClassifiedType::Heading { .. } | ClassifiedType::Title
     ));
-    assert_eq!(block_with(&model, "First paragraph").classified, ClassifiedType::Paragraph);
+    assert_eq!(
+        block_with(&model, "First paragraph").classified,
+        ClassifiedType::Paragraph
+    );
 }
 
 #[test]
@@ -420,7 +451,10 @@ fn dm2_heading_by_font_size_is_labelled_heading() {
 
     let h = block_with(&model, "Introduction Heading");
     assert!(
-        matches!(h.classified, ClassifiedType::Heading { .. } | ClassifiedType::Title),
+        matches!(
+            h.classified,
+            ClassifiedType::Heading { .. } | ClassifiedType::Title
+        ),
         "large bold short line should classify as heading/title, got {:?}:\n{}",
         h.classified,
         dump(&model)
@@ -446,8 +480,16 @@ fn dm3_bulleted_block_becomes_list() {
         .iter()
         .find(|b| matches!(b.classified, ClassifiedType::List { .. }))
         .unwrap_or_else(|| panic!("expected a list block:\n{}", dump(&model)));
-    assert!(matches!(list.classified, ClassifiedType::List { ordered: false }));
-    assert_eq!(list.items.len(), 3, "three bulleted items:\n{}", dump(&model));
+    assert!(matches!(
+        list.classified,
+        ClassifiedType::List { ordered: false }
+    ));
+    assert_eq!(
+        list.items.len(),
+        3,
+        "three bulleted items:\n{}",
+        dump(&model)
+    );
     assert!(list.items.iter().any(|i| i.text.contains("apples")));
     assert!(list.items.iter().any(|i| i.text.contains("milk")));
 }
@@ -468,7 +510,11 @@ fn dm4_image_with_caption_below_is_figure_and_caption_linked() {
         .find(|b| b.classified == ClassifiedType::Caption)
         .unwrap_or_else(|| panic!("expected a caption block:\n{}", dump(&model)));
 
-    assert!(cap.text.contains("Figure 1"), "caption text: {:?}", cap.text);
+    assert!(
+        cap.text.contains("Figure 1"),
+        "caption text: {:?}",
+        cap.text
+    );
     assert_eq!(fig.caption_id, Some(cap.id), "figure links its caption");
     assert_eq!(cap.figure_id, Some(fig.id), "caption links its figure");
 
@@ -547,7 +593,11 @@ fn dm6_rtl_single_column_orders_top_to_bottom_and_preserves_text() {
 fn dm7_tagged_uses_authored_order_and_roles() {
     let engine = ContentEngine::open_bytes(tagged_pdf()).unwrap();
     let model = engine.build_document_model(&[1]).unwrap();
-    assert_eq!(model.source, ModelSource::Tagged, "tagged PDF => tags-first");
+    assert_eq!(
+        model.source,
+        ModelSource::Tagged,
+        "tagged PDF => tags-first"
+    );
 
     // Title is an H1 heading (level 1) or Title.
     let title = block_with(&model, "Tagged Document Title");
@@ -583,7 +633,11 @@ fn dm7_tagged_uses_authored_order_and_roles() {
         .iter()
         .find(|b| b.classified == ClassifiedType::Figure)
         .unwrap_or_else(|| panic!("expected a tagged figure:\n{}", dump(&model)));
-    assert!(fig.text.contains("bar chart"), "figure alt text: {:?}", fig.text);
+    assert!(
+        fig.text.contains("bar chart"),
+        "figure alt text: {:?}",
+        fig.text
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -623,7 +677,10 @@ fn dm9_reading_order_indices_are_a_dense_permutation() {
     let mut idxs: Vec<usize> = model.blocks.iter().map(|b| b.reading_order_index).collect();
     idxs.sort_unstable();
     let expected: Vec<usize> = (0..model.blocks.len()).collect();
-    assert_eq!(idxs, expected, "reading_order_index is a dense 0..n permutation");
+    assert_eq!(
+        idxs, expected,
+        "reading_order_index is a dense 0..n permutation"
+    );
 
     // Every block carries a confidence in [0,1].
     for b in &model.blocks {
@@ -649,6 +706,9 @@ fn dm10_empty_page_yields_empty_model_not_panic() {
 #[test]
 fn dm11_out_of_range_page_errors() {
     let engine = ContentEngine::open_bytes(heading_then_paragraph()).unwrap();
-    assert!(engine.build_document_model(&[2]).is_err(), "page 2 of a 1-page doc errors");
+    assert!(
+        engine.build_document_model(&[2]).is_err(),
+        "page 2 of a 1-page doc errors"
+    );
     assert!(engine.build_document_model(&[0]).is_err(), "page 0 errors");
 }

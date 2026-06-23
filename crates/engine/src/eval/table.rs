@@ -27,7 +27,13 @@ impl GridTable {
 
     /// Cell at `(r, c)`, normalized (trimmed, internal whitespace collapsed).
     fn cell(&self, r: usize, c: usize) -> String {
-        normalize_cell(self.rows.get(r).and_then(|row| row.get(c)).map(String::as_str).unwrap_or(""))
+        normalize_cell(
+            self.rows
+                .get(r)
+                .and_then(|row| row.get(c))
+                .map(String::as_str)
+                .unwrap_or(""),
+        )
     }
 }
 
@@ -45,14 +51,34 @@ pub struct Prf {
 
 impl Prf {
     pub fn from_counts(true_pos: usize, pred: usize, gold: usize) -> Prf {
-        let precision = if pred == 0 { if gold == 0 { 1.0 } else { 0.0 } } else { true_pos as f64 / pred as f64 };
-        let recall = if gold == 0 { if pred == 0 { 1.0 } else { 0.0 } } else { true_pos as f64 / gold as f64 };
+        let precision = if pred == 0 {
+            if gold == 0 {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            true_pos as f64 / pred as f64
+        };
+        let recall = if gold == 0 {
+            if pred == 0 {
+                1.0
+            } else {
+                0.0
+            }
+        } else {
+            true_pos as f64 / gold as f64
+        };
         let f1 = if precision + recall == 0.0 {
             0.0
         } else {
             2.0 * precision * recall / (precision + recall)
         };
-        Prf { precision, recall, f1 }
+        Prf {
+            precision,
+            recall,
+            f1,
+        }
     }
 }
 

@@ -202,13 +202,25 @@ mod tests {
     #[test]
     fn descriptor_bold_pins_wght() {
         let req = VariationRequest::from_descriptor(Some(700.0), None);
-        assert_eq!(req.axes(), &[AxisValue { tag: AXIS_WGHT, value: 700.0 }]);
+        assert_eq!(
+            req.axes(),
+            &[AxisValue {
+                tag: AXIS_WGHT,
+                value: 700.0
+            }]
+        );
     }
 
     #[test]
     fn descriptor_condensed_pins_wdth() {
         let req = VariationRequest::from_descriptor(None, Some("Condensed"));
-        assert_eq!(req.axes(), &[AxisValue { tag: AXIS_WDTH, value: 75.0 }]);
+        assert_eq!(
+            req.axes(),
+            &[AxisValue {
+                tag: AXIS_WDTH,
+                value: 75.0
+            }]
+        );
     }
 
     #[test]
@@ -217,8 +229,14 @@ mod tests {
         assert_eq!(
             req.axes(),
             &[
-                AxisValue { tag: AXIS_WGHT, value: 800.0 },
-                AxisValue { tag: AXIS_WDTH, value: 87.5 },
+                AxisValue {
+                    tag: AXIS_WGHT,
+                    value: 800.0
+                },
+                AxisValue {
+                    tag: AXIS_WDTH,
+                    value: 87.5
+                },
             ]
         );
     }
@@ -240,7 +258,13 @@ mod tests {
         let req = VariationRequest::none()
             .with_axis(AXIS_WGHT, 300.0)
             .with_axis(AXIS_WGHT, 700.0);
-        assert_eq!(req.axes(), &[AxisValue { tag: AXIS_WGHT, value: 700.0 }]);
+        assert_eq!(
+            req.axes(),
+            &[AxisValue {
+                tag: AXIS_WGHT,
+                value: 700.0
+            }]
+        );
     }
 
     #[test]

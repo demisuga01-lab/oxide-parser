@@ -130,8 +130,16 @@ pub fn score(input: &ScoreInput) -> ScoreOutput {
             let mut f1_sum = 0.0;
             let mut teds_sum = 0.0;
             for i in 0..n {
-                let rt = r.get(i).cloned().map(GridTable::new).unwrap_or_else(|| GridTable::new(vec![]));
-                let ht = h.get(i).cloned().map(GridTable::new).unwrap_or_else(|| GridTable::new(vec![]));
+                let rt = r
+                    .get(i)
+                    .cloned()
+                    .map(GridTable::new)
+                    .unwrap_or_else(|| GridTable::new(vec![]));
+                let ht = h
+                    .get(i)
+                    .cloned()
+                    .map(GridTable::new)
+                    .unwrap_or_else(|| GridTable::new(vec![]));
                 f1_sum += cell_f1(&rt, &ht).f1;
                 teds_sum += teds_approx(&rt, &ht);
             }
@@ -177,7 +185,10 @@ mod tests {
         let out = score(&input);
         assert_eq!(out.cer, Some(0.0));
         assert_eq!(out.char_accuracy, Some(1.0));
-        assert!(out.reading_order.is_none(), "no order input → no order score");
+        assert!(
+            out.reading_order.is_none(),
+            "no order input → no order score"
+        );
     }
 
     #[test]
@@ -189,8 +200,14 @@ mod tests {
             hyp_order: Some(vec!["a".into(), "b".into()]),
             ref_tables: Some(vec![vec![vec!["A".into(), "B".into()]]]),
             hyp_tables: Some(vec![vec![vec!["A".into(), "B".into()]]]),
-            ref_fields: Some(vec![KvPair { key: "total".into(), value: "486".into() }]),
-            hyp_fields: Some(vec![KvPair { key: "total".into(), value: "486".into() }]),
+            ref_fields: Some(vec![KvPair {
+                key: "total".into(),
+                value: "486".into(),
+            }]),
+            hyp_fields: Some(vec![KvPair {
+                key: "total".into(),
+                value: "486".into(),
+            }]),
             ref_block_types: Some(vec!["heading".into()]),
             hyp_block_types: Some(vec!["heading".into()]),
         };
