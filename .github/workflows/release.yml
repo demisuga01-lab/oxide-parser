@@ -51,7 +51,21 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run workspace tests
-        run: cargo test --workspace --locked
+        shell: bash
+        run: |
+          mkdir -p target/ci-logs
+          set +e
+          cargo test --workspace --locked 2>&1 | tee target/ci-logs/cargo-test.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            message="$(tail -n 80 target/ci-logs/cargo-test.log)"
+            message="${message//'%'/'%25'}"
+            message="${message//$'\r'/'%0D'}"
+            message="${message//$'\n'/'%0A'}"
+            echo "::error title=cargo test failed::$message"
+            exit "$status"
+          fi
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
