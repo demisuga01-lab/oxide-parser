@@ -149,7 +149,11 @@ fn table_field(label: &str, raw_value: &str, page: u32, bbox: [f64; 4], block_co
     let raw = raw_value.trim().to_string();
     let hint = hint_for_label(&key);
     let value = normalize(&raw, hint);
-    let label_clarity = if label.trim_end().ends_with(':') { 1.0 } else { 0.85 };
+    let label_clarity = if label.trim_end().ends_with(':') {
+        1.0
+    } else {
+        0.85
+    };
     let pattern_match = match (&value, hint) {
         (crate::extract::FieldValue::Text { .. }, ValueHint::Any) => 0.9,
         (crate::extract::FieldValue::Text { .. }, _) => 0.6,
@@ -175,16 +179,18 @@ fn collect_frags(doc: &Document) -> Vec<Frag> {
         let Some(text) = block_text(b) else {
             continue;
         };
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            continue;
+        for line in text.lines() {
+            let text = line.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            frags.push(Frag {
+                text,
+                page: b.page,
+                bbox: b.bbox,
+                confidence: b.confidence,
+            });
         }
-        frags.push(Frag {
-            text,
-            page: b.page,
-            bbox: b.bbox,
-            confidence: b.confidence,
-        });
     }
     frags
 }
@@ -236,14 +242,56 @@ fn split_inline_label_value(s: &str) -> Option<(String, String)> {
 
 /// A short label lexicon of phrases that act as labels even without a colon.
 const LABEL_LEXICON: &[&str] = &[
-    "total", "subtotal", "tax", "amount due", "amount", "balance", "balance due",
-    "invoice number", "invoice no", "invoice #", "invoice", "inv no", "inv #",
-    "date", "invoice date", "due date", "order number", "order no", "order #",
-    "po number", "po #", "purchase order", "bill to", "ship to", "sold to",
-    "vendor", "customer", "account number", "account no", "reference", "ref",
-    "quantity", "qty", "unit price", "price", "description", "phone", "email",
-    "name", "address", "merchant", "store", "receipt number", "receipt no",
-    "payment", "discount", "shipping", "grand total", "net", "gross",
+    "total",
+    "subtotal",
+    "tax",
+    "amount due",
+    "amount",
+    "balance",
+    "balance due",
+    "invoice number",
+    "invoice no",
+    "invoice #",
+    "invoice",
+    "inv no",
+    "inv #",
+    "date",
+    "invoice date",
+    "due date",
+    "order number",
+    "order no",
+    "order #",
+    "po number",
+    "po #",
+    "purchase order",
+    "bill to",
+    "ship to",
+    "sold to",
+    "vendor",
+    "customer",
+    "account number",
+    "account no",
+    "reference",
+    "ref",
+    "quantity",
+    "qty",
+    "unit price",
+    "price",
+    "description",
+    "phone",
+    "email",
+    "name",
+    "address",
+    "merchant",
+    "store",
+    "receipt number",
+    "receipt no",
+    "payment",
+    "discount",
+    "shipping",
+    "grand total",
+    "net",
+    "gross",
 ];
 
 /// Is this text a *label*? Either it ends with a colon (after a short-ish run),
@@ -329,7 +377,13 @@ fn consider(best: &mut Option<(usize, GeoKind, f64)>, j: usize, kind: GeoKind, c
 
 /// Build a [`Field`] from a label fragment, a value string, and the geometry of
 /// the value's home fragment.
-fn make_field(label: &str, raw_value: &str, label_frag: &Frag, value_frag: &Frag, kind: GeoKind) -> Field {
+fn make_field(
+    label: &str,
+    raw_value: &str,
+    label_frag: &Frag,
+    value_frag: &Frag,
+    kind: GeoKind,
+) -> Field {
     let key = strip_label(label);
     let raw = raw_value.trim().to_string();
     let hint = hint_for_label(&key);
@@ -337,7 +391,11 @@ fn make_field(label: &str, raw_value: &str, label_frag: &Frag, value_frag: &Frag
 
     // Confidence = label clarity × geometric strength × pattern match, scaled by
     // the value block's own (e.g. OCR) confidence.
-    let label_clarity = if label.trim_end().ends_with(':') { 1.0 } else { 0.8 };
+    let label_clarity = if label.trim_end().ends_with(':') {
+        1.0
+    } else {
+        0.8
+    };
     let pattern_match = match (&value, hint) {
         (crate::extract::FieldValue::Text { .. }, ValueHint::Any) => 0.9, // text where text is fine
         (crate::extract::FieldValue::Text { .. }, _) => 0.6, // expected a type, got text
@@ -398,7 +456,9 @@ mod tests {
         assert!(is_label_text("Total:"));
         assert!(is_label_text("Invoice Number:"));
         assert!(is_label_text("Total")); // lexicon
-        assert!(!is_label_text("This is a long sentence of body prose, not a label"));
+        assert!(!is_label_text(
+            "This is a long sentence of body prose, not a label"
+        ));
         assert!(!is_label_text(""));
     }
 

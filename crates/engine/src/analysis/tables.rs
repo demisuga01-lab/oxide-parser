@@ -779,7 +779,7 @@ pub fn detect_borderless(chunks: &[TextChunk]) -> Vec<Table> {
         .map(|c| c.yc)
         .fold(f64::INFINITY, f64::min);
 
-    vec![finalize_table(
+    let table = finalize_table(
         TableSource::Borderless,
         confidence,
         [x0, y_bot, x1, y_top],
@@ -787,7 +787,309 @@ pub fn detect_borderless(chunks: &[TextChunk]) -> Vec<Table> {
         n_cols,
         cells,
         vec!["borderless rowspans are not inferred; clear colspans only".to_string()],
-    )]
+    );
+    vec![isolate_borderless_region(table)]
+}
+
+fn isolate_borderless_region(table: Table) -> Table {
+    if let Some((start, end)) = line_item_row_range(&table.rows) {
+        return rebuild_region_table(
+            &table,
+            start,
+            end,
+            "line-item region isolated from borderless grid",
+        );
+    }
+    if let Some((start, end)) = repeating_grid_row_range(&table.rows) {
+        if start > 0 || end < table.rows.len() {
+            return rebuild_region_table(
+                &table,
+                start,
+                end,
+                "repeating grid region isolated from surrounding text",
+            );
+        }
+    }
+    table
+}
+
+fn line_item_row_range(rows: &[Vec<String>]) -> Option<(usize, usize)> {
+    let header = rows.iter().position(|row| row_has_line_item_header(row))?;
+    let mut end = header + 1;
+    for (idx, row) in rows.iter().enumerate().skip(header + 1) {
+        let non_empty = non_empty_count(row);
+        if non_empty == 0 || row_is_totals(row) {
+            break;
+        }
+        if non_empty >= 2 {
+            end = idx + 1;
+        } else if end > header + 1 {
+            break;
+        }
+    }
+    (end >= header + 2).then_some((header, end))
+}
+
+fn repeating_grid_row_range(rows: &[Vec<String>]) -> Option<(usize, usize)> {
+    let mut best = (0usize, 0usize);
+    let mut cur_start: Option<usize> = None;
+    for (idx, row) in rows.iter().enumerate() {
+        if non_empty_count(row) >= 2 {
+            cur_start.get_or_insert(idx);
+        } else if let Some(start) = cur_start.take() {
+            if idx - start > best.1 - best.0 {
+                best = (start, idx);
+            }
+        }
+    }
+    if let Some(start) = cur_start {
+        if rows.len() - start > best.1 - best.0 {
+            best = (start, rows.len());
+        }
+    }
+    (best.1 >= best.0 + 2).then_some(best)
+}
+
+fn row_has_line_item_header(row: &[String]) -> bool {
+    let cells: Vec<String> = row.iter().map(|cell| norm_cell(cell)).collect();
+    let has_desc = cells.iter().any(|c| {
+        contains_word(c, "description")
+            || contains_word(c, "item")
+            || contains_word(c, "product")
+            || contains_word(c, "service")
+    });
+    let has_qty = cells
+        .iter()
+        .any(|c| contains_word(c, "qty") || contains_word(c, "quantity"));
+    let has_price = cells.iter().any(|c| {
+        c.contains("unit price")
+            || contains_word(c, "price")
+            || contains_word(c, "rate")
+            || contains_word(c, "amount")
+            || contains_word(c, "total")
+    });
+    has_desc && (has_qty || has_price)
+}
+
+fn row_is_totals(row: &[String]) -> bool {
+    let non_empty = non_empty_count(row);
+    non_empty <= 2
+        && row.iter().any(|cell| {
+            let n = norm_cell(cell).trim_end_matches(':').trim().to_string();
+            matches!(
+                n.as_str(),
+                "subtotal"
+                    | "sub total"
+                    | "tax"
+                    | "vat"
+                    | "gst"
+                    | "total"
+                    | "amount due"
+                    | "balance due"
+                    | "grand total"
+                    | "discount"
+                    | "shipping"
+            )
+        })
+}
+
+fn non_empty_count(row: &[String]) -> usize {
+    row.iter().filter(|cell| !cell.trim().is_empty()).count()
+}
+
+fn contains_word(text: &str, needle: &str) -> bool {
+    text.split_whitespace().any(|part| part == needle) || text.contains(needle)
+}
+
+fn norm_cell(cell: &str) -> String {
+    cell.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn rebuild_region_table(source: &Table, start: usize, end: usize, note: &str) -> Table {
+    let raw_rows: Vec<Vec<String>> = source.rows[start..end].to_vec();
+    let kept_cols = non_empty_columns(&raw_rows);
+    let bbox = region_bbox(source, start, end, &kept_cols);
+    let mut rows = project_columns(&raw_rows, &kept_cols);
+    rows = expand_qty_unit_price_column(rows);
+    rows = merge_unit_price_columns(rows);
+    build_grid_table(source.source, source.confidence.min(0.98), bbox, rows, note)
+}
+
+fn non_empty_columns(rows: &[Vec<String>]) -> Vec<usize> {
+    let n_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    (0..n_cols)
+        .filter(|&col| {
+            rows.iter()
+                .any(|row| row.get(col).map(|s| !s.trim().is_empty()).unwrap_or(false))
+        })
+        .collect()
+}
+
+fn project_columns(rows: &[Vec<String>], cols: &[usize]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| {
+            cols.iter()
+                .map(|&col| row.get(col).cloned().unwrap_or_default())
+                .collect()
+        })
+        .collect()
+}
+
+fn expand_qty_unit_price_column(mut rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let Some(col) = rows[0].iter().position(|cell| {
+        let n = norm_cell(cell);
+        n.contains("qty unit price") || n.contains("quantity unit price")
+    }) else {
+        return rows;
+    };
+
+    for (idx, row) in rows.iter_mut().enumerate() {
+        let original = row.get(col).cloned().unwrap_or_default();
+        let (left, right) = if idx == 0 {
+            ("Qty".to_string(), "Unit Price".to_string())
+        } else {
+            split_quantity_price(&original)
+        };
+        row[col] = left;
+        row.insert(col + 1, right);
+    }
+    rows
+}
+
+fn split_quantity_price(value: &str) -> (String, String) {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() >= 2 {
+        (parts[0].to_string(), parts[1..].join(" "))
+    } else {
+        (value.trim().to_string(), String::new())
+    }
+}
+
+fn merge_unit_price_columns(mut rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    if rows.is_empty() {
+        return rows;
+    }
+    let mut col = 0usize;
+    while col + 1 < rows[0].len() {
+        let left = norm_cell(&rows[0][col]);
+        let right = norm_cell(&rows[0][col + 1]);
+        if left == "unit" && right == "price" {
+            for row in &mut rows {
+                let merged = join_cell([row[col].clone(), row[col + 1].clone()].into_iter());
+                row[col] = merged;
+                row.remove(col + 1);
+            }
+        } else {
+            col += 1;
+        }
+    }
+    rows
+}
+
+fn region_bbox(source: &Table, start: usize, end: usize, cols: &[usize]) -> [f64; 4] {
+    let mut x0 = f64::INFINITY;
+    let mut y0 = f64::INFINITY;
+    let mut x1 = f64::NEG_INFINITY;
+    let mut y1 = f64::NEG_INFINITY;
+    for cell in &source.cells {
+        let row_overlap = cell.row < end && cell.row + cell.rowspan > start;
+        let col_overlap = cols
+            .iter()
+            .any(|&col| col >= cell.col && col < cell.col + cell.colspan);
+        if row_overlap && col_overlap {
+            x0 = x0.min(cell.bbox[0]);
+            y0 = y0.min(cell.bbox[1]);
+            x1 = x1.max(cell.bbox[2]);
+            y1 = y1.max(cell.bbox[3]);
+        }
+    }
+    if x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite() {
+        [x0, y0, x1, y1]
+    } else {
+        source.bbox
+    }
+}
+
+fn build_grid_table(
+    source: TableSource,
+    confidence: f64,
+    bbox: [f64; 4],
+    rows: Vec<Vec<String>>,
+    note: &str,
+) -> Table {
+    let n_rows = rows.len();
+    let n_cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if n_rows == 0 || n_cols == 0 {
+        return finalize_table(
+            source,
+            confidence,
+            bbox,
+            n_rows,
+            n_cols,
+            Vec::new(),
+            vec![note.to_string()],
+        );
+    }
+
+    let col_w = (bbox[2] - bbox[0]).max(0.0) / n_cols as f64;
+    let row_h = (bbox[3] - bbox[1]).max(0.0) / n_rows as f64;
+    let mut cells = Vec::new();
+    for row in 0..n_rows {
+        for col in 0..n_cols {
+            let text = rows
+                .get(row)
+                .and_then(|r| r.get(col))
+                .cloned()
+                .unwrap_or_default();
+            let x0 = bbox[0] + col as f64 * col_w;
+            let x1 = if col + 1 == n_cols {
+                bbox[2]
+            } else {
+                x0 + col_w
+            };
+            let y1 = bbox[3] - row as f64 * row_h;
+            let y0 = if row + 1 == n_rows {
+                bbox[1]
+            } else {
+                y1 - row_h
+            };
+            cells.push(TableCell {
+                row,
+                col,
+                rowspan: 1,
+                colspan: 1,
+                text,
+                bbox: [x0, y0, x1, y1],
+                is_header: false,
+                header_scope: None,
+                nested_tables: Vec::new(),
+            });
+        }
+    }
+    detect_geometric_headers(&mut cells, n_rows, n_cols);
+    finalize_table(
+        source,
+        confidence,
+        bbox,
+        n_rows,
+        n_cols,
+        cells,
+        vec![note.to_string()],
+    )
 }
 
 #[derive(Clone)]
@@ -1419,6 +1721,75 @@ mod tests {
         assert_eq!(tables[0].source, TableSource::Ruled);
     }
 
+    #[test]
+    fn borderless_invoice_grid_isolates_line_items() {
+        let rows = vec![
+            vec!["Acme".into(), "".into(), "".into(), "".into()],
+            vec![
+                "Invoice Number:".into(),
+                "INV-1".into(),
+                "".into(),
+                "".into(),
+            ],
+            vec![
+                "Description".into(),
+                "Qty".into(),
+                "Unit Price".into(),
+                "Amount".into(),
+            ],
+            vec![
+                "Widget assembly".into(),
+                "10".into(),
+                "$25.00".into(),
+                "$250.00".into(),
+            ],
+            vec![
+                "Premium gizmo".into(),
+                "2".into(),
+                "$100.00".into(),
+                "$200.00".into(),
+            ],
+            vec!["".into(), "".into(), "Subtotal:".into(), "$450.00".into()],
+        ];
+        let table = build_grid_table(
+            TableSource::Borderless,
+            0.9,
+            [0.0, 0.0, 400.0, 600.0],
+            rows,
+            "test grid",
+        );
+        let isolated = isolate_borderless_region(table);
+        assert_eq!(
+            isolated.rows,
+            vec![
+                vec!["Description", "Qty", "Unit Price", "Amount"],
+                vec!["Widget assembly", "10", "$25.00", "$250.00"],
+                vec!["Premium gizmo", "2", "$100.00", "$200.00"],
+            ]
+        );
+        assert!(isolated.notes.iter().any(|n| n.contains("line-item")));
+    }
+
+    #[test]
+    fn borderless_title_row_is_removed_from_repeating_grid() {
+        let rows = vec![
+            vec!["Measurements".into(), "".into(), "".into()],
+            vec!["City".into(), "Temp".into(), "Humidity".into()],
+            vec!["Paris".into(), "21".into(), "55%".into()],
+            vec!["Tokyo".into(), "28".into(), "70%".into()],
+        ];
+        let table = build_grid_table(
+            TableSource::Borderless,
+            0.9,
+            [0.0, 0.0, 300.0, 400.0],
+            rows,
+            "test grid",
+        );
+        let isolated = isolate_borderless_region(table);
+        assert_eq!(isolated.rows[0], vec!["City", "Temp", "Humidity"]);
+        assert_eq!(isolated.num_rows(), 3);
+        assert!(isolated.notes.iter().any(|n| n.contains("repeating grid")));
+    }
     #[test]
     fn semantic_rows_mark_th_cells_as_headers() {
         let table = Table::from_semantic_rows(vec![

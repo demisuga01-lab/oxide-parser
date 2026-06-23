@@ -27,7 +27,9 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use serde::Serialize;
 
-use crate::analysis::graphics::{collect_graphics_with_images, DrawnGraphics, ImagePlacement, Rect, Segment};
+use crate::analysis::graphics::{
+    collect_graphics_with_images, DrawnGraphics, ImagePlacement, Rect, Segment,
+};
 use crate::analysis::layout::{BBox, LayoutBlock, LayoutConfig, LayoutLine};
 use crate::analysis::tables::{detect_tables, Table, TableSource};
 use crate::engine::ContentEngine;
@@ -59,7 +61,14 @@ const K_BELOW: f64 = 1.6; // caption-below gap, * line_h
 const K_ABOVE: f64 = 1.2; // caption-above gap, * line_h
 
 const BOLD_TOKENS: &[&str] = &[
-    "bold", "black", "heavy", "semibold", "demibold", "extrabold", "ultrabold", "medium",
+    "bold",
+    "black",
+    "heavy",
+    "semibold",
+    "demibold",
+    "extrabold",
+    "ultrabold",
+    "medium",
 ];
 const ITALIC_TOKENS: &[&str] = &["italic", "oblique"];
 
@@ -312,9 +321,13 @@ pub enum ModelSource {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClassifiedType {
     Title,
-    Heading { level: u8 },
+    Heading {
+        level: u8,
+    },
     Paragraph,
-    List { ordered: bool },
+    List {
+        ordered: bool,
+    },
     ListItem,
     Figure,
     Caption,
@@ -523,8 +536,7 @@ fn assign_columns(nodes: &mut [OrderNode], line_height: f64) {
             n.column = ColumnAssign::Column(0); // single column: nothing spans
             continue;
         }
-        let spans_by_width =
-            n.bbox.width().total_cmp(&(1.5 * single_col_w)) == Ordering::Greater;
+        let spans_by_width = n.bbox.width().total_cmp(&(1.5 * single_col_w)) == Ordering::Greater;
         // A band is "hit" only if the node's x-range overlaps the band's x-extent
         // by a meaningful amount (≥ 25% of a column width). A column block that
         // merely touches its neighbour's edge does NOT count — that near-touch is
@@ -617,7 +629,11 @@ fn order_key(n: &OrderNode, rtl: bool) -> OrderKey {
         ColumnAssign::Column(c) if rtl => -(c as f64), // RTL: rightmost band first
         ColumnAssign::Column(c) => c as f64,
     };
-    (OrderedF64(band_rank), OrderedF64(-top(&n.bbox)), n.original_index)
+    (
+        OrderedF64(band_rank),
+        OrderedF64(-top(&n.bbox)),
+        n.original_index,
+    )
 }
 
 /// Reading order of `nodes`: build the precedence graph, then Kahn-sort it.
@@ -849,7 +865,10 @@ fn is_enumerator_token(t: &str) -> bool {
     }
     // roman numeral (lower or upper, not mixed)
     let lower = t.to_ascii_lowercase();
-    if lower.chars().all(|c| matches!(c, 'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm')) {
+    if lower
+        .chars()
+        .all(|c| matches!(c, 'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'))
+    {
         let all_upper = t.chars().all(|c| c.is_ascii_uppercase());
         let all_lower = t.chars().all(|c| c.is_ascii_lowercase());
         return all_upper || all_lower;
@@ -1021,7 +1040,10 @@ struct BlockFeatures {
 }
 
 fn ends_sentence(t: &str) -> bool {
-    matches!(t.trim_end().chars().last(), Some('.') | Some('!') | Some('?') | Some(':'))
+    matches!(
+        t.trim_end().chars().last(),
+        Some('.') | Some('!') | Some('?') | Some(':')
+    )
 }
 
 fn score_heading(f: &BlockFeatures, doc: &DocStats) -> (f64, Vec<String>) {
@@ -1180,8 +1202,7 @@ fn chunks_to_lines(chunks: &[TextChunk], line_h: f64) -> Vec<SegLine> {
     items.sort_by(|a, b| {
         let ay = a.y + a.font_size.max(1.0) / 2.0;
         let by = b.y + b.font_size.max(1.0) / 2.0;
-        by.total_cmp(&ay)
-            .then(a.x.total_cmp(&b.x))
+        by.total_cmp(&ay).then(a.x.total_cmp(&b.x))
     });
     let tol = 0.6 * line_h;
     let mut groups: Vec<Vec<&TextChunk>> = Vec::new();
@@ -1200,7 +1221,10 @@ fn chunks_to_lines(chunks: &[TextChunk], line_h: f64) -> Vec<SegLine> {
             groups.push(vec![c]);
         }
     }
-    groups.into_iter().map(|g| build_seg_line(g, line_h)).collect()
+    groups
+        .into_iter()
+        .map(|g| build_seg_line(g, line_h))
+        .collect()
 }
 
 fn build_seg_line(mut chunks: Vec<&TextChunk>, line_h: f64) -> SegLine {
@@ -1555,11 +1579,7 @@ fn components_to_boxes(boxes: &[BBox], dsu: &mut Dsu, n: usize) -> Vec<BBox> {
             .or_insert(b);
     }
     let mut out: Vec<BBox> = by_root.into_values().collect();
-    out.sort_by(|a, b| {
-        (-top(a))
-            .total_cmp(&-top(b))
-            .then(a.x0.total_cmp(&b.x0))
-    });
+    out.sort_by(|a, b| (-top(a)).total_cmp(&-top(b)).then(a.x0.total_cmp(&b.x0)));
     out
 }
 
@@ -1861,7 +1881,9 @@ fn build_geometric(engine: &ContentEngine, page_list: &[usize]) -> Result<Docume
         // here, and swap page width/height for the quarter turns, so everything
         // downstream (segmentation, tables, ordering) sees an upright page.
         let rotate = engine.page_rotation(page).unwrap_or(0);
-        let crop = engine.page_crop_box(page).unwrap_or([0.0, 0.0, raw_w, raw_h]);
+        let crop = engine
+            .page_crop_box(page)
+            .unwrap_or([0.0, 0.0, raw_w, raw_h]);
         let (page_width, page_height) = if rotate == 90 || rotate == 270 {
             (raw_h, raw_w)
         } else {
@@ -1902,14 +1924,27 @@ pub(crate) fn page_data_from_chunks(
     page_width: f64,
     page_height: f64,
 ) -> PageData {
-    let all_tables = detect_tables(chunks, graphics);
-    let line_h = page_line_height(chunks);
+    page_data_from_layout_and_table_chunks(page, chunks, chunks, graphics, page_width, page_height)
+}
+
+/// Build one page's [`PageData`] when layout/prose segmentation and table
+/// structure should use different granularities. OCR uses line chunks for
+/// stable prose blocks, but cell-run chunks for scanned table reconstruction.
+pub(crate) fn page_data_from_layout_and_table_chunks(
+    page: usize,
+    layout_chunks: &[TextChunk],
+    table_chunks: &[TextChunk],
+    graphics: &DrawnGraphics,
+    page_width: f64,
+    page_height: f64,
+) -> PageData {
+    let all_tables = detect_tables(table_chunks, graphics);
+    let line_h = page_line_height(layout_chunks);
 
     // docmodel-local fine segmentation (the analyzer's analyze_page is left intact;
     // it collapses tight columns into giant blocks, which the classifier and
-    // precedence graph can't work with — see module docs).
-    let (seg_blocks, page_is_rtl, ncols) = segment_page(chunks, line_h);
-
+    // precedence graph can't work with - see module docs).
+    let (seg_blocks, page_is_rtl, ncols) = segment_page(layout_chunks, line_h);
     // Step 0: drop blocks ~contained in a detected table (the table carries
     // that text as structured cells). Keep blocks and their column tags in
     // lockstep.
@@ -1927,10 +1962,10 @@ pub(crate) fn page_data_from_chunks(
     }
 
     // Re-associate chunks to kept blocks for bold/italic features.
-    let (block_bold, block_italic) = block_font_flags(&kept_blocks, chunks);
+    let (block_bold, block_italic) = block_font_flags(&kept_blocks, layout_chunks);
 
     let page_area = (page_width * page_height).max(1.0);
-    let figures = build_figures(graphics, chunks, &table_boxes, line_h, page_area);
+    let figures = build_figures(graphics, layout_chunks, &table_boxes, line_h, page_area);
 
     PageData {
         page,
@@ -2330,7 +2365,11 @@ fn features_for(
     } else {
         1.0
     };
-    let last_text = block.lines.last().map(|l| l.text.clone()).unwrap_or_default();
+    let last_text = block
+        .lines
+        .last()
+        .map(|l| l.text.clone())
+        .unwrap_or_default();
     BlockFeatures {
         font_size: block.font_size,
         size_ratio: block.font_size / doc.body_size.max(1.0),
@@ -2352,9 +2391,7 @@ fn link_captions(blocks: &mut [DocBlock], line_h: f64) {
     let fig_indices: Vec<usize> = blocks
         .iter()
         .enumerate()
-        .filter(|(_, b)| {
-            matches!(b.classified, ClassifiedType::Figure | ClassifiedType::Table)
-        })
+        .filter(|(_, b)| matches!(b.classified, ClassifiedType::Figure | ClassifiedType::Table))
         .map(|(i, _)| i)
         .collect();
     let mut claimed = vec![false; blocks.len()];
@@ -2371,9 +2408,7 @@ fn link_captions(blocks: &mut [DocBlock], line_h: f64) {
             }
             if !matches!(
                 cand.classified,
-                ClassifiedType::Paragraph
-                    | ClassifiedType::Text
-                    | ClassifiedType::Heading { .. }
+                ClassifiedType::Paragraph | ClassifiedType::Text | ClassifiedType::Heading { .. }
             ) {
                 continue;
             }
@@ -2838,7 +2873,11 @@ pub fn render_markdown(model: &DocumentModel) -> String {
                 }
             }
             ClassifiedType::Header | ClassifiedType::Footer => {
-                out.push_str(&format!("<!-- {}: {} -->\n", running_label(b), b.text.trim()));
+                out.push_str(&format!(
+                    "<!-- {}: {} -->\n",
+                    running_label(b),
+                    b.text.trim()
+                ));
             }
             ClassifiedType::PageNumber => {
                 out.push_str(&format!("<!-- page-number: {} -->\n", b.text.trim()));
@@ -2861,7 +2900,12 @@ fn strip_list_marker(text: &str) -> String {
     // Drop a leading bullet/enumerator token for cleaner markdown.
     let t = text.trim_start();
     if is_bullet_marker(t) {
-        return t.chars().skip(1).collect::<String>().trim_start().to_string();
+        return t
+            .chars()
+            .skip(1)
+            .collect::<String>()
+            .trim_start()
+            .to_string();
     }
     if enum_marker(t).is_some() {
         if let Some(pos) = t.find(['.', ')', ']']) {

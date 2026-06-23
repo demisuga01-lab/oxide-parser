@@ -212,65 +212,64 @@ def main():
       "Python runtime (~20 ms) + PyMuPDF import (~125 ms); no torch/ML stack at all "
       "(Docling needs one). The pure-Rust embeddability story is real.\n")
     w("- **Reading order**: perfect (1.0) on the multi-column report where a naive "
-      "top-to-bottom dump interleaves columns — the structure-aware payoff.\n")
+      "top-to-bottom dump interleaves columns; the structure-aware payoff.\n")
     w("- **Clean digital tables**: cell-F1 1.0 / TEDS 1.0 (ties PyMuPDF) and higher "
       "text accuracy than `pdftotext` on the table page.\n")
-    w("- **Key-value extraction**: field-F1 1.0 on the digital invoice; a capability "
-      "PyMuPDF/Poppler simply do not have. Receipt 0.75 (honest partial).\n")
+    w("- **Scanned table grids and invoice line items**: the OCR path now rebuilds "
+      "the scanned table grid and isolates the invoice line-item table at cell-F1 "
+      "1.0 on this corpus.\n")
+    w("- **Key-value extraction**: field-F1 1.0 on the digital invoice, 0.857 on "
+      "the scanned invoice, and 0.800 on the receipt; a capability PyMuPDF/Poppler "
+      "simply do not have.\n")
     w("- **OCR path is source-agnostic**: Oxide recovers text (0.94 char-acc) and "
       "fields from **scanned** pages where PyMuPDF/Poppler score 0 (no OCR).\n")
     w("- **Structural ops**: qpdf cross-validates Oxide's split output; page counts "
-      "agree — qpdf-class integrity.\n")
+      "agree; qpdf-class integrity.\n")
     w("\n**Ties**\n")
     w("- Clean digital text accuracy is near-parity with PyMuPDF (both ~0.99 on the "
       "paper); clean-table cell-F1 ties at 1.0.\n")
     w("\n**Trails**\n")
-    w("- **OCR'd table → grid reconstruction**: an OCR'd scanned table recovers its "
-      "*text* but not a clean cell grid (cell-F1 0) — the OCR path emits prose "
-      "blocks, not a detected `Table`, lacking ruling-line graphics. Recorded below.\n")
-    w("- **Scanned KV**: invoice fields drop to F1 0.4 on the OCR'd scan (OCR noise "
-      "+ line-merge) vs 1.0 digital — expected; Docling's ML layout would likely do "
-      "better on messy scans.\n")
+    w("- **Hard messy real-world scans**: the synthetic scanned table and scanned "
+      "invoice gaps are closed in this corpus, but warped, noisy, handwritten, or "
+      "exotic real-world scans remain the area where Docling-style ML layout models "
+      "are expected to lead.\n")
     w("- **Per-call CLI latency** vs PyMuPDF's in-process call (process-spawn "
       "overhead), and the breadth of Docling's model-based understanding on exotic "
-      "layouts (**not measured locally** — Docling not installed).\n")
-    w("- **Docling head-to-head not run locally** — the most direct 'Docling-class' "
+      "layouts (**not measured locally**; Docling not installed).\n")
+    w("- **Docling head-to-head not run locally**: the most direct Docling-class "
       "Markdown/structure comparison is pending an environment with Docling "
       "installed; published Docling results are strong on messy real-world scans.\n")
 
     # Weakness punch list.
-    w("## Recorded weaknesses (punch list — NOT fixed here)\n")
-    w("Measurement only; these are follow-up items, not changes made in this work:\n")
-    w("1. **OCR'd tables don't reconstruct as grids** (`tables_scanned` cell-F1 = "
-      "0). The OCR path should run table detection on OCR'd word boxes "
-      "(alignment-based borderless detection) so scanned tables become `Table` "
-      "blocks.\n")
-    w("2. **Invoice line-item table not isolated** (`invoice`/`invoice_scanned` "
-      "cell-F1 = 0): Oxide's borderless detector groups the *whole* invoice page "
-      "(header fields + line items + totals) into one 12×6 grid rather than "
-      "isolating the 3×4 line-item sub-table the label expects. The KV path *does* "
-      "recover the line items correctly (field-F1 1.0 digital); the standalone "
-      "table-grid view over-segments. Consider line-item-region isolation so "
-      "`extract-tables` returns the item table alone.\n")
-    w("3. **Scanned KV recall** (`invoice_scanned` field-F1 0.4): single-line "
-      "`label: value` pairs are lost when OCR merges lines; consider OCR-aware "
-      "field pairing or per-word (not per-line) spatial pairing on scans.\n")
+    w("## Recorded weaknesses / remaining gaps\n")
+    w("The prompt-targeted synthetic scan gaps are now closed in this corpus; these "
+      "are the remaining follow-up items:\n")
+    w("1. **Broader messy-scan coverage**: warped, low-contrast, handwritten, "
+      "multi-table, and camera-captured invoices still need a larger corpus before "
+      "claiming Docling-class scan robustness. No optional ML hook was added here; "
+      "the core remains pure Rust plus optional OCR.\n")
+    w("2. **Scanned KV value normalization**: `invoice_scanned` field-F1 is 0.857 "
+      "because OCR reads `Globex Corporation` as `Globex Corperation`; geometry now "
+      "finds the pair, but lexical OCR substitutions still affect exact scoring.\n")
+    w("3. **Scanned structure labels**: block-type structure accuracy on scanned "
+      "paper/table pages remains weak because OCR prose blocks do not yet receive "
+      "the same semantic labels as tagged digital content.\n")
     w("4. **Figure-heavy pages**: Oxide's figure/alt emission lowers raw text "
-      "char-accuracy vs a plain dump on the `figure` doc — revisit how figure "
+      "char-accuracy vs a plain dump on the `figure` doc; revisit how figure "
       "placeholder text is counted / emitted for RAG.\n")
-    w("5. **Receipt fields** (F1 0.75): merchant/payment lines pair imperfectly; "
-      "tune the receipt profile's label synonyms.\n")
-    w("6. **Docling not benchmarked locally** — stand up a Docling environment for "
+    w("5. **Receipt fields** (F1 0.800): merchant/payment lines remain imperfect; "
+      "tune the receipt profile against more receipts before calling it complete.\n")
+    w("6. **Docling not benchmarked locally**: stand up a Docling environment for "
       "the direct structured-Markdown comparison.\n")
 
     w("\n## Bottom line\n")
-    w("On the axes Oxide is built for — **digital-born structure + reading order, "
+    w("On the axes Oxide is built for - **digital-born structure + reading order, "
       "clean-table extraction, key-value fields, structural ops, and pure-Rust "
-      "deployment/speed/footprint** — Oxide is **competitive-or-better** vs "
+      "deployment/speed/footprint** - Oxide is **competitive-or-better** vs "
       "PyMuPDF/Poppler/qpdf in this corpus, and uniquely offers KV + OCR + RAG "
-      "chunking in one static binary. It **trails** on messy-scan table/KV "
-      "reconstruction (where Docling's ML is expected to lead) and that gap, plus "
-      "the un-run Docling head-to-head, is recorded honestly above.\n")
+      "chunking in one static binary. The benchmark-named synthetic scanned "
+      "table/KV gaps are now substantially closed, while hardest real-world messy "
+      "scans and the un-run Docling head-to-head remain recorded honestly above.\n")
 
     os.makedirs(os.path.dirname(DOC), exist_ok=True)
     with open(DOC, "w", encoding="utf-8") as f:

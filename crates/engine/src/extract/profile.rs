@@ -38,7 +38,13 @@ pub static INVOICE: FieldProfile = FieldProfile {
     fields: &[
         ProfileField {
             key: "invoice_number",
-            labels: &["invoice number", "invoice no", "invoice #", "inv no", "inv #", "invoice"],
+            labels: &[
+                "invoice number",
+                "invoice no",
+                "invoice #",
+                "inv no",
+                "inv #",
+            ],
             hint: ValueHint::Any,
         },
         ProfileField {
@@ -53,7 +59,13 @@ pub static INVOICE: FieldProfile = FieldProfile {
         },
         ProfileField {
             key: "po_number",
-            labels: &["po number", "po #", "purchase order", "order number", "order no"],
+            labels: &[
+                "po number",
+                "po #",
+                "purchase order",
+                "order number",
+                "order no",
+            ],
             hint: ValueHint::Any,
         },
         ProfileField {
@@ -78,7 +90,13 @@ pub static INVOICE: FieldProfile = FieldProfile {
         },
         ProfileField {
             key: "total",
-            labels: &["total", "amount due", "balance due", "grand total", "total due"],
+            labels: &[
+                "total",
+                "amount due",
+                "balance due",
+                "grand total",
+                "total due",
+            ],
             hint: ValueHint::Amount,
         },
     ],
@@ -262,21 +280,81 @@ pub fn apply_profile(profile: &FieldProfile, spatial: Vec<Field>) -> (Vec<Field>
     let leftovers: Vec<Field> = spatial
         .into_iter()
         .zip(used)
-        .filter_map(|(f, u)| (!u).then_some(f))
+        .filter_map(|(f, u)| {
+            if u || duplicates_canonical_field(&f, &canonical) {
+                None
+            } else {
+                Some(f)
+            }
+        })
         .collect();
     (canonical, leftovers)
+}
+
+fn duplicates_canonical_field(field: &Field, canonical: &[Field]) -> bool {
+    canonical.iter().any(|existing| {
+        label_matches(&field.key, &existing.key) && field.raw.eq_ignore_ascii_case(&existing.raw)
+    })
 }
 
 /// Does a found label key match a profile synonym? Exact (case-insensitive) or
 /// the key contains the synonym as a whole phrase (so "Total Due" matches
 /// "total due", and "Invoice No." matches "invoice no").
 fn label_matches(found_key: &str, synonym: &str) -> bool {
-    let fk = found_key.trim_end_matches('.').trim();
-    fk == synonym || fk.contains(synonym)
+    let fk = normalize_label(found_key);
+    let syn = normalize_label(synonym);
+    if fk == syn {
+        return true;
+    }
+    if phrase_contains(&fk, &syn) {
+        return true;
+    }
+    if fk.split_whitespace().count() == syn.split_whitespace().count() {
+        let dist = edit_distance(&fk, &syn);
+        let limit = (syn.len() / 6).max(1);
+        return dist <= limit;
+    }
+    false
 }
 
-// ── line items: table → structured rows ─────────────────────────────────────
+fn phrase_contains(found: &str, synonym: &str) -> bool {
+    let padded_found = format!(" {found} ");
+    let padded_syn = format!(" {synonym} ");
+    padded_found.contains(&padded_syn)
+}
 
+fn normalize_label(label: &str) -> String {
+    label
+        .trim_end_matches('.')
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let ac: Vec<char> = a.chars().collect();
+    let bc: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=bc.len()).collect();
+    let mut cur = vec![0usize; bc.len() + 1];
+    for (i, ca) in ac.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in bc.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[bc.len()]
+}
 /// Find the line-item table (the largest multi-row table on the doc) and map its
 /// columns to structured [`LineItem`]s by matching header names. Returns an
 /// empty vec when no suitable table exists.
@@ -310,8 +388,16 @@ fn pick_line_item_table(doc: &Document) -> Option<&Table> {
 /// names the item columns. Returns `None` if no row looks like an item header.
 fn find_header_row(table: &Table) -> Option<usize> {
     table.rows.iter().position(|row| {
-        let has_desc = find_col(row, &["description", "item", "details", "product", "service"]).is_some();
-        let has_metric = find_col(row, &["qty", "quantity", "price", "amount", "rate", "total"]).is_some();
+        let has_desc = find_col(
+            row,
+            &["description", "item", "details", "product", "service"],
+        )
+        .is_some();
+        let has_metric = find_col(
+            row,
+            &["qty", "quantity", "price", "amount", "rate", "total"],
+        )
+        .is_some();
         has_desc && has_metric
     })
 }
@@ -325,7 +411,10 @@ fn map_table_rows(table: &Table) -> Vec<LineItem> {
         return Vec::new();
     };
     let header = &table.rows[hdr];
-    let desc_c = find_col(header, &["description", "item", "details", "product", "service"]);
+    let desc_c = find_col(
+        header,
+        &["description", "item", "details", "product", "service"],
+    );
     let qty_c = find_col(header, &["qty", "quantity", "units", "hours"]);
     let unit_c = find_col(header, &["unit price", "price", "rate", "unit cost"]);
     let amt_c = find_col(header, &["amount", "total", "line total", "ext"]);
@@ -368,8 +457,17 @@ fn is_totals_word(s: &str) -> bool {
     let l = s.trim().to_ascii_lowercase();
     matches!(
         l.as_str(),
-        "subtotal" | "sub total" | "total" | "tax" | "vat" | "gst" | "amount due" | "balance"
-            | "grand total" | "discount" | "shipping"
+        "subtotal"
+            | "sub total"
+            | "total"
+            | "tax"
+            | "vat"
+            | "gst"
+            | "amount due"
+            | "balance"
+            | "grand total"
+            | "discount"
+            | "shipping"
     )
 }
 
@@ -407,6 +505,8 @@ mod tests {
         assert!(label_matches("total", "total"));
         assert!(label_matches("grand total", "total"));
         assert!(!label_matches("subtotal note", "total due"));
+        assert!(label_matches("inveice number", "invoice number"));
+        assert!(!label_matches("invoice date", "invoice number"));
     }
 
     #[test]

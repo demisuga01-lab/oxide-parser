@@ -261,10 +261,20 @@ pub struct ListEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BlockKind {
-    Title { text: InlineText },
-    Heading { level: u8, text: InlineText },
-    Paragraph { text: InlineText },
-    List { ordered: bool, items: Vec<ListEntry> },
+    Title {
+        text: InlineText,
+    },
+    Heading {
+        level: u8,
+        text: InlineText,
+    },
+    Paragraph {
+        text: InlineText,
+    },
+    List {
+        ordered: bool,
+        items: Vec<ListEntry>,
+    },
     Figure {
         #[serde(skip_serializing_if = "Option::is_none")]
         alt: Option<String>,
@@ -283,11 +293,19 @@ pub enum BlockKind {
         #[serde(skip_serializing_if = "Option::is_none")]
         caption: Option<usize>,
     },
-    Header { text: InlineText },
-    Footer { text: InlineText },
-    PageNumber { text: InlineText },
+    Header {
+        text: InlineText,
+    },
+    Footer {
+        text: InlineText,
+    },
+    PageNumber {
+        text: InlineText,
+    },
     /// Honest low-confidence fallback (better than a wrong label).
-    Text { text: InlineText },
+    Text {
+        text: InlineText,
+    },
 }
 
 impl BlockKind {
@@ -453,11 +471,7 @@ impl From<ModelSource> for SourceInfo {
 /// `ocr_recovered` is `true` when at least one scanned page yielded non-empty
 /// OCR text, so the label reflects what actually happened rather than merely
 /// that an engine was configured.
-fn rollup_source(
-    tagged: bool,
-    classes: &[PageClassification],
-    ocr_recovered: bool,
-) -> SourceInfo {
+fn rollup_source(tagged: bool, classes: &[PageClassification], ocr_recovered: bool) -> SourceInfo {
     if tagged {
         return SourceInfo::Tagged;
     }
@@ -606,9 +620,7 @@ pub fn parse(engine: &ContentEngine, options: &ParseOptions) -> Result<Document>
         }
         if let Ok(page_links) = engine.page_links(page) {
             let rotate = engine.page_rotation(page).unwrap_or(0);
-            let crop = engine
-                .page_crop_box(page)
-                .unwrap_or([0.0, 0.0, 0.0, 0.0]);
+            let crop = engine.page_crop_box(page).unwrap_or([0.0, 0.0, 0.0, 0.0]);
             let (pw, ph) = engine.page_dimensions(page).unwrap_or((0.0, 0.0));
             for (rect, uri) in page_links {
                 let rect = rotate_rect_for_links(rect, rotate, crop, pw, ph);
@@ -622,13 +634,7 @@ pub fn parse(engine: &ContentEngine, options: &ParseOptions) -> Result<Document>
     }
 
     Ok(assemble(
-        &blocks,
-        metadata,
-        source,
-        &page_dims,
-        &classes,
-        &links,
-        options,
+        &blocks, metadata, source, &page_dims, &classes, &links, options,
     ))
 }
 
@@ -764,32 +770,36 @@ fn ocr_page_blocks(
     // PDF user space and emit a synthetic positioned chunk.
     let img_w = clean.width as f64;
     let img_h = clean.height as f64;
-    let word_chunks: Vec<crate::text::TextChunk> = ocr_page
+    let layout_word_chunks: Vec<crate::text::TextChunk> = ocr_page
         .words
         .iter()
         .filter(|w| !w.text.trim().is_empty())
-        .map(|w| ocr_word_to_chunk(w, skew_deg, img_w, img_h, &viewport))
+        .map(|w| ocr_word_to_chunk(w, skew_deg, img_w, img_h, &viewport, true))
+        .collect();
+    let table_word_chunks: Vec<crate::text::TextChunk> = ocr_page
+        .words
+        .iter()
+        .filter(|w| !w.text.trim().is_empty())
+        .map(|w| ocr_word_to_chunk(w, skew_deg, img_w, img_h, &viewport, false))
         .collect();
 
-    // No words recovered → let the caller fall back to a placeholder.
-    if word_chunks.is_empty() {
+    // No words recovered -> let the caller fall back to a placeholder.
+    if layout_word_chunks.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Merge per-word chunks into per-LINE chunks. Digital-born text arrives as
-    // text-show runs (whole phrases/lines), and the downstream segmenter, table
-    // detector, and classifier are tuned for that granularity; feeding raw
-    // single words would make ordinary prose look like an aligned grid (a
-    // spurious borderless table). Pairing each OCR word with the engine's line
-    // grouping recovers the same coarse, line-level chunks the digital path sees.
+    // Merge per-word chunks into per-LINE chunks for prose/layout, while keeping
+    // a separate cell-run view split at large column gaps for table detection.
+    // That preserves the original anti-false-positive behavior for prose and
+    // still gives OCR'd tables word-box geometry instead of whole-row lines.
     let line_ids: Vec<Option<u32>> = ocr_page
         .words
         .iter()
         .filter(|w| !w.text.trim().is_empty())
         .map(|w| w.line_id)
         .collect();
-    let chunks = merge_ocr_words_into_lines(&word_chunks, &line_ids);
-
+    let chunks = merge_ocr_words_into_lines(&layout_word_chunks, &line_ids);
+    let table_chunks = merge_ocr_words_into_cell_runs(&table_word_chunks, &line_ids);
     // Page dims in the upright space the chunks now live in (the viewport already
     // accounts for display rotation, so width/height here are post-rotation).
     let page_width = viewport.width_px as f64 / viewport.scale;
@@ -797,9 +807,15 @@ fn ocr_page_blocks(
 
     // Feed the synthetic chunks through the SAME page assembly the digital-born
     // path uses — no OCR-specific layout/table/semantic code.
-    let graphics = crate::analysis::graphics::DrawnGraphics::default();
-    let page_data =
-        crate::docmodel::page_data_from_chunks(page, &chunks, &graphics, page_width, page_height);
+    let graphics = detect_ocr_ruling_graphics(&clean, &viewport);
+    let page_data = crate::docmodel::page_data_from_layout_and_table_chunks(
+        page,
+        &chunks,
+        &table_chunks,
+        &graphics,
+        page_width,
+        page_height,
+    );
     let model = crate::docmodel::assemble_pages_data(vec![page_data], 1)?;
 
     // Re-key the model's block ids onto the document-wide id space and carry the
@@ -892,6 +908,7 @@ fn ocr_word_to_chunk(
     img_w: f64,
     img_h: f64,
     viewport: &crate::render::Viewport,
+    undo_deskew: bool,
 ) -> crate::text::TextChunk {
     // Word box corners in preprocessed-image pixels (y-down).
     let [x0, y0, x1, y1] = w.bbox;
@@ -900,7 +917,7 @@ fn ocr_word_to_chunk(
     // *content* by `skew_deg`; to recover original-render pixel positions we
     // rotate the points by `-skew_deg`.
     let unrotate = |px: f64, py: f64| -> (f64, f64) {
-        if skew_deg.abs() <= 0.05 {
+        if !undo_deskew || skew_deg.abs() <= 0.05 {
             return (px, py);
         }
         let a = (-skew_deg).to_radians();
@@ -936,13 +953,13 @@ fn ocr_word_to_chunk(
     let height = (pmaxy - pminy).abs();
     let is_rtl = crate::text::collector::is_rtl_dominant(&w.text);
 
-    // TextChunk uses (x, y) = top-left baseline-ish anchor with width along x and
-    // font_size as the glyph height. The downstream measures box area as
-    // width * font_size and groups by y, so y = the box top (max user-y).
+    // TextChunk uses (x, y) as a lower-left baseline-ish anchor with width along
+    // x and font_size as the glyph height. Downstream code groups by
+    // y + font_size / 2, so y must be the lower box edge in user space.
     crate::text::TextChunk {
         text: w.text.clone(),
         x: pminx,
-        y: pmaxy,
+        y: pminy,
         font_size: height.max(1.0),
         font_name: "OCR".to_string(),
         width: width.max(0.0),
@@ -1030,7 +1047,10 @@ fn merge_ocr_words_into_lines(
             .iter()
             .map(|&i| words[i].x + words[i].width)
             .fold(f64::NEG_INFINITY, f64::max);
-        let y = g.iter().map(|&i| words[i].y).fold(f64::NEG_INFINITY, f64::max);
+        let y = g
+            .iter()
+            .map(|&i| words[i].y)
+            .fold(f64::NEG_INFINITY, f64::max);
         let mut hs: Vec<f64> = g.iter().map(|&i| words[i].font_size).collect();
         hs.sort_by(|a, b| a.total_cmp(b));
         let font_size = hs[hs.len() / 2].max(1.0);
@@ -1055,6 +1075,204 @@ fn merge_ocr_words_into_lines(
     lines
 }
 
+/// Merge OCR words into table-oriented cell runs. Words on the same OCR line
+/// stay together until a large horizontal gap appears; ordinary prose remains a
+/// single run, while table rows split into column-like cells.
+fn merge_ocr_words_into_cell_runs(
+    words: &[crate::text::TextChunk],
+    line_ids: &[Option<u32>],
+) -> Vec<crate::text::TextChunk> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    let groups = group_ocr_words_by_line(words, line_ids);
+    let mut runs = Vec::new();
+
+    for mut group in groups {
+        if group.is_empty() {
+            continue;
+        }
+        group.sort_by(|&a, &b| words[a].x.total_cmp(&words[b].x));
+        let mut heights: Vec<f64> = group.iter().map(|&i| words[i].font_size.max(1.0)).collect();
+        heights.sort_by(|a, b| a.total_cmp(b));
+        let line_h = heights[heights.len() / 2].max(1.0);
+        let gap_cut = (line_h * 2.2).max(8.0);
+
+        let mut current: Vec<usize> = Vec::new();
+        let mut prev_right: Option<f64> = None;
+        for idx in group {
+            let word = &words[idx];
+            let gap = prev_right.map(|r| word.x - r).unwrap_or(0.0);
+            if !current.is_empty() && gap > gap_cut {
+                runs.push(build_ocr_run(words, &current));
+                current.clear();
+            }
+            prev_right = Some(word.x + word.width.max(0.0));
+            current.push(idx);
+        }
+        if !current.is_empty() {
+            runs.push(build_ocr_run(words, &current));
+        }
+    }
+
+    runs
+}
+
+fn group_ocr_words_by_line(
+    words: &[crate::text::TextChunk],
+    line_ids: &[Option<u32>],
+) -> Vec<Vec<usize>> {
+    let have_ids = line_ids.iter().all(|l| l.is_some()) && line_ids.len() == words.len();
+    if have_ids {
+        use std::collections::BTreeMap;
+        let mut by_id: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (i, lid) in line_ids.iter().enumerate() {
+            by_id.entry(lid.unwrap()).or_default().push(i);
+        }
+        return by_id.into_values().collect();
+    }
+
+    let mut heights: Vec<f64> = words.iter().map(|w| w.font_size.max(1.0)).collect();
+    heights.sort_by(|a, b| a.total_cmp(b));
+    let tol = heights[heights.len() / 2].max(1.0) * 0.6;
+    let mut idx: Vec<usize> = (0..words.len()).collect();
+    idx.sort_by(|&a, &b| words[b].y.total_cmp(&words[a].y));
+
+    let mut groups = Vec::new();
+    let mut cur = Vec::new();
+    let mut cur_y = f64::NAN;
+    for i in idx {
+        if cur.is_empty() || (words[i].y - cur_y).abs() <= tol {
+            if cur.is_empty() {
+                cur_y = words[i].y;
+            }
+            cur.push(i);
+        } else {
+            groups.push(std::mem::take(&mut cur));
+            cur_y = words[i].y;
+            cur.push(i);
+        }
+    }
+    if !cur.is_empty() {
+        groups.push(cur);
+    }
+    groups
+}
+
+fn build_ocr_run(words: &[crate::text::TextChunk], idxs: &[usize]) -> crate::text::TextChunk {
+    let rtl = idxs.iter().filter(|&&i| words[i].is_rtl).count() * 2 > idxs.len();
+    let x0 = idxs
+        .iter()
+        .map(|&i| words[i].x)
+        .fold(f64::INFINITY, f64::min);
+    let x1 = idxs
+        .iter()
+        .map(|&i| words[i].x + words[i].width.max(0.0))
+        .fold(f64::NEG_INFINITY, f64::max);
+    let y = idxs
+        .iter()
+        .map(|&i| words[i].y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let mut heights: Vec<f64> = idxs.iter().map(|&i| words[i].font_size.max(1.0)).collect();
+    heights.sort_by(|a, b| a.total_cmp(b));
+    let font_size = heights[heights.len() / 2].max(1.0);
+    let mut ordered = idxs.to_vec();
+    ordered.sort_by(|&a, &b| words[a].x.total_cmp(&words[b].x));
+    if rtl {
+        ordered.reverse();
+    }
+    let text = ordered
+        .iter()
+        .map(|&i| words[i].text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    crate::text::TextChunk {
+        text,
+        x: x0,
+        y,
+        font_size,
+        font_name: "OCR".to_string(),
+        width: (x1 - x0).max(0.0),
+        is_rtl: rtl,
+        is_vertical: false,
+        is_invisible: false,
+    }
+}
+
+/// Recover long horizontal/vertical ruling lines directly from the preprocessed
+/// scan image. Text glyph strokes are short broken runs; table borders produce
+/// long continuous dark runs, which are mapped back to the same user-space
+/// geometry consumed by the existing ruled-table detector.
+fn detect_ocr_ruling_graphics(
+    img: &OcrImage,
+    viewport: &crate::render::Viewport,
+) -> crate::analysis::graphics::DrawnGraphics {
+    use crate::analysis::graphics::{DrawnGraphics, Segment};
+
+    let mut graphics = DrawnGraphics::default();
+    if !img.is_valid() {
+        return graphics;
+    }
+
+    let w = img.width as i32;
+    let h = img.height as i32;
+    let min_h_run = ((w as usize) / 20).max(40);
+    let min_v_run = ((h as usize) / 35).max(40);
+
+    for y in 0..h {
+        let mut x = 0;
+        while x < w {
+            while x < w && img.get(x as i64, y as i64) >= 128 {
+                x += 1;
+            }
+            let start = x;
+            while x < w && img.get(x as i64, y as i64) < 128 {
+                x += 1;
+            }
+            let end = x;
+            if (end - start) as usize >= min_h_run {
+                let (ux0, uy0) = viewport.pixel_to_page(start, y);
+                let (ux1, uy1) = viewport.pixel_to_page(end - 1, y);
+                let y_avg = (uy0 + uy1) * 0.5;
+                graphics.segments.push(Segment {
+                    x0: ux0.min(ux1),
+                    y0: y_avg,
+                    x1: ux0.max(ux1),
+                    y1: y_avg,
+                });
+            }
+        }
+    }
+
+    for x in 0..w {
+        let mut y = 0;
+        while y < h {
+            while y < h && img.get(x as i64, y as i64) >= 128 {
+                y += 1;
+            }
+            let start = y;
+            while y < h && img.get(x as i64, y as i64) < 128 {
+                y += 1;
+            }
+            let end = y;
+            if (end - start) as usize >= min_v_run {
+                let (ux0, uy0) = viewport.pixel_to_page(x, start);
+                let (ux1, uy1) = viewport.pixel_to_page(x, end - 1);
+                let x_avg = (ux0 + ux1) * 0.5;
+                graphics.segments.push(Segment {
+                    x0: x_avg,
+                    y0: uy0.min(uy1),
+                    x1: x_avg,
+                    y1: uy0.max(uy1),
+                });
+            }
+        }
+    }
+
+    graphics
+}
 /// Assemble a [`Document`] from the flat block list + metadata + page geometry +
 /// per-page classifications. Split out so it is unit-testable without a PDF.
 /// `classes` may be empty (no routing run) — pages then default to
@@ -1384,7 +1602,12 @@ fn strip_marker(text: &str) -> String {
             '\u{2022}' | '\u{25E6}' | '\u{2023}' | '\u{00B7}' | '\u{2043}' | '\u{2219}'
             | '\u{2013}' | '\u{2014}' | '-' | '*',
         ) if t.chars().nth(1).map(char::is_whitespace).unwrap_or(false) => {
-            return t.chars().skip(1).collect::<String>().trim_start().to_string();
+            return t
+                .chars()
+                .skip(1)
+                .collect::<String>()
+                .trim_start()
+                .to_string();
         }
         _ => {}
     }
@@ -1393,9 +1616,7 @@ fn strip_marker(text: &str) -> String {
         let head = &t[..pos];
         if pos <= 7
             && !head.is_empty()
-            && head
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric())
+            && head.chars().all(|c| c.is_ascii_alphanumeric())
             && t[pos + 1..].starts_with(char::is_whitespace)
         {
             return t[pos + 1..].trim_start().to_string();
@@ -1415,8 +1636,8 @@ fn is_false(b: &bool) -> bool {
 
 mod serialize;
 
-pub use serialize::SerializeOptions;
 pub(crate) use serialize::serialize_block_markdown;
+pub use serialize::SerializeOptions;
 
 impl Document {
     /// The full faithful model as pretty JSON (the lossless format).

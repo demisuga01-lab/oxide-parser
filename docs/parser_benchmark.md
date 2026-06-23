@@ -42,7 +42,7 @@ Character accuracy = `1 − CER` (edit distance / reference chars); reading orde
 | paper_scanned | scanned | 0.942 | 0.000 | 0.000 | 1.000 |
 | report_multicol | digital | 0.605 | 0.669 | 0.596 | 1.000 |
 | tables | digital | 1.000 | 0.877 | 0.088 | 1.000 |
-| tables_scanned | scanned | 0.632 | 0.000 | 0.000 | 1.000 |
+| tables_scanned | scanned | 0.649 | 0.000 | 0.000 | 1.000 |
 
 ## Tables (cell-F1 / TEDS)
 
@@ -50,10 +50,10 @@ Cell-F1 = correct cells (right text, right row/col); TEDS ≈ tree-edit-distance
 
 | Document | Mode | Oxide cell-F1 | Oxide TEDS | PyMuPDF cell-F1 | PyMuPDF TEDS |
 | --- | --- | --- | --- | --- | --- |
-| invoice | digital | 0.000 | 0.000 | 0.000 | 0.000 |
-| invoice_scanned | scanned | 0.000 | 0.000 | 0.000 | 0.000 |
+| invoice | digital | 1.000 | 1.000 | 0.000 | 0.000 |
+| invoice_scanned | scanned | 1.000 | 1.000 | 0.000 | 0.000 |
 | tables | digital | 1.000 | 1.000 | 1.000 | 1.000 |
-| tables_scanned | scanned | 0.000 | 0.000 | 0.000 | 0.000 |
+| tables_scanned | scanned | 1.000 | 1.000 | 0.000 | 0.000 |
 
 ## Key-value / field extraction (field-F1)
 
@@ -62,8 +62,8 @@ SROIE/FUNSD-style field-F1 with normalized values (dates as ISO, amounts as deci
 | Document | Mode | Oxide F1 | Precision | Recall |
 | --- | --- | --- | --- | --- |
 | invoice | digital | 1.000 | 1.000 | 1.000 |
-| invoice_scanned | scanned | 0.400 | 0.375 | 0.429 |
-| receipt | digital | 0.750 | 1.000 | 0.600 |
+| invoice_scanned | scanned | 0.857 | 0.857 | 0.857 |
+| receipt | digital | 0.800 | 0.800 | 0.800 |
 
 ## Block-type / structure accuracy (Oxide)
 
@@ -95,16 +95,16 @@ qpdf **validates Oxide's output** (split parts pass `qpdf --check`) and page cou
 
 | Metric | Oxide | Python + PyMuPDF |
 | --- | --- | --- |
-| Process startup | 6.9 ms | 139.1 ms (interpreter + import) |
+| Process startup | 6.5 ms | 138.3 ms (interpreter + import) |
 | Distribution | single 12.7 MB static binary, no runtime | Python runtime + C-extension wheels |
 
 Per-call text-extraction time (mean over digital docs):
 
 | Tool | Mean ms/doc |
 | --- | --- |
-| `oxide_text` | 31.3 |
-| `pymupdf_text` | 10.8 |
-| `pdftotext_text` | 150.2 |
+| `oxide_text` | 17.3 |
+| `pymupdf_text` | 11.1 |
+| `pdftotext_text` | 38.6 |
 
 > Note: Oxide's per-call time includes **process spawn** (CLI); PyMuPDF runs in-process. For many-small-doc throughput PyMuPDF's in-process call is faster, but Oxide wins decisively on **startup, deployment footprint, and no-runtime embeddability** (single static binary vs a Python+native stack; Docling adds a multi-GB torch stack on top).
 
@@ -114,15 +114,17 @@ Per-call text-extraction time (mean over digital docs):
 
 - **Deployment & startup**: single ~12 MB static binary, ~5 ms startup vs a Python runtime (~20 ms) + PyMuPDF import (~125 ms); no torch/ML stack at all (Docling needs one). The pure-Rust embeddability story is real.
 
-- **Reading order**: perfect (1.0) on the multi-column report where a naive top-to-bottom dump interleaves columns — the structure-aware payoff.
+- **Reading order**: perfect (1.0) on the multi-column report where a naive top-to-bottom dump interleaves columns; the structure-aware payoff.
 
 - **Clean digital tables**: cell-F1 1.0 / TEDS 1.0 (ties PyMuPDF) and higher text accuracy than `pdftotext` on the table page.
 
-- **Key-value extraction**: field-F1 1.0 on the digital invoice; a capability PyMuPDF/Poppler simply do not have. Receipt 0.75 (honest partial).
+- **Scanned table grids and invoice line items**: the OCR path now rebuilds the scanned table grid and isolates the invoice line-item table at cell-F1 1.0 on this corpus.
+
+- **Key-value extraction**: field-F1 1.0 on the digital invoice, 0.857 on the scanned invoice, and 0.800 on the receipt; a capability PyMuPDF/Poppler simply do not have.
 
 - **OCR path is source-agnostic**: Oxide recovers text (0.94 char-acc) and fields from **scanned** pages where PyMuPDF/Poppler score 0 (no OCR).
 
-- **Structural ops**: qpdf cross-validates Oxide's split output; page counts agree — qpdf-class integrity.
+- **Structural ops**: qpdf cross-validates Oxide's split output; page counts agree; qpdf-class integrity.
 
 
 **Ties**
@@ -132,31 +134,29 @@ Per-call text-extraction time (mean over digital docs):
 
 **Trails**
 
-- **OCR'd table → grid reconstruction**: an OCR'd scanned table recovers its *text* but not a clean cell grid (cell-F1 0) — the OCR path emits prose blocks, not a detected `Table`, lacking ruling-line graphics. Recorded below.
+- **Hard messy real-world scans**: the synthetic scanned table and scanned invoice gaps are closed in this corpus, but warped, noisy, handwritten, or exotic real-world scans remain the area where Docling-style ML layout models are expected to lead.
 
-- **Scanned KV**: invoice fields drop to F1 0.4 on the OCR'd scan (OCR noise + line-merge) vs 1.0 digital — expected; Docling's ML layout would likely do better on messy scans.
+- **Per-call CLI latency** vs PyMuPDF's in-process call (process-spawn overhead), and the breadth of Docling's model-based understanding on exotic layouts (**not measured locally**; Docling not installed).
 
-- **Per-call CLI latency** vs PyMuPDF's in-process call (process-spawn overhead), and the breadth of Docling's model-based understanding on exotic layouts (**not measured locally** — Docling not installed).
+- **Docling head-to-head not run locally**: the most direct Docling-class Markdown/structure comparison is pending an environment with Docling installed; published Docling results are strong on messy real-world scans.
 
-- **Docling head-to-head not run locally** — the most direct 'Docling-class' Markdown/structure comparison is pending an environment with Docling installed; published Docling results are strong on messy real-world scans.
+## Recorded weaknesses / remaining gaps
 
-## Recorded weaknesses (punch list — NOT fixed here)
+The prompt-targeted synthetic scan gaps are now closed in this corpus; these are the remaining follow-up items:
 
-Measurement only; these are follow-up items, not changes made in this work:
+1. **Broader messy-scan coverage**: warped, low-contrast, handwritten, multi-table, and camera-captured invoices still need a larger corpus before claiming Docling-class scan robustness. No optional ML hook was added here; the core remains pure Rust plus optional OCR.
 
-1. **OCR'd tables don't reconstruct as grids** (`tables_scanned` cell-F1 = 0). The OCR path should run table detection on OCR'd word boxes (alignment-based borderless detection) so scanned tables become `Table` blocks.
+2. **Scanned KV value normalization**: `invoice_scanned` field-F1 is 0.857 because OCR reads `Globex Corporation` as `Globex Corperation`; geometry now finds the pair, but lexical OCR substitutions still affect exact scoring.
 
-2. **Invoice line-item table not isolated** (`invoice`/`invoice_scanned` cell-F1 = 0): Oxide's borderless detector groups the *whole* invoice page (header fields + line items + totals) into one 12×6 grid rather than isolating the 3×4 line-item sub-table the label expects. The KV path *does* recover the line items correctly (field-F1 1.0 digital); the standalone table-grid view over-segments. Consider line-item-region isolation so `extract-tables` returns the item table alone.
+3. **Scanned structure labels**: block-type structure accuracy on scanned paper/table pages remains weak because OCR prose blocks do not yet receive the same semantic labels as tagged digital content.
 
-3. **Scanned KV recall** (`invoice_scanned` field-F1 0.4): single-line `label: value` pairs are lost when OCR merges lines; consider OCR-aware field pairing or per-word (not per-line) spatial pairing on scans.
+4. **Figure-heavy pages**: Oxide's figure/alt emission lowers raw text char-accuracy vs a plain dump on the `figure` doc; revisit how figure placeholder text is counted / emitted for RAG.
 
-4. **Figure-heavy pages**: Oxide's figure/alt emission lowers raw text char-accuracy vs a plain dump on the `figure` doc — revisit how figure placeholder text is counted / emitted for RAG.
+5. **Receipt fields** (F1 0.800): merchant/payment lines remain imperfect; tune the receipt profile against more receipts before calling it complete.
 
-5. **Receipt fields** (F1 0.75): merchant/payment lines pair imperfectly; tune the receipt profile's label synonyms.
-
-6. **Docling not benchmarked locally** — stand up a Docling environment for the direct structured-Markdown comparison.
+6. **Docling not benchmarked locally**: stand up a Docling environment for the direct structured-Markdown comparison.
 
 
 ## Bottom line
 
-On the axes Oxide is built for — **digital-born structure + reading order, clean-table extraction, key-value fields, structural ops, and pure-Rust deployment/speed/footprint** — Oxide is **competitive-or-better** vs PyMuPDF/Poppler/qpdf in this corpus, and uniquely offers KV + OCR + RAG chunking in one static binary. It **trails** on messy-scan table/KV reconstruction (where Docling's ML is expected to lead) and that gap, plus the un-run Docling head-to-head, is recorded honestly above.
+On the axes Oxide is built for - **digital-born structure + reading order, clean-table extraction, key-value fields, structural ops, and pure-Rust deployment/speed/footprint** - Oxide is **competitive-or-better** vs PyMuPDF/Poppler/qpdf in this corpus, and uniquely offers KV + OCR + RAG chunking in one static binary. The benchmark-named synthetic scanned table/KV gaps are now substantially closed, while hardest real-world messy scans and the un-run Docling head-to-head remain recorded honestly above.
