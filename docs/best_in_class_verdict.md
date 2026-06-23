@@ -154,11 +154,18 @@ release rebuild + the cold-start/footprint harness). The honest summary:
 
 ## 4. Security reality (the part that gates the verdict)
 
+> **UPDATE (2026-06-24) — SUPERSEDED.** This section was the Prompt-6 snapshot,
+> when all 6 Highs were open. They have since been **fixed and test-backed**
+> (commits `d06a600` H-1, `9af3076` H-3, `823fa39` H-4/5/6, `7dcd0de` H-2); the
+> "OPEN" table below is retained as the historical baseline. Current status is
+> in `docs/security/audit_findings.md` (Remediation Status) — all 6 Highs CLOSED;
+> the external audit + pilot remain the next trust-builders.
+
 The project's own systematic audit (`docs/security/audit_findings.md`) reported
-**0 Critical · 6 High · 8 Medium · 12 Low/Info**. Re-checked against the final
-tree this session, **all 6 High findings are still open**; Prompts 1–5 closed
-exactly **one Low** (L-4 key-material zeroization, now real via
-`SecretBytes = Zeroizing<Vec<u8>>` and `.zeroize()` throughout `crypto.rs`).
+**0 Critical · 6 High · 8 Medium · 12 Low/Info**. As of the Prompt-6 snapshot,
+**all 6 High findings were open** (now resolved — see the update above); that
+checkpoint had closed exactly **one Low** (L-4 key-material zeroization, now real
+via `SecretBytes = Zeroizing<Vec<u8>>` and `.zeroize()` throughout `crypto.rs`).
 
 | ID | High finding | Status in final tree | Evidence |
 | --- | --- | --- | --- |
@@ -215,20 +222,20 @@ as the tracked known-issues record, and `posture.md` now points to it.
 - **Renderer visual fidelity** (preview-grade; trails Poppler/PDFium).
 - **Messy real-world scans / ML layout** (Docling not benchmarked locally; likely
   ahead on the hardest scans).
-- **Security**: 6 open self-identified High findings — **currently blocking** a
-  best-in-class security claim and a clean GA tag.
+- **Security**: at the Prompt-6 snapshot, 6 open self-identified High findings.
+  **All 6 are now fixed and test-backed** (see §4 update and
+  `audit_findings.md`); the remaining security gap is the external audit + pilot,
+  not open code findings.
 
 ### Release readiness
-**Not ready to strengthen best-in-class positioning, and not ready for a strict
-v1.0 GA tag.** It remains a strong **pilot / release-candidate** engine on its
-non-security axes. The gating work is, in order:
+At the Prompt-6 snapshot this read "not ready to strengthen positioning / not
+ready for a strict GA tag" because the 6 Highs were open. **Those are now
+closed**, so the gating work that remains is external, in order:
 
-1. **Fix the 6 High findings** (code — a dedicated batch; this is NOT positioning
-   or docs work). Redaction true-removal + alt-text scrub, a shared decode-layer
-   pixel cap, and signature trust-semantics (chain/validity/revocation gating or
-   an unambiguous type-level `cryptographically_valid` vs `trusted`).
-2. **Then** commission the third-party security audit.
-3. **Then** run a real pilot.
+1. ~~Fix the 6 High findings~~ — **done** (commits `d06a600`, `9af3076`,
+   `823fa39`, `7dcd0de`; per-finding tests in `audit_findings.md`).
+2. Commission the third-party security audit.
+3. Run a real pilot.
 
 ### Honest closing
 The code is in a strong, well-tested, well-hardened state, and integration holds
@@ -239,3 +246,8 @@ best-in-class on security while six of your own High findings are open.** The
 genuine next step is therefore **not** a seventh batch of positioning prompts —
 it is a focused **fix-the-Highs** code batch, and then the **external audit + a
 real pilot**. That is where "best" gets earned from here.
+
+> **Postscript (2026-06-24).** The fix-the-Highs batch recommended above was
+> carried out: all 6 Highs are now closed and test-backed. What remains is
+> exactly the external half of this closing — the third-party audit and a real
+> pilot. The "best gets earned" line stands; the code half of it is now done.

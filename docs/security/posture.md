@@ -75,8 +75,13 @@ Current guarantees and controls:
 - Server endpoints enforce fail-closed API key authentication, restrictive CORS
   by default, sanitized errors, rate limiting, job caps, timeouts, and resource
   limits.
-- Rendering has DPI and pixel caps, hostile-input tests, and corpus safety
-  coverage.
+- Untrusted input is bounded end-to-end: the render layer has DPI and
+  render-pixel caps (`OXIDE_MAX_RENDER_PIXELS`, default 100M), and the decode
+  layer has an independent pixel cap (`OXIDE_MAX_DECODE_PIXELS`, default 100M)
+  enforced *before* allocation in image bit-depth expansion and the CCITT/JBIG2
+  sinks, plus output ceilings on the Flate/LZW/RunLength stream filters. A
+  hostile image header declaring enormous dimensions is a clean error, not an
+  allocation. Backed by hostile-input tests and corpus safety coverage.
 - PDF JavaScript, Launch actions, and PDF-triggered external fetches are not
   executed as active content.
 - Signature/LTV network behavior is controlled by explicit signing/validation
@@ -106,18 +111,18 @@ Supporting documents:
 Code-level hardening cannot prove the absence of all bugs. The current residual
 risk is explicit:
 
-- **Open findings from the internal audit are tracked, not yet fixed.** The
-  systematic internal review (`docs/security/audit_findings.md`) records 0
+- **Internal-audit High findings: all 6 fixed and test-backed.** The
+  systematic internal review (`docs/security/audit_findings.md`) recorded 0
   Critical, 6 High, 8 Medium, and 12 Low/Info findings. As of the latest
-  re-check against `HEAD`, **all 6 High findings are still open**: redaction
-  under-removal via fixed-width glyph metrics (H-1) and unscrubbed alternate
-  text representations (H-2); the signature `Valid` verdict not being a
-  trust/authenticity gate (H-3); and unbounded image/CCITT/JBIG2 decode
-  allocations reachable from untrusted input (H-4/H-5/H-6). These are
-  concrete, code-level issues that should be fixed **before** a strict GA tag
-  and do **not** require the external audit to find. See
-  `docs/best_in_class_verdict.md` §4–5 for status and the recommended
-  fix-first sequencing.
+  re-check against `HEAD`, **all 6 High findings are CLOSED**, each with a
+  guarantee test: redaction true-removal via real font metrics + fail-closed
+  (H-1) and alternate-representation scrubbing of `/ActualText`//Alt, XMP, and
+  embedded files (H-2); the signature verdict split into integrity / trust /
+  coverage so `Valid` never implies trust without a verified chain (H-3); and a
+  decode-layer pixel cap that bounds image/CCITT/JBIG2 allocations before they
+  run (H-4/H-5/H-6). The Medium/Low findings remain as recorded in
+  `audit_findings.md` (they are not release blockers). See that file's
+  Remediation Status for per-finding commits and tests.
 - A paid third-party security audit has not yet been performed. This remains
   the highest-value next step before broad commercial GA, especially because the
   SDK includes encryption and digital signatures.
@@ -150,17 +155,13 @@ deep fuzzing, dependency auditing, Linux sanitizer CI, and corpus sweeps all
 reinforce each other.
 
 That is strong engineering evidence for robustness, but it does not replace a
-human security audit or a real customer pilot — and it does not substitute for
-fixing the already-identified open findings. The recommended next trust
-builders are, in order:
+human security audit or a real customer pilot. The 6 internal-audit High
+findings have been fixed and test-backed (see `audit_findings.md`); the
+remaining trust builders are external and cannot be closed in code alone:
 
-1. **Fix the 6 open High findings** from `docs/security/audit_findings.md`
-   (redaction true-removal + alternate-text scrub, a shared decode-layer pixel
-   cap for image/CCITT/JBIG2, and signature trust-semantics gating). These are
-   code-level and should land before a strict GA tag.
-2. Commission a third-party audit focused on parser/rendering safety,
+1. Commission a third-party audit focused on parser/rendering safety,
    signatures/CMS/X.509/LTV, encryption, server exposure, C ABI unsafe boundary,
    and supply-chain policy.
-3. Run a controlled pilot with real enterprise documents and workflows, feeding
+2. Run a controlled pilot with real enterprise documents and workflows, feeding
    any findings back into the fuzz corpus, differential regressions, and normal
    tests.

@@ -8,7 +8,7 @@ This map enumerates untrusted entry points and the controls that defend them.
 | --- | --- | --- |
 | `ContentEngine::open_bytes/open_path` | Untrusted PDF bytes/files | Parser errors are classified, no JS execution, fuzz/property/corpus coverage. |
 | Text extraction, document model, chunks, fields | Parsed PDF content streams, fonts, geometry | Bounded page operations, semantic/layout tests, differential/property checks. |
-| Rendering | Page graphics, fonts, images, forms, transparency | Pixel caps, DPI caps, hostile render tests, image/font fuzz targets, grammar-aware `structured_pdf` target. |
+| Rendering | Page graphics, fonts, images, forms, transparency | Render-pixel + DPI caps (`OXIDE_MAX_RENDER_PIXELS`) **and** decode-layer pixel caps (`OXIDE_MAX_DECODE_PIXELS`, enforced before allocation in image bit-depth expansion and the CCITT/JBIG2 sinks) + Flate/LZW/RunLength output ceilings, hostile render tests, image/font fuzz targets, grammar-aware `structured_pdf` target. |
 | Structural writer/rewrite/optimize/repair/linearize | Parsed object graph | Writer fuzz targets, qpdf checks, property writer-mode invariants, linearization checks. |
 | Editing/redaction/form flattening | Existing PDFs plus edit operations | Full rewrite/incremental tests, editing fuzz target, redaction extraction tests. |
 | PDF/A/UA validation/conversion | Parsed PDFs and metadata | Compliance tests, PDF/A fuzz target, veraPDF-oriented docs/tests. |
@@ -64,7 +64,7 @@ Defenses:
 - API key auth fails closed by default.
 - Constant-time API-key comparison.
 - Restrictive CORS default.
-- File-size, page, DPI, render-pixel, output-size, and timeout limits.
+- File-size, page, DPI, render-pixel, decode-pixel, output-size, and timeout limits.
 - Rate limiting with bounded state.
 - Sanitized client errors and correlation IDs for internal failures.
 

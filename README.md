@@ -53,10 +53,10 @@ The renderer is preview/OCR-grade — fast and crash-safe, but it does not match
 | **Extract** | Plain text · structured Markdown · lossless JSON · semantic HTML · RAG chunks (token-sized, heading-aware, with overlap) · key-value fields (invoice / receipt / form, line items) · tables (CSV / JSON / HTML) · images (ZIP) · attachments |
 | **Parse model** | Reading order (XY-cut) · semantic tagged-PDF path · per-page geometry · block-type classification · figures with captions · dehyphenation · ligature normalization · provenance annotations |
 | **Create** | Programmatic authoring (`FlowDocument` / `PdfBuilder`) · pages, text, vector graphics, images, tables, single-column flow layout · TrueType font embedding · standard 14 fonts |
-| **Edit** | Watermarks · overlays / underlays · headers / footers · annotations · redaction (with extract-back verification) · AcroForm fill and flatten · incremental updates |
+| **Edit** | Watermarks · overlays / underlays · headers / footers · annotations · redaction (true removal of glyphs via real font metrics, plus `/ActualText`/struct-tree/XMP/embedded-file scrubbing — extract-back tested) · AcroForm fill and flatten · incremental updates |
 | **Secure** | AES-256 / AES-128 / RC4 encryption · permission flags · RSA / SHA-256 signing · ByteRange coverage · LTV substrate (DSS, VRI, CRL, OCSP, timestamp tokens) · PAdES B-B / B-T / B-LT |
 | **Convert / validate** | PDF/A-1b / 2b / 2a / 3b / 3a (veraPDF PASS) · PDF/UA assistive validation · linearization (qpdf-clean) · optimize (recompress) · repair (qpdf-clean normalize) |
-| **Render** | PNG / JPG / WebP / SVG / PostScript / EPS · `compat` (Poppler-equivalent) or `high` (linear-light) compositing · DPI and pixel caps · hostile-input safe |
+| **Render** | PNG / JPG / WebP / SVG / PostScript / EPS · `compat` (Poppler-equivalent) or `high` (linear-light) compositing · DPI, render-pixel **and decode-pixel** caps (input bounded end-to-end) · hostile-input safe |
 | **OCR** | Pluggable `OcrEngine` trait · bundled Tesseract backend (off by default; drives the external `tesseract` process, no linked C) · routed through the same parse pipeline |
 | **Surfaces** | Rust library · CLI · C ABI · WebAssembly · self-hostable HTTP server (auth, rate limits, resource caps, async job queue) |
 
@@ -320,6 +320,9 @@ Pull only what you need. The default build gives you parse + render + structural
 - Differential fuzzing vs qpdf and Poppler for page count, structural validity, text similarity, and writer round-trip.
 - Property tests for round-trip identities, writer-mode equivalence, AES-256 preserve-content, and no-panic arbitrary bytes.
 - Cross-pillar hostile sweep: 265 files, 1,590 operations, 0 crashes, 0 timeouts.
+- **Redaction is true removal, not masking.** Glyphs are deleted from the content stream using the resolved font's real `/Widths`//W` metrics (failing closed — dropping the whole show-string — when metrics are unavailable), and the redacted text is also scrubbed from `/ActualText`//Alt marked content, the structure tree, XMP `/Metadata`, and embedded files. Verified by extract-back tests.
+- **Signature `valid` ≠ trusted.** Verification reports cryptographic *integrity* (the CMS signature over the `/ByteRange`), *trust* (does the signer chain to a caller-configured anchor, in validity, not revoked), and *coverage* (whole-file vs modified-after-signing) as **distinct** properties. The overall verdict is `Trusted` only when all three hold; with no anchors configured a cryptographically valid self-signed signature is reported `ValidUntrusted`, never trusted.
+- **Untrusted input is bounded end-to-end.** Both the render layer (`OXIDE_MAX_RENDER_PIXELS`) and the image-decode layer (`OXIDE_MAX_DECODE_PIXELS`) cap pixels before allocation, with output ceilings on the Flate/LZW/RunLength filters, so a hostile dimension header or decompression bomb is a clean error rather than an OOM.
 - PDF encryption secrets use zeroizing wrappers; the engine crate enforces `#![forbid(unsafe_code)]`.
 - Linux sanitizer CI covers ASan/TSan/Rust UB checks for C-ABI/crypto tests plus ASan fuzz corpus replay.
 - `cargo audit` and `cargo deny` clean against the documented `RUSTSEC-2023-0071` (RustCrypto `rsa 0.9.10`) advisory exception.

@@ -141,6 +141,11 @@ and `crates/engine/src/signature.rs` (1,726 lines), plus the reader integration
 in `crates/engine/src/reader.rs:445-582`.
 
 ### H-3 — `SignatureValidity::Valid` is not a trust/authenticity verdict
+
+> **STATUS: RESOLVED** (commit `9af3076`) — verdict split into integrity / trust
+> / coverage; `Trusted` requires a verified chain to a configured anchor + full
+> coverage; self-signed-without-anchor is `ValidUntrusted`. Tests in
+> `crates/engine/tests/signatures.rs`.
 - **Severity:** High
 - **Location:** `signature.rs:1005-1017` (`scope_note`), `signature.rs:1102-1133`
   (`verify_cms` final RSA step), `signature.rs:1284-1305` (`find_signer_cert`),
@@ -380,6 +385,11 @@ in `crates/engine/src/reader.rs:445-582`.
   cap (matching the depth-64 convention), or convert to an iterative work-stack.
 
 ### M-3 — Image bit-depth normalization allocates from unbounded PDF dimensions (OOM)
+
+> **STATUS: RESOLVED** (H-4, commit `823fa39`) — `ensure_decode_budget` caps
+> `width×height` (`OXIDE_MAX_DECODE_PIXELS`) before allocation in `build_raw_image`;
+> tests `h4_build_raw_image_rejects_decode_bomb_before_allocating`,
+> `ensure_decode_budget_rejects_oversized_dimensions`.
 - **Severity:** High
 - **Location:** `images/decoder.rs:234,244,255` (`normalise_bit_depth`, bpc
   4/2/1), size from `expected_len` (`decoder.rs:648-650`).
@@ -413,6 +423,9 @@ in `crates/engine/src/reader.rs:445-582`.
   layer.
 
 ### M-4 — CCITT decode sink pre-allocates `columns × rows` from DecodeParms (OOM)
+
+> **STATUS: RESOLVED** (H-5, commit `823fa39`) — decode-budget check before the
+> CCITT sink; test `h5_rejects_oversized_columns_rows_before_allocating`.
 - **Severity:** High
 - **Location:** `images/ccitt.rs:65-71` (`GrayscaleSink::new`), params from
   `ccitt_decode_params` (`decoder.rs:665-686`).
@@ -431,6 +444,10 @@ in `crates/engine/src/reader.rs:445-582`.
   constructing the sink.
 
 ### M-5 — JBIG2 decode sink pre-allocates from codestream-declared dimensions (OOM)
+
+> **STATUS: RESOLVED** (H-6, commit `823fa39`) — decode-budget check on the
+> codestream-declared dimensions before the JBIG2 sink (shared
+> `ensure_decode_budget` guard).
 - **Severity:** High (residual depends on whether `hayro_jbig2` caps region dims internally — treat as exploitable until confirmed)
 - **Location:** `images/jbig2.rs:28-34` (`GrayscaleSink::new`), dims from
   `image.width()/height()` (`jbig2.rs:14`).
@@ -613,6 +630,9 @@ in `crates/engine/src/reader.rs:445-582`.
 ## 4. TIER 3 — Correctness-as-Security, `unsafe` Inventory, Decoders, Dependencies
 
 ### H-1 — Redaction under-removes text via fixed-width glyph metrics (data leak)
+
+> **STATUS: RESOLVED** (commit `d06a600`) — real font-metric glyph geometry +
+> fail-closed; test `redaction_truly_removes_text_under_box_with_proportional_font`.
 - **Severity:** High
 - **Location:** `editing.rs:1149-1156` (`glyph_rect`, fixed `font_size * 0.5`),
   `editing.rs:1141-1147` (`advance_text` = `bytes * 500.0`), consumed by
@@ -656,6 +676,10 @@ in `crates/engine/src/reader.rs:445-582`.
   drop the entire show-string whose run intersects, rather than keeping bytes.
 
 ### H-2 — Redaction does not scrub alternate text representations
+
+> **STATUS: RESOLVED** (commit `7dcd0de`) — `/ActualText`//Alt marked content,
+> struct-tree/object strings, XMP `/Metadata`, and embedded-file payloads now
+> scrubbed; tests `h2_alt_text_tests` + `redaction_scrubs_secret_from_document_metadata`.
 - **Severity:** High (exploitability conditional on document structure — see below)
 - **Location:** content rewriter operator match `editing.rs:1283-1324` (no
   `BDC`/`BMC`/`DP` handling; `_ =>` re-serializes verbatim at `:1320`);
