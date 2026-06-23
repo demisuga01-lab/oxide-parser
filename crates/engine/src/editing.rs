@@ -3,13 +3,16 @@
 //! Edits are emitted as new content streams that are prepended as underlays or
 //! appended as overlays. Existing page content streams are left untouched.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::content::{
     concat_matrix, transform_point, Color, ColorSpace, ContentOperation, ContentParser, Matrix,
     Operand, IDENTITY_MATRIX,
 };
 use crate::document::{PdfDocument, PdfPage};
+use crate::engine::PageResources;
+use crate::fonts::FontResolver;
+use crate::text::collector::extract_char_codes;
 use crate::error::{OxideError, Result};
 use crate::filters::{decode_stream_lossless, flate_encode};
 use crate::images::decoder::{ImageDecoder, RawImage};
@@ -1040,6 +1043,17 @@ struct RedactionState {
     text_matrix: Matrix,
     text_line_matrix: Matrix,
     font_size: f64,
+    /// Resource name of the currently selected font (the `Tf` operand), used to
+    /// look up real glyph metrics. `None` until a font is selected.
+    font_name: Option<String>,
+    char_spacing: f64,
+    word_spacing: f64,
+    /// Horizontal scaling factor (`Tz` / 100), default 1.0.
+    h_scale: f64,
+    /// Text leading (`TL`); 0.0 means "unset" and `T*` falls back to 1.2em.
+    leading: f64,
+    /// Text rise (`Ts`).
+    rise: f64,
 }
 
 impl Default for RedactionState {
@@ -1050,12 +1064,18 @@ impl Default for RedactionState {
             text_matrix: IDENTITY_MATRIX,
             text_line_matrix: IDENTITY_MATRIX,
             font_size: 12.0,
+            font_name: None,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            h_scale: 1.0,
+            leading: 0.0,
+            rise: 0.0,
         }
     }
 }
 
 impl RedactionState {
-    fn apply(&mut self, op: &ContentOperation) {
+    fn apply(&mut self, op: &ContentOperation, resolvers: &HashMap<String, FontResolver>) {
         match op.operator.as_str() {
             "q" => self.stack.push(self.ctm),
             "Q" => {
@@ -1079,13 +1099,43 @@ impl RedactionState {
                 self.text_line_matrix = IDENTITY_MATRIX;
             }
             "Tf" => {
+                self.font_name = op.name(0).map(|name| name.to_string());
                 if let Some(size) = op.number(1) {
                     self.font_size = size.abs().max(1.0);
+                }
+            }
+            "Tc" => {
+                if let Some(v) = op.number(0) {
+                    self.char_spacing = v;
+                }
+            }
+            "Tw" => {
+                if let Some(v) = op.number(0) {
+                    self.word_spacing = v;
+                }
+            }
+            "Tz" => {
+                if let Some(v) = op.number(0) {
+                    let scale = v / 100.0;
+                    self.h_scale = if scale > 0.0 { scale } else { 1.0 };
+                }
+            }
+            "TL" => {
+                if let Some(v) = op.number(0) {
+                    self.leading = v;
+                }
+            }
+            "Ts" => {
+                if let Some(v) = op.number(0) {
+                    self.rise = v;
                 }
             }
             "Td" | "TD" => {
                 let tx = op.number(0).unwrap_or(0.0);
                 let ty = op.number(1).unwrap_or(0.0);
+                if op.operator == "TD" {
+                    self.leading = -ty;
+                }
                 self.text_line_matrix[4] += tx;
                 self.text_line_matrix[5] += ty;
                 self.text_matrix = self.text_line_matrix;
@@ -1102,35 +1152,49 @@ impl RedactionState {
                 self.text_line_matrix = self.text_matrix;
             }
             "T*" => {
-                self.text_line_matrix[5] -= self.font_size * 1.2;
+                self.text_line_matrix[5] -= self.line_leading();
                 self.text_matrix = self.text_line_matrix;
             }
             "Tj" => {
                 if let Some(bytes) = op.string_bytes(0) {
-                    self.advance_text(bytes.len());
+                    let advance = self.string_advance(bytes, self.current_resolver(resolvers));
+                    self.advance_pen(advance);
                 }
             }
             "'" => {
-                self.apply(&ContentOperation::new("T*", Vec::new()));
+                self.apply(&ContentOperation::new("T*", Vec::new()), resolvers);
                 if let Some(bytes) = op.string_bytes(0) {
-                    self.advance_text(bytes.len());
+                    let advance = self.string_advance(bytes, self.current_resolver(resolvers));
+                    self.advance_pen(advance);
                 }
             }
             "\"" => {
-                self.apply(&ContentOperation::new("T*", Vec::new()));
+                if let Some(aw) = op.number(0) {
+                    self.word_spacing = aw;
+                }
+                if let Some(ac) = op.number(1) {
+                    self.char_spacing = ac;
+                }
+                self.apply(&ContentOperation::new("T*", Vec::new()), resolvers);
                 if let Some(bytes) = op.string_bytes(2) {
-                    self.advance_text(bytes.len());
+                    let advance = self.string_advance(bytes, self.current_resolver(resolvers));
+                    self.advance_pen(advance);
                 }
             }
             "TJ" => {
                 if let Some(items) = op.operand(0).and_then(Operand::as_array) {
+                    let resolver = self.current_resolver(resolvers);
+                    let mut deltas = Vec::with_capacity(items.len());
                     for item in items {
-                        match item {
-                            Operand::String(bytes) => self.advance_text(bytes.len()),
-                            Operand::Integer(n) => self.advance_text_units(-(*n as f64)),
-                            Operand::Real(n) => self.advance_text_units(-*n),
-                            _ => {}
-                        }
+                        deltas.push(match item {
+                            Operand::String(bytes) => self.string_advance(bytes, resolver),
+                            Operand::Integer(n) => self.tj_adjust(-(*n as f64)),
+                            Operand::Real(n) => self.tj_adjust(-*n),
+                            _ => 0.0,
+                        });
+                    }
+                    for delta in deltas {
+                        self.advance_pen(delta);
                     }
                 }
             }
@@ -1138,21 +1202,52 @@ impl RedactionState {
         }
     }
 
-    fn advance_text(&mut self, bytes: usize) {
-        self.advance_text_units(bytes as f64 * 500.0);
+    fn current_resolver<'a>(
+        &self,
+        resolvers: &'a HashMap<String, FontResolver>,
+    ) -> Option<&'a FontResolver> {
+        self.font_name
+            .as_deref()
+            .and_then(|name| resolvers.get(name))
     }
 
-    fn advance_text_units(&mut self, units: f64) {
-        self.text_matrix[4] += units / 1000.0 * self.font_size;
+    fn line_leading(&self) -> f64 {
+        if self.leading.abs() > f64::EPSILON {
+            self.leading
+        } else {
+            self.font_size * 1.2
+        }
     }
 
-    fn glyph_rect(&self, index: usize) -> ImageRect {
-        let char_width = self.font_size * 0.5;
-        let x0 = self.text_matrix[4] + index as f64 * char_width;
-        let y0 = self.text_matrix[5] - self.font_size * 0.25;
-        let (x1, y1) = transform_point(&self.ctm, x0, y0);
-        let (x2, y2) = transform_point(&self.ctm, x0 + char_width, y0 + self.font_size);
-        rect_from_corners(x1, y1, x2, y2)
+    /// Advance of one glyph in text space, from its real width (per-mille of em)
+    /// plus character/word spacing, scaled by horizontal scaling.
+    fn glyph_advance(&self, width_units: f64, is_space: bool) -> f64 {
+        (width_units / 1000.0 * self.font_size
+            + self.char_spacing
+            + if is_space { self.word_spacing } else { 0.0 })
+            * self.h_scale
+    }
+
+    /// Total text-space advance of a show string, using real font metrics when a
+    /// resolver is available and a conservative per-em estimate otherwise.
+    fn string_advance(&self, bytes: &[u8], resolver: Option<&FontResolver>) -> f64 {
+        let code_size = resolver.map(FontResolver::code_size).unwrap_or(1).max(1);
+        extract_char_codes(bytes, code_size)
+            .into_iter()
+            .map(|code| match resolver {
+                Some(r) => self.glyph_advance(r.glyph_width(code), r.is_space_code(code)),
+                None => self.glyph_advance(FALLBACK_GLYPH_WIDTH, code == 0x20),
+            })
+            .sum()
+    }
+
+    /// Text-space displacement of a `TJ` numeric adjustment (thousandths of em).
+    fn tj_adjust(&self, value_units: f64) -> f64 {
+        value_units / 1000.0 * self.font_size * self.h_scale
+    }
+
+    fn advance_pen(&mut self, dx: f64) {
+        self.text_matrix[4] += dx;
     }
 
     fn unit_rect(&self) -> ImageRect {
@@ -1252,6 +1347,7 @@ fn rewrite_page_content_for_redaction(
     changes: &mut ChangeSet,
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
+    let resolvers = build_font_resolvers(resources, reader);
     let mut state = RedactionState::default();
     let mut pending_path = PendingPath::default();
     report.scrub_metadata |= redactions
@@ -1274,7 +1370,7 @@ fn rewrite_page_content_for_redaction(
                     pending_path.flush_to(&mut out);
                     serialize_content_operation(&op, &mut out);
                 }
-                state.apply(&op);
+                state.apply(&op, &resolvers);
                 continue;
             }
             if !pending_path.is_empty() {
@@ -1282,24 +1378,33 @@ fn rewrite_page_content_for_redaction(
             }
             match op.operator.as_str() {
                 "Tj" => {
-                    if let Some(rewritten) = redact_text_show(&op, &state, redactions, report) {
+                    let resolver = state.current_resolver(&resolvers);
+                    if let Some(rewritten) =
+                        redact_text_show(&op, &state, resolver, redactions, report)
+                    {
                         serialize_content_operation(&rewritten, &mut out);
                     }
-                    state.apply(&op);
+                    state.apply(&op, &resolvers);
                 }
                 "TJ" => {
-                    if let Some(rewritten) = redact_text_array(&op, &state, redactions, report) {
+                    let resolver = state.current_resolver(&resolvers);
+                    if let Some(rewritten) =
+                        redact_text_array(&op, &state, resolver, redactions, report)
+                    {
                         serialize_content_operation(&rewritten, &mut out);
                     }
-                    state.apply(&op);
+                    state.apply(&op, &resolvers);
                 }
                 "'" | "\"" => {
-                    if text_operation_intersects(&op, &state, redactions) {
+                    // ' and " move to the next line *before* showing; test the
+                    // glyphs at that post-move position. On intersection (or any
+                    // uncertainty) the whole operator is dropped — fail closed.
+                    if line_show_intersects(&op, &state, &resolvers, redactions) {
                         collect_text_from_operation(&op, report);
                     } else {
                         serialize_content_operation(&op, &mut out);
                     }
-                    state.apply(&op);
+                    state.apply(&op, &resolvers);
                 }
                 "Do" => {
                     let image_rect = state.unit_rect();
@@ -1315,11 +1420,11 @@ fn rewrite_page_content_for_redaction(
                     } else {
                         serialize_content_operation(&op, &mut out);
                     }
-                    state.apply(&op);
+                    state.apply(&op, &resolvers);
                 }
                 _ => {
                     serialize_content_operation(&op, &mut out);
-                    state.apply(&op);
+                    state.apply(&op, &resolvers);
                 }
             }
         }
@@ -1331,20 +1436,150 @@ fn rewrite_page_content_for_redaction(
     Ok(out)
 }
 
+/// Conservative width (per-mille of em) assumed for a glyph whose font metrics
+/// could not be resolved. Only used to keep the pen roughly positioned; the
+/// removal decision for unresolved fonts is made fail-closed at string scope.
+const FALLBACK_GLYPH_WIDTH: f64 = 500.0;
+
+fn build_font_resolvers(
+    resources: &PdfDictionary,
+    reader: &PdfReader,
+) -> HashMap<String, FontResolver> {
+    PageResources::from_dict(resources, reader)
+        .fonts
+        .iter()
+        .map(|(name, font_dict)| (name.clone(), FontResolver::new(font_dict, reader)))
+        .collect()
+}
+
+/// Device-space rectangle occupied by a single glyph whose pen position (text
+/// space) is `pen_x` and whose box width is `box_w`. The vertical band is the
+/// font ascent/descent envelope (intentionally generous so a covered glyph is
+/// never judged outside the redaction box).
+fn glyph_rect_at(state: &RedactionState, pen_x: f64, box_w: f64) -> ImageRect {
+    let y0 = state.text_matrix[5] + state.rise - state.font_size * 0.25;
+    let y1 = state.text_matrix[5] + state.rise + state.font_size * 0.90;
+    let width = box_w.max(state.font_size * 0.05);
+    let (ax, ay) = transform_point(&state.ctm, pen_x, y0);
+    let (bx, by) = transform_point(&state.ctm, pen_x + width, y1);
+    rect_from_corners(ax, ay, bx, by)
+}
+
+fn record_removed_text(bytes: &[u8], report: &mut RedactionReport) {
+    let text = decode_pdf_text_string(bytes);
+    if !text.trim().is_empty() {
+        report.removed_text.insert(text);
+    }
+}
+
+/// A `TJ` numeric operand (thousandths of em, before font/scale) that advances
+/// the pen forward by `adv` text-space units, preserving following positions.
+fn advance_number(adv: f64, state: &RedactionState) -> Operand {
+    let denom = state.font_size * state.h_scale;
+    let units = if denom.abs() > f64::EPSILON {
+        adv / denom * 1000.0
+    } else {
+        0.0
+    };
+    Operand::Integer(-(units.round() as i64))
+}
+
+fn advance_only(adv: f64, state: &RedactionState) -> Option<Vec<Operand>> {
+    (adv.abs() > f64::EPSILON).then(|| vec![advance_number(adv, state)])
+}
+
+/// Fail-closed test for a string whose font is unresolved: assume each byte may
+/// be up to a full em wide and a generous vertical band, so we never under-cover
+/// an unknown font.
+fn failclosed_string_intersects(
+    bytes: &[u8],
+    state: &RedactionState,
+    redactions: &[RedactionEdit],
+) -> bool {
+    let span = (bytes.len().max(1) as f64) * state.font_size * state.h_scale;
+    let y0 = state.text_matrix[5] + state.rise - state.font_size * 0.5;
+    let y1 = state.text_matrix[5] + state.rise + state.font_size;
+    let (ax, ay) = transform_point(&state.ctm, state.text_matrix[4], y0);
+    let (bx, by) = transform_point(&state.ctm, state.text_matrix[4] + span, y1);
+    let region = rect_from_corners(ax, ay, bx, by);
+    redactions
+        .iter()
+        .any(|redaction| rects_intersect(region, redaction.rect))
+}
+
+/// True if any glyph of `bytes`, positioned with real metrics from `state`,
+/// intersects a redaction. Falls back to the fail-closed whole-string test when
+/// no font resolver is available.
+fn string_glyphs_intersect(
+    bytes: &[u8],
+    state: &RedactionState,
+    resolver: Option<&FontResolver>,
+    redactions: &[RedactionEdit],
+) -> bool {
+    let Some(resolver) = resolver else {
+        return failclosed_string_intersects(bytes, state, redactions);
+    };
+    let code_size = resolver.code_size().max(1);
+    let mut pen = state.text_matrix[4];
+    for code in extract_char_codes(bytes, code_size) {
+        let width_units = resolver.glyph_width(code);
+        let box_w = width_units / 1000.0 * state.font_size * state.h_scale;
+        let rect = glyph_rect_at(state, pen, box_w);
+        if redactions
+            .iter()
+            .any(|redaction| rects_intersect(rect, redaction.rect))
+        {
+            return true;
+        }
+        pen += state.glyph_advance(width_units, resolver.is_space_code(code));
+    }
+    false
+}
+
+/// Intersection test for the `'` and `"` operators, which advance to the next
+/// line before showing. `"` also sets word/char spacing from its first operands.
+fn line_show_intersects(
+    op: &ContentOperation,
+    state: &RedactionState,
+    resolvers: &HashMap<String, FontResolver>,
+    redactions: &[RedactionEdit],
+) -> bool {
+    let mut probe = state.clone();
+    let bytes = if op.operator == "\"" {
+        if let Some(aw) = op.number(0) {
+            probe.word_spacing = aw;
+        }
+        if let Some(ac) = op.number(1) {
+            probe.char_spacing = ac;
+        }
+        op.string_bytes(2)
+    } else {
+        op.string_bytes(0)
+    };
+    probe.text_line_matrix[5] -= probe.line_leading();
+    probe.text_matrix = probe.text_line_matrix;
+    let resolver = probe.current_resolver(resolvers);
+    bytes
+        .map(|bytes| string_glyphs_intersect(bytes, &probe, resolver, redactions))
+        .unwrap_or(false)
+}
+
 fn redact_text_show(
     op: &ContentOperation,
     state: &RedactionState,
+    resolver: Option<&FontResolver>,
     redactions: &[RedactionEdit],
     report: &mut RedactionReport,
 ) -> Option<ContentOperation> {
     let bytes = op.string_bytes(0)?;
-    let rewritten = redact_string_bytes(bytes, state, redactions, report);
+    let rewritten = redact_string_bytes(bytes, state, resolver, redactions, report);
     rewritten.map(|operands| ContentOperation::new("TJ", vec![Operand::Array(operands)]))
 }
 
 fn redact_text_array(
     op: &ContentOperation,
     state: &RedactionState,
+    resolver: Option<&FontResolver>,
     redactions: &[RedactionEdit],
     report: &mut RedactionReport,
 ) -> Option<ContentOperation> {
@@ -1355,19 +1590,22 @@ fn redact_text_array(
         match item {
             Operand::String(bytes) => {
                 if let Some(mut replacement) =
-                    redact_string_bytes(bytes, &local, redactions, report)
+                    redact_string_bytes(bytes, &local, resolver, redactions, report)
                 {
                     out.append(&mut replacement);
                 }
-                local.advance_text(bytes.len());
+                let advance = local.string_advance(bytes, resolver);
+                local.advance_pen(advance);
             }
             Operand::Integer(n) => {
                 out.push(Operand::Integer(*n));
-                local.advance_text_units(-(*n as f64));
+                let delta = local.tj_adjust(-(*n as f64));
+                local.advance_pen(delta);
             }
             Operand::Real(n) => {
                 out.push(Operand::Real(*n));
-                local.advance_text_units(-*n);
+                let delta = local.tj_adjust(-*n);
+                local.advance_pen(delta);
             }
             other => out.push(other.clone()),
         }
@@ -1375,71 +1613,74 @@ fn redact_text_array(
     (!out.is_empty()).then(|| ContentOperation::new("TJ", vec![Operand::Array(out)]))
 }
 
+/// Rewrite a show string so that every glyph intersecting a redaction is
+/// removed from the content stream (not merely covered), preserving the
+/// positions of surviving glyphs via numeric `TJ` adjustments.
+///
+/// With real font metrics this is precise per glyph. Without a resolver it is
+/// fail-closed: if the string's generously-bounded run touches any redaction the
+/// entire string is dropped, so an unknown-font glyph can never survive under a
+/// mark.
 fn redact_string_bytes(
     bytes: &[u8],
     state: &RedactionState,
+    resolver: Option<&FontResolver>,
     redactions: &[RedactionEdit],
     report: &mut RedactionReport,
 ) -> Option<Vec<Operand>> {
-    let mut out = Vec::new();
-    let mut current = Vec::new();
-    let mut removed = Vec::new();
-    let mut removed_run = 0usize;
+    let Some(resolver) = resolver else {
+        if failclosed_string_intersects(bytes, state, redactions) {
+            record_removed_text(bytes, report);
+            return advance_only(state.string_advance(bytes, None), state);
+        }
+        return Some(vec![Operand::String(bytes.to_vec())]);
+    };
 
-    for (idx, byte) in bytes.iter().copied().enumerate() {
-        let glyph_rect = state.glyph_rect(idx);
-        if redactions
+    let code_size = resolver.code_size().max(1) as usize;
+    let codes = extract_char_codes(bytes, resolver.code_size().max(1));
+    let mut out: Vec<Operand> = Vec::new();
+    let mut current: Vec<u8> = Vec::new();
+    let mut removed: Vec<u8> = Vec::new();
+    let mut pending_adv = 0.0_f64;
+    let mut pen = state.text_matrix[4];
+
+    for (index, code) in codes.into_iter().enumerate() {
+        let start = index * code_size;
+        let end = (start + code_size).min(bytes.len());
+        let glyph_bytes = &bytes[start..end];
+        let width_units = resolver.glyph_width(code);
+        let is_space = resolver.is_space_code(code);
+        let box_w = width_units / 1000.0 * state.font_size * state.h_scale;
+        let advance = state.glyph_advance(width_units, is_space);
+        let rect = glyph_rect_at(state, pen, box_w);
+        let intersects = redactions
             .iter()
-            .any(|redaction| rects_intersect(glyph_rect, redaction.rect))
-        {
+            .any(|redaction| rects_intersect(rect, redaction.rect));
+        if intersects {
             if !current.is_empty() {
                 out.push(Operand::String(std::mem::take(&mut current)));
             }
-            removed.push(byte);
-            removed_run += 1;
+            removed.extend_from_slice(glyph_bytes);
+            pending_adv += advance;
         } else {
-            if removed_run > 0 {
-                out.push(Operand::Integer(-(removed_run as i64 * 500)));
-                removed_run = 0;
+            if pending_adv.abs() > f64::EPSILON {
+                out.push(advance_number(pending_adv, state));
+                pending_adv = 0.0;
             }
-            current.push(byte);
+            current.extend_from_slice(glyph_bytes);
         }
+        pen += advance;
     }
     if !current.is_empty() {
         out.push(Operand::String(current));
     }
-    if removed_run > 0 {
-        out.push(Operand::Integer(-(removed_run as i64 * 500)));
+    if pending_adv.abs() > f64::EPSILON {
+        out.push(advance_number(pending_adv, state));
     }
     if !removed.is_empty() {
-        let text = decode_pdf_text_string(&removed);
-        if !text.trim().is_empty() {
-            report.removed_text.insert(text);
-        }
+        record_removed_text(&removed, report);
     }
     (!out.is_empty()).then_some(out)
-}
-
-fn text_operation_intersects(
-    op: &ContentOperation,
-    state: &RedactionState,
-    redactions: &[RedactionEdit],
-) -> bool {
-    let bytes = match op.operator.as_str() {
-        "'" => op.string_bytes(0),
-        "\"" => op.string_bytes(2),
-        _ => None,
-    };
-    bytes
-        .map(|bytes| {
-            bytes.iter().enumerate().any(|(idx, _)| {
-                let glyph_rect = state.glyph_rect(idx);
-                redactions
-                    .iter()
-                    .any(|redaction| rects_intersect(glyph_rect, redaction.rect))
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn collect_text_from_operation(op: &ContentOperation, report: &mut RedactionReport) {

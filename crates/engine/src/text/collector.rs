@@ -389,7 +389,7 @@ fn operand_mcid(operand: &Operand) -> Option<i64> {
     }
 }
 
-fn extract_char_codes(bytes: &[u8], code_size: u8) -> Vec<u16> {
+pub(crate) fn extract_char_codes(bytes: &[u8], code_size: u8) -> Vec<u16> {
     if code_size == 2 {
         bytes
             .chunks(2)

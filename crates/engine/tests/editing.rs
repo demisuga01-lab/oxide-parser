@@ -175,6 +175,58 @@ fn redaction_removes_text_and_rejects_incremental_mode() {
 }
 
 #[test]
+fn redaction_truly_removes_text_under_box_with_proportional_font() {
+    // H-1 guarantee: a glyph that is *visually* under the redaction box must be
+    // removed from the content stream, not merely covered. This exercises the
+    // path the old fixed-width (0.5em/byte) geometry got wrong: wide glyphs (W)
+    // push later text far to the right, so the fake metric mis-places "SECRET"
+    // to the LEFT of the box and the old code kept its bytes verbatim.
+    //
+    // Layout (Helvetica 20pt, baseline y=700, x0=72):
+    //   "WWWWWWWW " advances ~151.6pt of real width -> "SECRET" really sits at
+    //   x in [~228, ~310]. The redaction box [230..330] covers it. The eight W's
+    //   end at ~223pt and must survive (no over-removal of unrelated text).
+    let mut doc = PdfBuilder::new();
+    doc.add_page(PageSize::LETTER)
+        .draw_text(
+            "WWWWWWWW SECRET",
+            72.0,
+            700.0,
+            &TextStyle::standard(StandardFont::Helvetica, 20.0),
+        )
+        .unwrap();
+    let mut editor = PdfEditor::open_bytes(doc.to_bytes().unwrap()).unwrap();
+    editor
+        .redact(
+            1,
+            ImageRect::new(230.0, 693.0, 100.0, 24.0),
+            RedactionOptions::default(),
+        )
+        .unwrap();
+    let redacted = editor.save_to_bytes(EditMode::FullRewrite).unwrap();
+
+    // The secret must be gone from EVERY text channel we can extract.
+    let engine = ContentEngine::open_bytes(redacted.clone()).unwrap();
+    let text = engine.get_page_text(1).unwrap();
+    assert!(
+        !text.contains("SECRET"),
+        "redacted text leaked under the mark: {text:?}"
+    );
+    // And the raw content-stream bytes must not still carry the glyphs.
+    assert!(
+        !String::from_utf8_lossy(&redacted).contains("SECRET"),
+        "redacted glyphs survived verbatim in the content stream"
+    );
+    // Unrelated text outside the box must be preserved (no fail-open over-removal
+    // of the whole line just because part of it intersected).
+    assert!(
+        text.contains("WWWWWWWW"),
+        "redaction over-removed text outside the box: {text:?}"
+    );
+    assert!(engine.render_page_png_fast(1, 72).is_ok());
+}
+
+#[test]
 fn redaction_removes_intersecting_image_invocation() {
     let mut doc = PdfBuilder::new();
     let image = doc
