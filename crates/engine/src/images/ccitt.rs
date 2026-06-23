@@ -46,6 +46,9 @@ pub fn decode(data: &[u8], params: CcittDecodeParams) -> Result<RawImage> {
         encoding,
         invert_black: params.black_is_1,
     };
+    // H-5: bound /Columns × /Rows before allocating the grayscale sink, so a
+    // crafted `/Columns 100000 /Rows 100000` cannot force a ~10 GB reservation.
+    crate::images::decoder::ensure_decode_budget(params.columns, params.rows, 1)?;
     let mut context = hayro_ccitt::DecoderContext::new(settings);
     let mut sink = GrayscaleSink::new(params.columns, params.rows);
 
@@ -202,5 +205,17 @@ mod tests {
         // Row 2 starts at the next byte: white run 8 (10011).
         let image = decode(&pack_bits("10011 000 10011"), options).unwrap();
         assert_eq!(image.pixels, vec![255; 16]);
+    }
+
+    #[test]
+    fn h5_rejects_oversized_columns_rows_before_allocating() {
+        // /Columns 100000 /Rows 100000 = 1e10 pixels would, before the cap,
+        // force a ~10 GB Vec::with_capacity in the grayscale sink. It must now
+        // fail closed with a clean error from a tiny input.
+        let err = decode(&[0u8; 8], params(-1, 100_000, 100_000)).unwrap_err();
+        assert!(
+            matches!(err, OxideError::MalformedPdf(_)),
+            "oversized CCITT dims must be a clean error, got {err:?}"
+        );
     }
 }

@@ -819,6 +819,25 @@ pub fn max_render_pixels() -> u64 {
         .unwrap_or(DEFAULT_MAX_RENDER_PIXELS)
 }
 
+/// Default cap on the number of pixels (`width × height`) an embedded image may
+/// declare before its decoded buffer is allocated. Mirrors the render pixel cap
+/// so untrusted input is bounded end-to-end: the *decode* layer (image codecs,
+/// bit-depth expansion, CCITT/JBIG2 sinks) is capped, not just the render layer.
+pub const DEFAULT_MAX_DECODE_PIXELS: u64 = DEFAULT_MAX_RENDER_PIXELS;
+
+/// The active image-decode pixel cap. Overridable via `OXIDE_MAX_DECODE_PIXELS`
+/// (a positive integer); falls back to [`DEFAULT_MAX_DECODE_PIXELS`] when unset,
+/// empty, zero, or unparsable. A hostile image header declaring enormous
+/// dimensions is rejected with a clean error *before* allocation rather than
+/// OOMing the process.
+pub fn max_decode_pixels() -> u64 {
+    std::env::var("OXIDE_MAX_DECODE_PIXELS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_MAX_DECODE_PIXELS)
+}
+
 fn page_rotation_u32(rotation: i32) -> u32 {
     rotation.rem_euclid(360) as u32
 }

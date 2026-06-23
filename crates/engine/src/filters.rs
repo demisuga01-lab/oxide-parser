@@ -678,6 +678,14 @@ fn run_length_decode(data: &[u8]) -> Result<Vec<u8>> {
     let mut idx = 0;
 
     while idx < data.len() {
+        // Bound the expansion: RunLength can grow ~128x, so cap the cumulative
+        // output the same way Flate is capped (a multi-hundred-MB input must not
+        // be allowed to expand into an OOM).
+        if out.len() as u64 > MAX_FLATE_DECOMPRESSED_BYTES {
+            return Err(OxideError::ParseError(
+                "RunLengthDecode output exceeds decompression cap".to_string(),
+            ));
+        }
         let len = data[idx];
         idx += 1;
         match len {
@@ -720,6 +728,13 @@ fn lzw_decode(data: &[u8], early_change: u8) -> Result<Vec<u8>> {
     let mut previous: Option<Vec<u8>> = None;
 
     while let Some(code) = reader.read_bits(code_width) {
+        // Cap cumulative LZW output (the dictionary is bounded to 4096 entries
+        // but the output stream is not) so a crafted stream cannot OOM.
+        if out.len() as u64 > MAX_FLATE_DECOMPRESSED_BYTES {
+            return Err(OxideError::ParseError(
+                "LZWDecode output exceeds decompression cap".to_string(),
+            ));
+        }
         match code {
             256 => {
                 table = initial_lzw_table();

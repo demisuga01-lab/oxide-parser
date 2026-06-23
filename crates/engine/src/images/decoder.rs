@@ -333,6 +333,8 @@ impl ImageDecoder {
         reader: Option<&PdfReader>,
     ) -> Result<RawImage> {
         let raw_channels = Self::raw_channel_count(color_space, dict, reader);
+        // H-4: bound the declared dimensions before allocating any pixel buffer.
+        ensure_decode_budget(width, height, raw_channels.max(1))?;
         if width == 0 || height == 0 {
             return Ok(RawImage {
                 width,
@@ -678,6 +680,34 @@ fn unpack_subbyte_rows(raw: &[u8], width: u32, height: u32, channels: u8, bpc: u
 
 fn expected_len(width: u32, height: u32, channels: u8) -> usize {
     width as usize * height as usize * channels as usize
+}
+
+/// Reject an image whose declared dimensions would exceed the decode pixel
+/// budget *before* any pixel buffer is allocated. This closes the decode-layer
+/// OOM gap (the render-layer pixel cap does not gate embedded-image decode): a
+/// few-hundred-byte stream declaring e.g. `/Width 60000 /Height 60000` is turned
+/// into a clean error instead of a multi-gigabyte `Vec` reservation.
+pub(crate) fn ensure_decode_budget(width: u32, height: u32, channels: u8) -> Result<()> {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    let cap = crate::engine::max_decode_pixels();
+    if pixels > cap {
+        return Err(OxideError::MalformedPdf(format!(
+            "image {width}x{height} = {pixels} pixels exceeds decode cap of {cap} pixels \
+             (raise OXIDE_MAX_DECODE_PIXELS if this is a legitimate image)"
+        )));
+    }
+    // Guard the byte product against `usize` overflow (notably on 32-bit / wasm32).
+    let channels = u64::from(channels.max(1));
+    if pixels
+        .checked_mul(channels)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .is_none()
+    {
+        return Err(OxideError::MalformedPdf(format!(
+            "image {width}x{height} x{channels} channels overflows addressable memory"
+        )));
+    }
+    Ok(())
 }
 
 fn resize_mismatch(pixels: &mut Vec<u8>, width: u32, height: u32, expected_size: usize) {
@@ -1149,5 +1179,52 @@ mod tests {
         assert_eq!(height, 4);
         assert_eq!(channels, 3);
         assert_eq!(decoded_pixels.len(), 4 * 4 * 3);
+    }
+
+    // ---- H-4/H-5/H-6: decode-layer resource caps ----
+
+    #[test]
+    fn ensure_decode_budget_rejects_oversized_dimensions() {
+        // 60000 x 60000 = 3.6e9 pixels, far over the 100M default cap.
+        let err = ensure_decode_budget(60_000, 60_000, 1).unwrap_err();
+        assert!(
+            matches!(err, OxideError::MalformedPdf(_)),
+            "huge dimensions must be a clean MalformedPdf error, got {err:?}"
+        );
+        // A legitimately large image (12 MP) is well under the cap and allowed.
+        assert!(ensure_decode_budget(4000, 3000, 3).is_ok());
+    }
+
+    #[test]
+    fn h4_build_raw_image_rejects_decode_bomb_before_allocating() {
+        // A few-hundred-byte stream declaring 60000x60000 at 1 bpc would, before
+        // the cap, force a ~3.6 GB Vec::with_capacity in unpack_subbyte_rows.
+        // It must now fail closed with a clean error instead of OOMing.
+        let dict = PdfDictionary::empty();
+        let result = ImageDecoder::build_raw_image_pub(
+            vec![0u8; 64],
+            60_000,
+            60_000,
+            1,
+            "DeviceGray",
+            &dict,
+        );
+        assert!(
+            result.is_err(),
+            "oversized image must be rejected before allocation"
+        );
+    }
+
+    #[test]
+    fn h4_legitimate_large_image_still_decodes() {
+        // 1000x1000 DeviceGray (1 MP) with full data decodes fine — the cap does
+        // not reject normal large-but-valid content.
+        let dict = PdfDictionary::empty();
+        let pixels = vec![128u8; 1000 * 1000];
+        let img =
+            ImageDecoder::build_raw_image_pub(pixels, 1000, 1000, 8, "DeviceGray", &dict).unwrap();
+        assert_eq!(img.width, 1000);
+        assert_eq!(img.height, 1000);
+        assert_eq!(img.pixels.len(), 1000 * 1000);
     }
 }
