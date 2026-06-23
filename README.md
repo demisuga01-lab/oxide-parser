@@ -217,15 +217,15 @@ The sweep covers `info`, `parse`, `verify-sig`, first-page `render`, `optimize`,
 
 | Operation | Best ms | Peak MB |
 | --- | ---: | ---: |
-| Parse to JSON (CLI) | 95.9 | 19.0 |
-| Extract text (CLI) | 38.0 | 19.9 |
-| Render PNG ZIP (CLI) | 59.1 | 18.5 |
-| Authoring example | 23.3 | 7.7 |
-| PDF/A conversion example | 16.7 | 9.0 |
-| RSA signing example | 12.7 | 5.1 |
-| Optimize (CLI) | 9.5 | 6.1 |
-| Linearize (CLI) | 12.5 | 6.8 |
-| Encrypt AES-256 (CLI) | 20.2 | 6.6 |
+| Parse to JSON (CLI) | 89.3 | 19.0 |
+| Extract text (CLI) | 37.2 | 20.0 |
+| Render PNG ZIP (CLI) | 56.2 | 18.6 |
+| Authoring example | 22.4 | 7.7 |
+| PDF/A conversion example | 21.5 | 9.1 |
+| RSA signing example | 11.9 | 5.1 |
+| Optimize (CLI) | 9.2 | 6.1 |
+| Linearize (CLI) | 12.6 | 6.9 |
+| Encrypt AES-256 (CLI) | 15.6 | 6.6 |
 
 These are smoke operation benchmarks, not statistically rigorous throughput claims.
 

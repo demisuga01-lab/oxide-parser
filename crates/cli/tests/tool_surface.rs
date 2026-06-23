@@ -44,6 +44,21 @@ fn assert_ok(out: &std::process::Output, label: &str) {
     );
 }
 
+fn zip_entries(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).expect("open zip output");
+    let mut zip = zip::ZipArchive::new(file).expect("read zip output");
+    let mut entries = Vec::new();
+    for idx in 0..zip.len() {
+        let mut entry = zip.by_index(idx).expect("zip entry");
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).expect("read zip entry");
+        entries.push((entry.name().to_string(), bytes));
+    }
+    entries
+}
+
 #[test]
 fn extract_text_runs() {
     let out = run(&[
@@ -258,6 +273,50 @@ fn render_raster_runs() {
     assert_ok(&out, "render png");
     assert!(o.exists());
     let _ = std::fs::remove_file(&o);
+}
+
+#[test]
+fn render_raster_output_is_deterministic_across_thread_counts() {
+    let serial_zip = tmp("render_threads_1.zip");
+    let parallel_zip = tmp("render_threads_4.zip");
+
+    let mut serial = oxide();
+    let serial = serial
+        .env("RAYON_NUM_THREADS", "1")
+        .args([
+            "render",
+            fx("multi_stream.pdf").to_str().unwrap(),
+            "-o",
+            serial_zip.to_str().unwrap(),
+            "-p",
+            "1-2",
+            "--format",
+            "png",
+        ])
+        .output()
+        .expect("render with one worker");
+    assert_ok(&serial, "render png serial");
+
+    let mut parallel = oxide();
+    let parallel = parallel
+        .env("RAYON_NUM_THREADS", "4")
+        .args([
+            "render",
+            fx("multi_stream.pdf").to_str().unwrap(),
+            "-o",
+            parallel_zip.to_str().unwrap(),
+            "-p",
+            "1-2",
+            "--format",
+            "png",
+        ])
+        .output()
+        .expect("render with four workers");
+    assert_ok(&parallel, "render png parallel");
+
+    assert_eq!(zip_entries(&serial_zip), zip_entries(&parallel_zip));
+    let _ = std::fs::remove_file(&serial_zip);
+    let _ = std::fs::remove_file(&parallel_zip);
 }
 
 #[test]

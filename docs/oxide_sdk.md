@@ -263,15 +263,15 @@ best elapsed time and max peak working set across the three runs.
 
 | Operation | Best ms | Peak MB | Result |
 | --- | ---: | ---: | --- |
-| Parse to JSON, CLI | 95.9 | 19.00 | Passed |
-| Extract text, CLI | 38.0 | 19.92 | Passed |
-| Render PNG ZIP, CLI | 59.1 | 18.49 | Passed |
-| Authoring example | 23.3 | 7.67 | Passed |
-| PDF/A conversion example | 16.7 | 8.96 | Passed |
-| RSA signing example | 12.7 | 5.07 | Passed |
-| Optimize CLI | 9.5 | 6.05 | Passed |
-| Linearize CLI | 12.5 | 6.82 | Passed; GA Prompt 1 made the hint tables qpdf-clean |
-| Encrypt AES-256 CLI | 20.2 | 6.55 | Passed |
+| Parse to JSON, CLI | 89.3 | 19.00 | Passed |
+| Extract text, CLI | 37.2 | 20.04 | Passed |
+| Render PNG ZIP, CLI | 56.2 | 18.59 | Passed |
+| Authoring example | 22.4 | 7.67 | Passed |
+| PDF/A conversion example | 21.5 | 9.06 | Passed |
+| RSA signing example | 11.9 | 5.12 | Passed |
+| Optimize CLI | 9.2 | 6.08 | Passed |
+| Linearize CLI | 12.6 | 6.87 | Passed; GA Prompt 1 made the hint tables qpdf-clean |
+| Encrypt AES-256 CLI | 15.6 | 6.61 | Passed |
 
 These are smoke operation benchmarks, not statistically rigorous throughput
 claims.

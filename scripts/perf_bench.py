@@ -37,7 +37,6 @@ import os
 import platform
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -169,26 +168,28 @@ def mb(n):
     return n / (1024 * 1024)
 
 
-def bench_one(binary, subcmd, pdf, extra_args, threads, repeats):
+def bench_one(binary, subcmd, pdf, extra_args, threads, repeats, temp_root):
     """Best-of-N time, max peak across runs."""
     env = dict(os.environ)
     env["RAYON_NUM_THREADS"] = str(threads)
     best_time = None
     peak = 0
     rc_final = 0
-    with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / "out.bin"
-        cmd = [binary, subcmd, str(pdf)] + extra_args
-        if subcmd in ("render",):
-            cmd += ["--output", str(out)]
-        elif subcmd == "extract-text":
-            cmd += ["--output", str(out)]
-        for _ in range(repeats):
-            elapsed, pk, rc = run_and_measure(cmd, env)
-            rc_final = rc
-            if best_time is None or elapsed < best_time:
-                best_time = elapsed
-            peak = max(peak, pk)
+    temp_root.mkdir(parents=True, exist_ok=True)
+    # Python-created temp subdirectories can be denied to child processes in the
+    # Windows restricted-token sandbox. Write each run directly under target/.
+    out = temp_root / f"{subcmd}-{threads}-{os.getpid()}-{time.perf_counter_ns()}.bin"
+    cmd = [binary, subcmd, str(pdf)] + extra_args
+    if subcmd in ("render",):
+        cmd += ["--output", str(out)]
+    elif subcmd == "extract-text":
+        cmd += ["--output", str(out)]
+    for _ in range(repeats):
+        elapsed, pk, rc = run_and_measure(cmd, env)
+        rc_final = rc
+        if best_time is None or elapsed < best_time:
+            best_time = elapsed
+        peak = max(peak, pk)
     return best_time, peak, rc_final
 
 
@@ -202,6 +203,9 @@ def main():
     ap.add_argument("--max-threads", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--cases", nargs="*",
                     help="subset of case keys to run (default: all)")
+    ap.add_argument("--temp-root", type=Path,
+                    default=REPO_ROOT / "target" / "perf-bench-tmp",
+                    help="workspace temp root for per-run output files")
     args = ap.parse_args()
 
     binary = oxide_bin()
@@ -236,7 +240,7 @@ def main():
         for threads in thread_counts:
             # Text extraction.
             t, pk, rc = bench_one(binary, "extract-text", pdf, [],
-                                  threads, args.repeats)
+                                  threads, args.repeats, args.temp_root)
             results["cases"].append({
                 "case": key, "op": "extract-text", "threads": threads,
                 "time_s": t, "peak_bytes": pk, "rc": rc, "file": str(pdf),
@@ -246,7 +250,7 @@ def main():
             # Render.
             t, pk, rc = bench_one(binary, "render", pdf,
                                   ["--dpi", str(args.dpi), "--format", "png"],
-                                  threads, args.repeats)
+                                  threads, args.repeats, args.temp_root)
             results["cases"].append({
                 "case": key, "op": "render", "threads": threads,
                 "time_s": t, "peak_bytes": pk, "rc": rc, "file": str(pdf),

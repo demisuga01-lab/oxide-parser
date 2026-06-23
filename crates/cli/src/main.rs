@@ -1479,6 +1479,7 @@ fn run_extract_images(args: ExtractImagesArgs) -> Result<(), Box<dyn Error>> {
 
 fn run_render(args: RenderArgs) -> Result<(), Box<dyn Error>> {
     use oxide_engine::{ImageEncoder, ImageOutputFormat, RenderMode};
+    use rayon::prelude::*;
     use std::io::Write;
     use zip::{write::FileOptions, CompressionMethod, ZipWriter};
 
@@ -1527,21 +1528,43 @@ fn run_render(args: RenderArgs) -> Result<(), Box<dyn Error>> {
         .compression_method(CompressionMethod::Deflated)
         .compression_level(Some(6));
 
+    const PARALLEL_RENDER_PAGE_THRESHOLD: usize = 32;
+    let quality = args.quality;
+    let encode_page = |page_num: usize| -> Result<Vec<u8>, String> {
+        let buf = engine
+            .render_page_with_mode(page_num, dpi, render_mode)
+            .map_err(|err| err.to_string())?;
+        let raw = buf.to_raw_image();
+        match &format {
+            ImageOutputFormat::Jpeg => ImageEncoder::encode_jpeg(&raw, quality),
+            ImageOutputFormat::Webp => ImageEncoder::encode_webp(&raw, quality),
+            ImageOutputFormat::Png | ImageOutputFormat::Original => {
+                ImageEncoder::encode_png_fast(&raw)
+            }
+        }
+        .map_err(|err| err.to_string())
+    };
+
+    let rendered_pages: Vec<(usize, Result<Vec<u8>, String>)> =
+        if page_nums.len() >= PARALLEL_RENDER_PAGE_THRESHOLD {
+            page_nums
+                .par_iter()
+                .map(|&page_num| (page_num, encode_page(page_num)))
+                .collect()
+        } else {
+            page_nums
+                .iter()
+                .map(|&page_num| (page_num, encode_page(page_num)))
+                .collect()
+        };
+
     let mut rendered_count = 0usize;
-    for page_num in &page_nums {
-        let buf = match engine.render_page_with_mode(*page_num, dpi, render_mode) {
-            Ok(buf) => buf,
+    for (page_num, bytes) in rendered_pages {
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
             Err(err) => {
                 eprintln!("Warning: skipped page {}: {}", page_num, err);
                 continue;
-            }
-        };
-        let raw = buf.to_raw_image();
-        let bytes = match format {
-            ImageOutputFormat::Jpeg => ImageEncoder::encode_jpeg(&raw, args.quality)?,
-            ImageOutputFormat::Webp => ImageEncoder::encode_webp(&raw, args.quality)?,
-            ImageOutputFormat::Png | ImageOutputFormat::Original => {
-                ImageEncoder::encode_png_fast(&raw)?
             }
         };
         let filename = format!("page-{:03}.{}", page_num, format.file_extension());

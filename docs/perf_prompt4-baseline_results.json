@@ -1,0 +1,82 @@
+{
+  "label": "prompt4-baseline",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "cpu_count": 20,
+  "dpi": 150,
+  "repeats": 3,
+  "binary": "E:\\wellpdfsdk\\target\\release\\oxide.exe",
+  "cases": [
+    {
+      "case": "120pg",
+      "op": "extract-text",
+      "threads": 1,
+      "time_s": 0.6395882000033453,
+      "peak_bytes": 7274496,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf"
+    },
+    {
+      "case": "120pg",
+      "op": "render",
+      "threads": 1,
+      "time_s": 4.884320600001956,
+      "peak_bytes": 24117248,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf"
+    },
+    {
+      "case": "120pg",
+      "op": "extract-text",
+      "threads": 20,
+      "time_s": 0.11279319999812287,
+      "peak_bytes": 12849152,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf"
+    },
+    {
+      "case": "120pg",
+      "op": "render",
+      "threads": 20,
+      "time_s": 3.2203980999984196,
+      "peak_bytes": 24092672,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\tests\\corpus\\pdfs\\generated\\generated_120_pages.pdf"
+    },
+    {
+      "case": "tracemonkey",
+      "op": "extract-text",
+      "threads": 1,
+      "time_s": 0.11868909999975585,
+      "peak_bytes": 9478144,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\tracemonkey.pdf"
+    },
+    {
+      "case": "tracemonkey",
+      "op": "render",
+      "threads": 1,
+      "time_s": 8.289032500000758,
+      "peak_bytes": 37486592,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\tracemonkey.pdf"
+    },
+    {
+      "case": "tracemonkey",
+      "op": "extract-text",
+      "threads": 20,
+      "time_s": 0.025986000000557397,
+      "peak_bytes": 19595264,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\tracemonkey.pdf"
+    },
+    {
+      "case": "tracemonkey",
+      "op": "render",
+      "threads": 20,
+      "time_s": 6.332487800002127,
+      "peak_bytes": 37670912,
+      "rc": 0,
+      "file": "E:\\wellpdfsdk\\crates\\engine\\tests\\fixtures\\tracemonkey.pdf"
+    }
+  ]
+}
