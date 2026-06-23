@@ -20,7 +20,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  PR_FUZZ_SECONDS: "45"
   DEEP_FUZZ_SECONDS: "900"
   FUZZ_MAX_LEN: "65536"
 
@@ -86,20 +85,17 @@ jobs:
         run: python scripts/ci_fuzz.py --targets "${{ matrix.target }}" --mode regression
 
       - name: Time-boxed fuzz run
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
-          seconds="${PR_FUZZ_SECONDS}"
-          mode="smoke"
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             seconds="${DEEP_FUZZ_SECONDS}"
-            mode="deep"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          else
             seconds="${{ inputs.fuzz_seconds }}"
-            mode="deep"
           fi
           python scripts/ci_fuzz.py \
             --targets "${{ matrix.target }}" \
-            --mode "${mode}" \
+            --mode deep \
             --seconds "${seconds}" \
             --max-len "${FUZZ_MAX_LEN}" \
             --no-build

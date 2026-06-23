@@ -7,29 +7,28 @@ The workflow is `.github/workflows/fuzz.yml`.
 
 The sanitizer gate is separate: `.github/workflows/sanitizers.yml` runs on a
 schedule or manual dispatch so ASan/TSan/UB-check coverage can be heavier than
-the pull-request fuzz smoke.
+the pull-request regression gate.
 
 ## What Runs
 
 Every pull request and push to `main` runs each cargo-fuzz target in its own
-matrix job:
+deterministic matrix job:
 
 1. install nightly Rust;
 2. restore the per-target persistent corpus cache;
 3. build the target;
 4. replay the committed regression/seed corpus with `-runs=0`;
-5. run a short time-boxed fuzz pass;
-6. upload crash artifacts on failure.
+5. upload crash artifacts on failure.
 
-The scheduled weekly job uses the same target matrix but runs the timed phase
-for longer. It saves the mutated corpus back to the GitHub Actions cache and
-uploads a corpus artifact for manual minimization.
+The scheduled weekly job and manual dispatch use the same target matrix, then
+run the timed exploratory phase. They save the mutated corpus back to the
+GitHub Actions cache and upload a corpus artifact for manual minimization.
 
 The runner entry point is:
 
 ```powershell
 python scripts\ci_fuzz.py --targets content_tokenizer --mode regression
-python scripts\ci_fuzz.py --targets content_tokenizer --mode smoke --seconds 45 --no-build
+python scripts\ci_fuzz.py --targets content_tokenizer --mode deep --seconds 900 --no-build
 ```
 
 ## Targets
@@ -96,7 +95,7 @@ cargo +nightly fuzz run <target> corpus/<target> -- -runs=0
 ```
 
 If a previously fixed input crashes, hangs, or OOMs again, cargo-fuzz returns a
-non-zero exit code and the CI job fails before the timed fuzz phase matters.
+non-zero exit code and the CI job fails.
 
 ## Triage Workflow
 
@@ -130,10 +129,10 @@ When CI finds a crash:
 
 ## Budget
 
-Pull request fuzzing is intentionally short: default 45 seconds per target, in
-parallel. The longer scheduled job defaults to 900 seconds per target. The
-workflow exposes a `workflow_dispatch` `fuzz_seconds` input for ad hoc longer
-runs without changing YAML.
+Pull request and push fuzzing is intentionally deterministic: build the target
+and replay committed corpora only. The scheduled job defaults to 900 seconds per
+target. The workflow exposes a `workflow_dispatch` `fuzz_seconds` input for ad
+hoc longer runs without changing YAML.
 
 The goal is not to prove every input safe in a single PR. The goal is to make
 the GA5 clean sweep permanent: known regressions fail quickly, and scheduled

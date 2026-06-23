@@ -16,7 +16,7 @@ claim that those unrelated edits are release-ready.
 | --- | --- | --- |
 | Unit, integration, and doc tests | Public API behavior, CLI/server flows, parser/writer/render/edit/sign/compliance tests | `cargo test --workspace` passed in this session. |
 | Clippy | Workspace lint gate for all targets | `cargo clippy --workspace --all-targets -- -D warnings` passed in this session. |
-| Continuous private fuzzing | cargo-fuzz target matrix, persistent corpus cache, regression replay, scheduled deeper runs | `.github/workflows/fuzz.yml` is live. All 16 committed fuzz corpora replayed cleanly in this session. |
+| Continuous private fuzzing | cargo-fuzz target matrix, persistent corpus cache, deterministic regression replay on push/PR, scheduled/manual deeper runs | `.github/workflows/fuzz.yml` is live. All 16 committed fuzz corpora replayed cleanly in this session. |
 | Differential fuzzing | Wrong-output checks against qpdf and Poppler for page count, structural validity, text similarity, and writer round-trip | `.github/workflows/differential-fuzz.yml` is live. A 20-case smoke passed with 16 accepted notes and 0 high-signal disagreements. |
 | Property-based testing | Round-trip identities, writer-mode equivalence, AES-256 preserve-content, no-panic arbitrary bytes, document-model invariants | `.github/workflows/property-tests.yml` is live. `cargo test -p oxide-engine --test property_invariants` passed 6 properties. |
 | Grammar-aware fuzzing | Valid-but-adversarial PDFs that reach content interpretation, renderer, editing, linearization, PDF/A, and signature validation paths | `structured_pdf` is in the fuzz target matrix. Its committed corpus replay passed, reaching 10,945 coverage/features in the smoke output. |
