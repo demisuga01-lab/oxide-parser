@@ -7,6 +7,7 @@ Oxide is prepared for a third-party security audit with the following materials.
 - Threat model: [`threat_model.md`](threat_model.md)
 - Attack surface and unsafe inventory: [`attack_surface.md`](attack_surface.md)
 - Crypto review prep: [`crypto_review.md`](crypto_review.md)
+- Consolidated security and robustness posture: [`posture.md`](posture.md)
 - Server security posture: [`../security.md`](../security.md)
 - Robustness and fuzzing posture: [`../robustness.md`](../robustness.md)
 - Continuous fuzzing: [`../continuous_fuzzing.md`](../continuous_fuzzing.md)

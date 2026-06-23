@@ -20,6 +20,11 @@ The worktree was still dirty from pre-existing unrelated source changes, so the
 final release-gate verdict is evidence for a release candidate from a clean
 branch, not permission to tag this exact dirty worktree.
 
+The post-GA hardening consolidation adds continuous fuzzing, differential
+fuzzing, property tests, grammar-aware deep fuzzing, dependency audit gates, and
+an audit-readiness packet. The current authoritative security/robustness
+posture is `docs/security/posture.md`.
+
 Tools used:
 
 | Tool | Version |
@@ -318,6 +323,7 @@ Blocker status after GA1-GA5 plus GA6 verification:
 | Renderer fidelity | Cleared as a meaningful improvement: 86.12% visual pass / 91.29 weighted, still preview/OCR-grade. |
 | Whole-SDK hardening | Cleared for the measured slice: 1,590 operations, 0 crashes, 0 timeouts, 0 invalid transformed outputs from qpdf-clean inputs. |
 | Signature LTV | Partially cleared: offline timestamp/DSS/CRL substrate works; live TSA/OCSP/trust-store/B-LTA and external LTV UI recognition remain known limitations. |
+| Continuous hardening | Cleared as code-level posture: all 16 fuzz target corpora replayed, property tests passed, differential smoke passed, cargo-audit and cargo-deny passed with the documented RSA advisory exception. |
 
 Known limitations for the release notes:
 
@@ -325,11 +331,14 @@ Known limitations for the release notes:
   tag.
 - Signature LTV is offline-first; live revocation/timestamp fetching and
   trust-policy validation remain follow-ups.
+- RustCrypto `rsa 0.9.10` carries `RUSTSEC-2023-0071` with no fixed upgrade in
+  the current pure-Rust line. It is explicitly ignored in `deny.toml` and
+  should be reviewed during the external crypto audit.
 - PDF/UA is assistive best-effort, not a certified accessibility claim.
 - Rendering remains preview/OCR-grade, not visual-proof grade.
 - Messy scanned tables and scanned KV extraction trail ML-heavy systems.
-- `cargo-deny` was not installed for this GA6 rerun; license posture remains
-  documented in `docs/licenses.md` and `deny.toml` is present.
+- A paid third-party security audit and a real pilot deployment remain the
+  next trust-builders beyond code-level hardening.
 
 Bottom line: Oxide is now a complete, self-hostable, pure-Rust enterprise PDF
 SDK for parse/extract, authoring, editing, structural operations, PDF/A,

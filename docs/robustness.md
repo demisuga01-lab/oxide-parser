@@ -50,6 +50,10 @@ Grammar-aware fuzzing is included as the `structured_pdf` cargo-fuzz target.
 See [`grammar_aware_fuzzing.md`](grammar_aware_fuzzing.md) for the valid-PDF
 generator and deep-operation coverage.
 
+The consolidated post-GA hardening verdict, fresh verification evidence, and
+residual-risk list are recorded in
+[`security/posture.md`](security/posture.md).
+
 ## What was set up
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)

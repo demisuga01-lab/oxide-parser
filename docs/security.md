@@ -10,6 +10,8 @@ See also [`robustness.md`](robustness.md) for resource-safety controls
 For full audit preparation, see the security packet under
 [`security/`](security/): threat model, attack-surface map, crypto-review prep,
 dependency policy, and audit-readiness checklist.
+The consolidated code-level security and robustness posture is
+[`security/posture.md`](security/posture.md).
 
 ## 1. Authentication — fail-closed API keys
 
