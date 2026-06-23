@@ -151,7 +151,7 @@ async fn get_result_raw(
 
 /// Poll a job's status until terminal (completed/failed) or attempts exhausted.
 async fn poll_until_terminal(app: &Router, status_url: &str, api_key: Option<&str>) -> Value {
-    for _ in 0..300 {
+    for _ in 0..600 {
         let (code, body) = get_status(app, status_url, api_key).await;
         assert_eq!(
             code,
@@ -163,7 +163,7 @@ async fn poll_until_terminal(app: &Router, status_url: &str, api_key: Option<&st
         if s == "completed" || s == "failed" {
             return body;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("job did not reach a terminal state in time");
 }

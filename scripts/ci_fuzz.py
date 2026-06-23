@@ -9,6 +9,8 @@ and does not affect normal stable builds.
 from __future__ import annotations
 
 import argparse
+from collections import deque
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,11 +38,42 @@ DEFAULT_TARGETS = [
 ]
 
 
+def github_escape(value: str) -> str:
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def github_error(title: str, message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(
+            f"::error title={github_escape(title)}::{github_escape(message)}",
+            flush=True,
+        )
+
+
 def run(cmd: list[str], *, cwd: Path = FUZZ) -> None:
     print("+", " ".join(cmd), flush=True)
-    completed = subprocess.run(cmd, cwd=cwd, check=False)
-    if completed.returncode != 0:
-        raise SystemExit(completed.returncode)
+    tail: deque[str] = deque(maxlen=120)
+    completed = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert completed.stdout is not None
+    for line in completed.stdout:
+        print(line, end="", flush=True)
+        tail.append(line.rstrip())
+    returncode = completed.wait()
+    if returncode != 0:
+        tail_text = "\n".join(tail)[-3500:]
+        github_error(
+            "cargo-fuzz command failed",
+            f"command: {' '.join(cmd)}\nexit: {returncode}\n{tail_text}",
+        )
+        raise SystemExit(returncode)
 
 
 def has_seed(corpus_dir: Path) -> bool:
