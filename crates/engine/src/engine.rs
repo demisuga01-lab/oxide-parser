@@ -630,6 +630,17 @@ impl ContentEngine {
         crate::signature::verify_signatures(&self.doc)
     }
 
+    /// Verify signatures and evaluate signer trust against the trust anchors in
+    /// `options`. A signature is reported `Trusted` only when integrity verifies,
+    /// the signer chains to a configured anchor (in validity, not revoked), and
+    /// it covers the whole file. With no anchors, trust is `NotVerified`.
+    pub fn verify_signatures_with_options(
+        &self,
+        options: &crate::signature::VerifyOptions,
+    ) -> Result<Vec<crate::signature::SignatureReport>> {
+        crate::signature::verify_signatures_with_options(&self.doc, options)
+    }
+
     /// Apply an RSA/SHA-256 detached CMS digital signature as an incremental
     /// update, preserving the original file bytes as an exact prefix.
     pub fn sign(

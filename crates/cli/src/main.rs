@@ -2018,7 +2018,9 @@ fn run_to_html(args: ToHtmlArgs) -> Result<(), Box<dyn Error>> {
 }
 
 fn run_verify_sig(args: VerifySigArgs) -> Result<(), Box<dyn Error>> {
-    use oxide_engine::{Coverage, PadesLevel, RevocationStatus, SignatureValidity};
+    use oxide_engine::{
+        Coverage, PadesLevel, RevocationStatus, SignatureStatus, SignatureTrust, SignatureValidity,
+    };
 
     let engine = open_engine(&args.pdf, &args.password)?;
     let reports = engine.verify_signatures()?;
@@ -2040,6 +2042,25 @@ fn run_verify_sig(args: VerifySigArgs) -> Result<(), Box<dyn Error>> {
             SignatureValidity::Invalid => "Signature is INVALID (digest/signature mismatch)",
             SignatureValidity::UnsupportedAlgorithm => "Signature algorithm UNSUPPORTED",
             SignatureValidity::Error => "Signature could NOT be verified",
+        };
+        let overall = match r.status {
+            SignatureStatus::Trusted => "TRUSTED (integrity + trusted chain + whole-file coverage)",
+            SignatureStatus::ValidUntrusted => {
+                "VALID but UNTRUSTED (cryptographically valid; signer not trusted)"
+            }
+            SignatureStatus::ValidButModified => "VALID but document MODIFIED after signing",
+            SignatureStatus::Invalid => "INVALID",
+            SignatureStatus::UnsupportedAlgorithm => "UNSUPPORTED algorithm",
+            SignatureStatus::Error => "could NOT be verified",
+        };
+        let trust = match r.trust {
+            SignatureTrust::NotVerified => {
+                "not verified (no trust anchors configured — pass anchors to evaluate trust)"
+            }
+            SignatureTrust::Trusted => "trusted (chains to a configured anchor)",
+            SignatureTrust::Untrusted => "UNTRUSTED (self-signed or unknown issuer)",
+            SignatureTrust::Expired => "signer certificate EXPIRED / not yet valid",
+            SignatureTrust::Revoked => "signer certificate REVOKED",
         };
         let coverage = match r.coverage {
             Coverage::WholeFile => "covers the whole file",
@@ -2067,7 +2088,9 @@ fn run_verify_sig(args: VerifySigArgs) -> Result<(), Box<dyn Error>> {
         if let Some(loc) = &r.location {
             println!("  - Location:     {loc}");
         }
-        println!("  - Verdict:      {verdict}");
+        println!("  - Status:       {overall}");
+        println!("  - Integrity:    {verdict}");
+        println!("  - Trust:        {trust}");
         println!("  - Coverage:     {coverage}");
         let pades = match r.ltv.pades_level {
             PadesLevel::BaselineB => "PAdES B-B / core CMS",

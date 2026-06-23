@@ -8,6 +8,29 @@ vulnerability classes, deepest in TIER 1 (crypto/signatures), then the
 untrusted-input surface (TIER 2), then correctness-as-security (TIER 3). Every
 finding is backed by quoted code at `file:line`. No source was modified.
 
+> **Remediation status (updated 2026-06-24).** The two critical
+> correctness-as-security findings have since been **FIXED**, each proven by a
+> test that is the guarantee:
+> - **H-1 (redaction under-removes text) — FIXED.** Redaction now positions
+>   glyphs from the resolved font's real `/Widths`//W` metrics (CID byte-width
+>   aware) instead of a fixed 0.5em estimate, removing every glyph whose true
+>   rectangle intersects the redaction; when font metrics are unavailable it
+>   **fails closed** (drops the whole intersecting show string). Guarantee test:
+>   `redaction_truly_removes_text_under_box_with_proportional_font`
+>   (`crates/engine/tests/editing.rs`).
+> - **H-3 (`Valid` ≠ trusted) — FIXED.** Verification now reports integrity,
+>   **trust**, and coverage as distinct properties; the overall `status` is
+>   `Trusted` only when integrity verifies, the signer chains to a configured
+>   trust anchor (in validity, not revoked), **and** coverage is whole-file.
+>   With no anchors, trust is `NotVerified` and a self-signed signature is
+>   `ValidUntrusted`, never trusted. Guarantee tests in
+>   `crates/engine/tests/signatures.rs`.
+>
+> Still **OPEN** (scheduled for the next fix batch): H-2 (redaction does not
+> scrub alternate text representations — `/ActualText`, struct tree, XMP,
+> attachments), and H-4/H-5/H-6 (unbounded image/CCITT/JBIG2 decode
+> allocations). The Medium/Low findings below remain as recorded.
+
 > **Honest framing.** This is a *systematic and prioritized* review, **not an
 > exhaustive proof of absence**. Absence of a finding in an area does not prove
 > the area is bug-free. This review **complements but does not replace** a paid

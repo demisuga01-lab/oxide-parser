@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use oxide_engine::{
     ContentEngine, Coverage, LtvMaterial, PadesLevel, PdfSigner, RevocationStatus,
-    SignatureOptions, SignatureValidity,
+    SignatureOptions, SignatureStatus, SignatureTrust, SignatureValidity, VerifyOptions,
 };
 
 fn fixture(name: &str) -> PathBuf {
@@ -246,12 +246,122 @@ fn valid_signature_is_cryptographically_valid_with_cert_details() {
         cert.subject
     );
     assert_eq!(cert.serial_hex, "1234ABCD");
-    // Honest-scope note must be present.
+    // CORRECTED (was: asserted the old "Trust-chain validation ... not verdict
+    // gates" scope note, which encoded the H-3 bug that trust was never
+    // evaluated). The honest note now separates integrity from trust, and with
+    // no anchors configured trust is explicitly NOT verified — never "trusted".
+    assert_eq!(r.trust, SignatureTrust::NotVerified);
+    assert_eq!(r.status, SignatureStatus::ValidUntrusted);
     assert!(
-        r.note.contains("Trust-chain validation"),
-        "scope note missing: {}",
+        r.note.to_lowercase().contains("trust not verified"),
+        "honest trust note missing: {}",
         r.note
     );
+}
+
+fn sign_minimal_with_test_signer() -> Vec<u8> {
+    let e = ContentEngine::open_bytes(fixture_bytes("minimal.pdf")).unwrap();
+    e.sign(
+        &test_signer(),
+        &SignatureOptions {
+            field_name: "OxideTrust".to_string(),
+            signing_time: Some("D:20260622000000Z".to_string()),
+            ..SignatureOptions::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn self_signed_signature_is_valid_but_not_trusted_by_default() {
+    // H-3 core guarantee: a cryptographically valid signature from a self-signed
+    // certificate must NOT be reported as trusted when no anchors are configured.
+    // (The old API exposed only `validity: Valid`, which an integrator would
+    // misread as "trusted" — exactly the over-trust this fixes.)
+    let engine = ContentEngine::open_bytes(sign_minimal_with_test_signer()).unwrap();
+    let r = &engine.verify_signatures().unwrap()[0];
+    assert_eq!(r.validity, SignatureValidity::Valid, "integrity must verify");
+    assert_eq!(
+        r.trust,
+        SignatureTrust::NotVerified,
+        "no anchors configured -> trust not verified"
+    );
+    assert_eq!(
+        r.status,
+        SignatureStatus::ValidUntrusted,
+        "overall verdict must be valid-but-untrusted, never trusted"
+    );
+    assert_ne!(r.status, SignatureStatus::Trusted);
+}
+
+#[test]
+fn pinning_signer_cert_as_trust_anchor_makes_it_trusted() {
+    let signer = test_signer();
+    let engine = ContentEngine::open_bytes(sign_minimal_with_test_signer()).unwrap();
+    let options =
+        VerifyOptions::default().with_trust_anchor_der(signer.signer_certificate_der().unwrap());
+    let r = &engine.verify_signatures_with_options(&options).unwrap()[0];
+    assert_eq!(r.validity, SignatureValidity::Valid);
+    assert_eq!(
+        r.trust,
+        SignatureTrust::Trusted,
+        "signer chains to the pinned anchor and is in validity"
+    );
+    assert_eq!(r.coverage, Coverage::WholeFile);
+    assert_eq!(r.status, SignatureStatus::Trusted);
+}
+
+#[test]
+fn signature_with_unrelated_trust_anchor_is_not_trusted() {
+    // sig_valid.pdf is signed by "Oxide Test Signer". Pinning a DIFFERENT,
+    // valid certificate (our test_signer) as the only anchor must not produce a
+    // trusted verdict — trust requires an actual chain to a configured anchor.
+    let e = ContentEngine::open_bytes(fixture_bytes("sig_valid.pdf")).unwrap();
+    let options = VerifyOptions::default()
+        .with_trust_anchor_der(test_signer().signer_certificate_der().unwrap());
+    let r = &e.verify_signatures_with_options(&options).unwrap()[0];
+    assert_eq!(r.validity, SignatureValidity::Valid);
+    assert_ne!(
+        r.trust,
+        SignatureTrust::Trusted,
+        "signer does not chain to the unrelated anchor"
+    );
+    assert_eq!(r.status, SignatureStatus::ValidUntrusted);
+}
+
+#[test]
+fn modified_after_signing_is_never_trusted_even_with_anchor() {
+    let signer = test_signer();
+    let mut signed = sign_minimal_with_test_signer();
+    signed.extend_from_slice(b"\n% appended after signing\n9 0 obj<<>>endobj\n");
+
+    let engine = ContentEngine::open_bytes(signed).unwrap();
+    let options =
+        VerifyOptions::default().with_trust_anchor_der(signer.signer_certificate_der().unwrap());
+    let r = &engine.verify_signatures_with_options(&options).unwrap()[0];
+    // The signer chains to the anchor, but appended content means the signature
+    // no longer covers the whole file — so the overall verdict is NOT trusted.
+    assert_eq!(r.validity, SignatureValidity::Valid);
+    assert_eq!(r.coverage, Coverage::ModifiedAfterSigning);
+    assert_eq!(r.status, SignatureStatus::ValidButModified);
+    assert_ne!(r.status, SignatureStatus::Trusted);
+}
+
+#[test]
+fn tampered_signature_overall_status_is_invalid_even_with_anchor() {
+    let mut bytes = fixture_bytes("sig_valid.pdf");
+    let pos = bytes
+        .windows(2)
+        .position(|w| w == b"Hi")
+        .expect("page content marker present");
+    bytes[pos] = b'X';
+    let e = ContentEngine::open_bytes(bytes).unwrap();
+    let options = VerifyOptions::default()
+        .with_trust_anchor_der(test_signer().signer_certificate_der().unwrap());
+    let r = &e.verify_signatures_with_options(&options).unwrap()[0];
+    assert_eq!(r.validity, SignatureValidity::Invalid);
+    assert_eq!(r.status, SignatureStatus::Invalid);
+    assert_ne!(r.status, SignatureStatus::Trusted);
 }
 
 #[test]

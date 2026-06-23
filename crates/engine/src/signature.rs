@@ -130,6 +130,14 @@ impl PdfSigner {
     pub fn signer_certificate(&self) -> &Certificate {
         &self.certificates[0]
     }
+
+    /// DER encoding of the signer certificate, e.g. to pin it as a trust anchor
+    /// in [`VerifyOptions`].
+    pub fn signer_certificate_der(&self) -> Result<Vec<u8>> {
+        self.certificates[0]
+            .to_der()
+            .map_err(|e| OxideError::MalformedPdf(format!("signer certificate encode: {e}")))
+    }
 }
 
 /// Options for [`sign_document`].
@@ -202,6 +210,77 @@ pub enum Coverage {
     /// Bytes exist after the signed ranges — an incremental update was appended
     /// after this signature, i.e. the document was modified after signing.
     ModifiedAfterSigning,
+}
+
+/// Options controlling signature verification, most importantly the set of
+/// trust anchors the verifier accepts.
+///
+/// With no anchors configured, **no signature is reported as trusted** — only
+/// its cryptographic integrity and coverage are established. This is the safe
+/// default: a cryptographically valid signature from a self-signed or unknown
+/// certificate must never be conflated with an authentic, trusted signature.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOptions {
+    /// DER-encoded certificates the verifier explicitly trusts as roots (or
+    /// pinned signer certificates). A signer is `Trusted` only if it chains to
+    /// one of these and is within its validity period.
+    pub trust_anchors_der: Vec<Vec<u8>>,
+}
+
+impl VerifyOptions {
+    /// Add a DER-encoded trust anchor certificate.
+    pub fn with_trust_anchor_der(mut self, der: Vec<u8>) -> Self {
+        self.trust_anchors_der.push(der);
+        self
+    }
+}
+
+/// Whether the signer's certificate is *trusted*, evaluated against the
+/// configured trust anchors. This is distinct from cryptographic integrity
+/// ([`SignatureValidity`]): a signature can be cryptographically `Valid` while
+/// its signer is `NotVerified` or `Untrusted`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureTrust {
+    /// No trust anchors were configured, so chain trust was not evaluated. The
+    /// signature may be cryptographically valid, but the signer is unverified —
+    /// this is **not** a statement that the signer is trustworthy.
+    NotVerified,
+    /// The signer certificate chains to a configured trust anchor and is within
+    /// its validity period (and not revoked by embedded material).
+    Trusted,
+    /// Chain evaluation ran but the signer does not chain to any configured
+    /// anchor — e.g. a self-signed certificate, or an unknown issuer.
+    Untrusted,
+    /// The signer chains to an anchor but is outside its validity period.
+    Expired,
+    /// The signer certificate was revoked per embedded revocation material.
+    Revoked,
+}
+
+/// The overall, honest verdict combining integrity, trust, and coverage. A
+/// signature is [`SignatureStatus::Trusted`] **only** if its integrity verifies,
+/// its signer chains to a configured trust anchor, and it covers the whole file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureStatus {
+    /// Integrity verified, signer trusted to a configured anchor, whole-file
+    /// coverage. The strongest verdict.
+    Trusted,
+    /// Integrity verified, but trust to a configured anchor was not established
+    /// (no anchors configured, untrusted root, expired, or revoked — see the
+    /// `trust` field for which).
+    ValidUntrusted,
+    /// Integrity verified for the bytes it covers, but the document was modified
+    /// after signing (content was appended outside the signed range).
+    ValidButModified,
+    /// The integrity check failed: content within the signed range changed or
+    /// the signature is corrupt.
+    Invalid,
+    /// The signature algorithm is not supported.
+    UnsupportedAlgorithm,
+    /// The signature could not be parsed/verified at all.
+    Error,
 }
 
 /// PAdES baseline level inferred from the signature and embedded LTV material.
@@ -322,8 +401,19 @@ pub struct SignatureReport {
     pub sub_filter: Option<String>,
     /// Digest algorithm named in the CMS, e.g. "SHA-256".
     pub digest_algorithm: Option<String>,
+    /// Cryptographic **integrity** of the signature: does the CMS signature
+    /// verify against the embedded certificate's key over the signed bytes?
+    /// This is *not* a trust/authenticity verdict — see [`SignatureReport::trust`]
+    /// and [`SignatureReport::status`].
     pub validity: SignatureValidity,
+    /// Whether the signer certificate is **trusted** (chains to a configured
+    /// trust anchor and is in-validity / not revoked). `NotVerified` when no
+    /// anchors were configured.
+    pub trust: SignatureTrust,
     pub coverage: Coverage,
+    /// The overall honest verdict combining integrity + trust + coverage.
+    /// `Trusted` only when all three hold.
+    pub status: SignatureStatus,
     /// Signer certificate details (when a cert was present and parsed).
     pub certificate: Option<CertInfo>,
     /// PAdES/LTV material discovered for this signature.
@@ -332,15 +422,28 @@ pub struct SignatureReport {
     pub note: String,
 }
 
-/// Verify every signature field in the document.
+/// Verify every signature field in the document with default options (no trust
+/// anchors). Integrity and coverage are established; trust is reported as
+/// `NotVerified`. Use [`verify_signatures_with_options`] to evaluate trust.
 pub fn verify_signatures(doc: &PdfDocument) -> Result<Vec<SignatureReport>> {
+    verify_signatures_with_options(doc, &VerifyOptions::default())
+}
+
+/// Verify every signature field, evaluating signer trust against the trust
+/// anchors in `options`. A signature is reported as `Trusted` only when its
+/// integrity verifies, its signer chains to a configured anchor (in validity
+/// and not revoked), and it covers the whole file.
+pub fn verify_signatures_with_options(
+    doc: &PdfDocument,
+    options: &VerifyOptions,
+) -> Result<Vec<SignatureReport>> {
     let reader = doc.reader();
     let file = reader.file_bytes();
     let dss = read_dss_index(reader);
     let mut reports = Vec::new();
 
     for (idx, field) in find_signature_fields(doc).into_iter().enumerate() {
-        reports.push(verify_one(&field, file, idx + 1, &dss));
+        reports.push(verify_one(&field, file, idx + 1, &dss, options));
     }
     Ok(reports)
 }
@@ -935,7 +1038,13 @@ fn signature_vri_key(contents: &[u8]) -> String {
     hex_upper(&digest)
 }
 
-fn verify_one(field: &SigField, file: &[u8], index: usize, dss: &DssIndex) -> SignatureReport {
+fn verify_one(
+    field: &SigField,
+    file: &[u8],
+    index: usize,
+    dss: &DssIndex,
+    options: &VerifyOptions,
+) -> SignatureReport {
     let sig = &field.sig_dict;
     let mut report = SignatureReport {
         index,
@@ -948,7 +1057,9 @@ fn verify_one(field: &SigField, file: &[u8], index: usize, dss: &DssIndex) -> Si
         sub_filter: sig.get_name("SubFilter").map(str::to_string),
         digest_algorithm: None,
         validity: SignatureValidity::Error,
+        trust: SignatureTrust::NotVerified,
         coverage: Coverage::ModifiedAfterSigning,
+        status: SignatureStatus::Error,
         certificate: None,
         ltv: LtvReport::default(),
         note: String::new(),
@@ -986,42 +1097,220 @@ fn verify_one(field: &SigField, file: &[u8], index: usize, dss: &DssIndex) -> Si
     match verify_cms(&contents, &signed_data_bytes) {
         Ok(result) => {
             let ltv = build_ltv_report(&contents, dss, &result, result.certificate.as_ref());
+            let trust = evaluate_trust(
+                result.signer_cert.as_ref(),
+                &result.chain,
+                options,
+                &ltv.revocation_status,
+            );
             report.validity = result.validity;
             report.digest_algorithm = result.digest_algorithm;
             report.certificate = result.certificate;
+            report.trust = trust;
             report.ltv = ltv;
+            report.status =
+                overall_status(&report.validity, &report.trust, &report.coverage);
         }
         Err(msg) => {
             report.validity = SignatureValidity::Error;
+            report.status = SignatureStatus::Error;
             report.note = msg;
             return report;
         }
     }
 
-    report.note = format!("{}. {}", scope_note(&report.validity), report.ltv.note);
+    report.note = format!("{}. {}", status_note(&report), report.ltv.note);
     report
 }
 
-fn scope_note(validity: &SignatureValidity) -> String {
-    let base = match validity {
-        SignatureValidity::Valid => "cryptographically valid signature over the signed byte ranges",
-        SignatureValidity::Invalid => "signature/digest did not verify (content within the signed ranges changed, or the signature is corrupt)",
-        SignatureValidity::UnsupportedAlgorithm => "signature algorithm not supported (only RSA PKCS#1 v1.5 is verified)",
+/// Combine integrity + trust + coverage into the overall honest verdict.
+/// `Trusted` requires all three: integrity `Valid`, signer `Trusted`, and
+/// whole-file coverage.
+fn overall_status(
+    validity: &SignatureValidity,
+    trust: &SignatureTrust,
+    coverage: &Coverage,
+) -> SignatureStatus {
+    match validity {
+        SignatureValidity::Valid => {
+            if *coverage == Coverage::ModifiedAfterSigning {
+                SignatureStatus::ValidButModified
+            } else if *trust == SignatureTrust::Trusted {
+                SignatureStatus::Trusted
+            } else {
+                SignatureStatus::ValidUntrusted
+            }
+        }
+        SignatureValidity::Invalid => SignatureStatus::Invalid,
+        SignatureValidity::UnsupportedAlgorithm => SignatureStatus::UnsupportedAlgorithm,
+        SignatureValidity::Error => SignatureStatus::Error,
+    }
+}
+
+/// Evaluate signer trust against configured anchors. Returns `NotVerified` when
+/// no anchors are configured — the safe default that never claims trust without
+/// a verified chain. Revocation by embedded material is a hard failure
+/// regardless of anchors.
+fn evaluate_trust(
+    signer: Option<&Certificate>,
+    chain: &[Certificate],
+    options: &VerifyOptions,
+    revocation: &RevocationStatus,
+) -> SignatureTrust {
+    if *revocation == RevocationStatus::RevokedByEmbeddedCrl {
+        return SignatureTrust::Revoked;
+    }
+    let anchors: Vec<Certificate> = options
+        .trust_anchors_der
+        .iter()
+        .filter_map(|der| Certificate::from_der(der).ok())
+        .collect();
+    if anchors.is_empty() {
+        return SignatureTrust::NotVerified;
+    }
+    let Some(signer) = signer else {
+        return SignatureTrust::Untrusted;
+    };
+    if !cert_in_validity_period(signer) {
+        return SignatureTrust::Expired;
+    }
+    if chains_to_anchor(signer, chain, &anchors) {
+        SignatureTrust::Trusted
+    } else {
+        SignatureTrust::Untrusted
+    }
+}
+
+/// True if `signer` chains to one of `anchors`, either by being a pinned anchor
+/// itself or via a path through the embedded `chain`, with every link verified
+/// by an actual certificate-signature check.
+fn chains_to_anchor(
+    signer: &Certificate,
+    chain: &[Certificate],
+    anchors: &[Certificate],
+) -> bool {
+    const MAX_CHAIN_DEPTH: usize = 10;
+    if anchors.iter().any(|anchor| same_cert(anchor, signer)) {
+        return true;
+    }
+    let mut current = signer.clone();
+    for _ in 0..MAX_CHAIN_DEPTH {
+        if anchors.iter().any(|anchor| issued_by(&current, anchor)) {
+            return true;
+        }
+        let Some(issuer) = chain
+            .iter()
+            .find(|cand| !same_cert(cand, &current) && issued_by(&current, cand))
+        else {
+            return false;
+        };
+        if anchors.iter().any(|anchor| same_cert(anchor, issuer)) {
+            return true;
+        }
+        current = issuer.clone();
+    }
+    false
+}
+
+fn same_cert(a: &Certificate, b: &Certificate) -> bool {
+    match (a.to_der(), b.to_der()) {
+        (Ok(da), Ok(db)) => da == db,
+        _ => false,
+    }
+}
+
+/// True if `child`'s issuer name matches `issuer`'s subject AND `issuer`'s
+/// public key actually verifies `child`'s certificate signature.
+fn issued_by(child: &Certificate, issuer: &Certificate) -> bool {
+    child.tbs_certificate.issuer == issuer.tbs_certificate.subject && cert_signed_by(child, issuer)
+}
+
+fn cert_signed_by(child: &Certificate, issuer: &Certificate) -> bool {
+    let digest_oid = match child.signature_algorithm.oid {
+        OID_SHA256_RSA => OID_SHA256,
+        OID_SHA384_RSA => OID_SHA384,
+        OID_SHA512_RSA => OID_SHA512,
+        OID_SHA1_RSA => OID_SHA1,
+        _ => return false,
+    };
+    let Ok(tbs) = child.tbs_certificate.to_der() else {
+        return false;
+    };
+    let Some(signature) = child.signature.as_bytes() else {
+        return false;
+    };
+    verify_rsa(issuer, &digest_oid, &tbs, signature).unwrap_or(false)
+}
+
+fn cert_in_validity_period(cert: &Certificate) -> bool {
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        // Clock error: don't fail closed to "expired" (that would be misleading);
+        // trust is still gated by the chain check.
+        return true;
+    };
+    let validity = &cert.tbs_certificate.validity;
+    let not_before = validity.not_before.to_unix_duration();
+    let not_after = validity.not_after.to_unix_duration();
+    not_before <= now && now <= not_after
+}
+
+fn status_note(report: &SignatureReport) -> String {
+    let integrity = match report.validity {
+        SignatureValidity::Valid => "cryptographically valid over the signed byte ranges",
+        SignatureValidity::Invalid => {
+            "signature/digest did NOT verify (signed content changed or signature corrupt)"
+        }
+        SignatureValidity::UnsupportedAlgorithm => {
+            "signature algorithm not supported (only RSA PKCS#1 v1.5 is verified)"
+        }
         SignatureValidity::Error => "could not verify",
     };
-    format!(
-        "{base}. Trust-chain validation to a root CA, certificate validity-period \
-         enforcement, OCSP response policy validation, and timestamp imprint/TSA trust are \
-         not verdict gates"
-    )
+    let trust = match report.trust {
+        SignatureTrust::NotVerified => {
+            "signer trust NOT verified (no trust anchors configured) — a valid signature here is \
+             not proof of a trusted signer"
+        }
+        SignatureTrust::Trusted => "signer chains to a configured trust anchor",
+        SignatureTrust::Untrusted => {
+            "signer does NOT chain to any configured trust anchor (self-signed or unknown issuer)"
+        }
+        SignatureTrust::Expired => "signer certificate is outside its validity period",
+        SignatureTrust::Revoked => "signer certificate was revoked by embedded material",
+    };
+    let coverage = match report.coverage {
+        Coverage::WholeFile => "covers the whole file",
+        Coverage::ModifiedAfterSigning => "document was MODIFIED after signing (bytes appended)",
+    };
+    format!("{integrity}; {trust}; {coverage}")
 }
 
 struct CmsResult {
     validity: SignatureValidity,
     digest_algorithm: Option<String>,
     certificate: Option<CertInfo>,
+    /// The signer certificate (raw), for trust-chain evaluation.
+    signer_cert: Option<Certificate>,
+    /// All certificates embedded in the CMS (the candidate chain).
+    chain: Vec<Certificate>,
     timestamp_token_count: usize,
     invalid_timestamp_token_count: usize,
+}
+
+fn collect_chain(signed: &SignedData) -> Vec<Certificate> {
+    signed
+        .certificates
+        .as_ref()
+        .map(|certs| {
+            certs
+                .0
+                .iter()
+                .filter_map(|choice| match choice {
+                    CertificateChoices::Certificate(cert) => Some(cert.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Verify a detached CMS SignedData blob over `content` (the signed file bytes).
@@ -1046,9 +1335,11 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
     let digest_name = digest_oid_name(&digest_oid);
     let (timestamp_token_count, invalid_timestamp_token_count) = cms_timestamp_token_counts(signer);
 
-    // Find the signer certificate.
+    // Find the signer certificate and collect the embedded chain.
     let cert = find_signer_cert(&signed, signer);
     let cert_info = cert.as_ref().map(cert_to_info);
+    let signer_cert = cert.clone();
+    let chain = collect_chain(&signed);
 
     // Compute the digest of the signed content.
     let content_digest = match digest_bytes(&digest_oid, content) {
@@ -1058,6 +1349,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
                 validity: SignatureValidity::UnsupportedAlgorithm,
                 digest_algorithm: digest_name,
                 certificate: cert_info,
+                signer_cert: signer_cert.clone(),
+                chain: chain.clone(),
                 timestamp_token_count,
                 invalid_timestamp_token_count,
             })
@@ -1094,6 +1387,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
             validity: SignatureValidity::Invalid,
             digest_algorithm: digest_name,
             certificate: cert_info,
+            signer_cert: signer_cert.clone(),
+            chain: chain.clone(),
             timestamp_token_count,
             invalid_timestamp_token_count,
         });
@@ -1116,6 +1411,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
             validity: SignatureValidity::UnsupportedAlgorithm,
             digest_algorithm: digest_name,
             certificate: cert_info,
+            signer_cert: signer_cert.clone(),
+            chain: chain.clone(),
             timestamp_token_count,
             invalid_timestamp_token_count,
         });
@@ -1136,6 +1433,8 @@ fn verify_cms(der: &[u8], content: &[u8]) -> std::result::Result<CmsResult, Stri
         validity,
         digest_algorithm: digest_name,
         certificate: cert_info,
+        signer_cert,
+        chain,
         timestamp_token_count,
         invalid_timestamp_token_count,
     })
