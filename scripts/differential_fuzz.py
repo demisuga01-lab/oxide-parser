@@ -42,6 +42,8 @@ def run_cmd(args: list[str], timeout: int = 20) -> Run:
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            encoding="utf-8",
+            errors="replace",
             text=True,
             timeout=timeout,
             check=False,
@@ -191,6 +193,23 @@ def extract_poppler_text(pdftotext: str, pdf: Path, out_dir: Path) -> Run:
 def save_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def github_escape(message: str) -> str:
+    return message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def report_findings(findings: list[dict]) -> None:
+    for index, finding in enumerate(findings[:5], start=1):
+        message = json.dumps(finding, sort_keys=True, ensure_ascii=False)
+        print(f"finding {index}: {message}")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            print(
+                "::error title=Differential fuzz finding::"
+                f"{github_escape(message[:3500])}"
+            )
+    if len(findings) > 5:
+        print(f"... {len(findings) - 5} more finding(s) omitted; see report.json")
 
 
 def case_id(data: bytes) -> str:
@@ -421,6 +440,7 @@ def main() -> int:
     if all_findings:
         save_json(output / "findings" / "findings.json", all_findings)
         print(f"differential fuzz found {len(all_findings)} high-signal disagreement(s)")
+        report_findings(all_findings)
         print(f"report: {output / 'report.json'}")
         return 1
 
