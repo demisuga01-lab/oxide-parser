@@ -1301,6 +1301,7 @@ dependencies = [
  "sha1",
  "sha2",
  "spki",
+ "subtle",
  "thiserror 1.0.69",
  "ttf-parser 0.21.1",
  "unicode-bidi",

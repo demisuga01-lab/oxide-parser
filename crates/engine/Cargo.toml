@@ -41,6 +41,7 @@ sha1 = { version = "0.10", features = ["oid"] }
 const-oid = "0.9"
 der = { version = "0.7", features = ["oid"] }
 spki = "0.7"
+subtle = "2"
 
 [features]
 default = ["parse", "render", "structural"]

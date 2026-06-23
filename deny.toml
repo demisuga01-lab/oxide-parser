@@ -1,23 +1,33 @@
+[advisories]
+version = 2
+yanked = "warn"
+# RustCrypto `rsa` has no fixed upgrade for RUSTSEC-2023-0071 as of this
+# hardening pass. Oxide documents this in docs/security/crypto_review.md and
+# keeps it as an explicit, reviewable exception rather than a silent failure.
+ignore = ["RUSTSEC-2023-0071"]
+
 [licenses]
+version = 2
 confidence-threshold = 0.8
+unused-allowed-license = "allow"
 allow = [
-    "0BSD",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "BSL-1.0",
     "CC0-1.0",
+    "ISC",
     "IJG",
     "MIT",
-    "MIT-0",
     "Unicode-3.0",
-    "Unlicense",
+    "Unicode-DFS-2016",
     "Zlib",
 ]
 
+[licenses.private]
+ignore = true
+
 [bans]
-multiple-versions = "warn"
+multiple-versions = "allow"
 wildcards = "allow"
 
 [sources]

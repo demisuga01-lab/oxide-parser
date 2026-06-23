@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use crate::error::{OxideError, Result};
 use crate::object::{PdfDictionary, PdfObject};
+use subtle::ConstantTimeEq;
 
 // ---------------------------------------------------------------------------
 // 2.1  RC4 stream cipher
@@ -719,6 +720,10 @@ pub const PADDING: [u8; 32] = [
     0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 ];
 
+fn ct_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len() && bool::from(left.ct_eq(right))
+}
+
 /// Pad (or truncate) a password to the fixed 32-byte form the algorithm needs.
 pub fn pad_password(password: &[u8]) -> [u8; 32] {
     let mut padded = [0u8; 32];
@@ -795,13 +800,14 @@ pub fn recover_user_password_from_owner(owner_pw: &[u8], info: &EncryptionInfo) 
 /// For `R == 2` (Algorithm 4): RC4-encrypt the padding string with the file key
 /// and compare all 32 bytes against `/U`.
 pub fn verify_user_password(password: &[u8], info: &EncryptionInfo, file_id: &[u8]) -> bool {
-    let key = compute_encryption_key(password, info, file_id);
+    let mut key = compute_encryption_key(password, info, file_id);
 
-    if info.r >= 3 {
+    let ok = if info.r >= 3 {
         let mut hash_input = Vec::with_capacity(32 + file_id.len());
         hash_input.extend_from_slice(&PADDING);
         hash_input.extend_from_slice(file_id);
         let hash = md5(&hash_input);
+        hash_input.fill(0);
 
         let mut result = Rc4::apply(&key, &hash);
         for i in 1u8..=19 {
@@ -809,11 +815,17 @@ pub fn verify_user_password(password: &[u8], info: &EncryptionInfo, file_id: &[u
             result = Rc4::apply(&xor_key, &result);
         }
 
-        result.len() >= 16 && info.u.len() >= 16 && result[..16] == info.u[..16]
+        let ok = result.len() >= 16 && info.u.len() >= 16 && ct_eq(&result[..16], &info.u[..16]);
+        result.fill(0);
+        ok
     } else {
-        let result = Rc4::apply(&key, &PADDING);
-        result.len() == 32 && info.u.len() >= 32 && result == info.u[..32]
-    }
+        let mut result = Rc4::apply(&key, &PADDING);
+        let ok = result.len() == 32 && info.u.len() >= 32 && ct_eq(&result, &info.u[..32]);
+        result.fill(0);
+        ok
+    };
+    key.fill(0);
+    ok
 }
 
 // ---------------------------------------------------------------------------
@@ -847,17 +859,21 @@ pub fn verify_v5_user_password(password: &[u8], info: &EncryptionInfo) -> bool {
     let pwd = truncate_v5_password(password);
     // /U layout: [0..32] = hash, [32..40] = validation_salt, [40..48] = key_salt
     let validation_salt = &info.u[32..40];
-    let computed = if info.r == 6 {
+    let mut computed = if info.r == 6 {
         r6_hash(pwd, validation_salt, None)
     } else {
         // R5: plain SHA-256(password || validation_salt)
         let mut input = Vec::with_capacity(pwd.len() + 8);
         input.extend_from_slice(pwd);
         input.extend_from_slice(validation_salt);
-        sha256(&input)
+        let hash = sha256(&input);
+        input.fill(0);
+        hash
     };
     // Compare first 32 bytes (the hash portion of /U)
-    info.u.len() >= 32 && computed == info.u[..32].try_into().unwrap_or([0u8; 32])
+    let ok = info.u.len() >= 32 && ct_eq(&computed, &info.u[..32]);
+    computed.fill(0);
+    ok
 }
 
 /// Verify an owner password against the V5 `/O` entry (Algorithm 2.A, owner path).
@@ -872,16 +888,20 @@ pub fn verify_v5_owner_password(password: &[u8], info: &EncryptionInfo) -> bool 
     let validation_salt = &info.o[32..40];
     // Owner path includes the full 48-byte /U value in the hash input.
     let u48 = &info.u[..48.min(info.u.len())];
-    let computed = if info.r == 6 {
+    let mut computed = if info.r == 6 {
         r6_hash(pwd, validation_salt, Some(u48))
     } else {
         let mut input = Vec::with_capacity(pwd.len() + 8 + u48.len());
         input.extend_from_slice(pwd);
         input.extend_from_slice(validation_salt);
         input.extend_from_slice(u48);
-        sha256(&input)
+        let hash = sha256(&input);
+        input.fill(0);
+        hash
     };
-    info.o.len() >= 32 && computed == info.o[..32].try_into().unwrap_or([0u8; 32])
+    let ok = info.o.len() >= 32 && ct_eq(&computed, &info.o[..32]);
+    computed.fill(0);
+    ok
 }
 
 /// Derive the 32-byte file encryption key from a verified user password (V5).
@@ -1068,7 +1088,9 @@ fn aes256_ecb_encrypt_block(key: &[u8], block: &[u8]) -> Result<[u8; 16]> {
 fn aes256_cbc_encrypt_no_pad(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>> {
     use aes::cipher::{BlockEncrypt, KeyInit};
     if key.len() != 32 {
-        return Err(OxideError::MalformedPdf("AES-256: key must be 32 bytes".to_string()));
+        return Err(OxideError::MalformedPdf(
+            "AES-256: key must be 32 bytes".to_string(),
+        ));
     }
     let cipher = aes::Aes256::new_from_slice(key)
         .map_err(|_| OxideError::MalformedPdf("AES-256: invalid key".to_string()))?;

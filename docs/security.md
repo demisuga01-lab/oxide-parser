@@ -7,6 +7,9 @@ permissive (any CORS origin) requires an **explicit, clearly-logged dev opt-in**
 
 See also [`robustness.md`](robustness.md) for resource-safety controls
 (per-request timeout, pixel/output/image caps, pathological-input handling).
+For full audit preparation, see the security packet under
+[`security/`](security/): threat model, attack-surface map, crypto-review prep,
+dependency policy, and audit-readiness checklist.
 
 ## 1. Authentication — fail-closed API keys
 
