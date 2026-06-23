@@ -27,6 +27,7 @@ green. Fuzzing requires a nightly toolchain.
 | `pdfa`              | `oxide_engine::fuzz::fuzz_pdfa`               | PDF/A validation and conversion over parsed untrusted PDFs |
 | `editing`           | `oxide_engine::fuzz::fuzz_editing`            | Additive editing, redaction, form flattening, and full rewrite |
 | `signature_validation` | `oxide_engine::fuzz::fuzz_signature_validation` | Signature/DSS/LTV-like parsing reachable from untrusted signed PDFs |
+| `structured_pdf`    | `oxide_engine::fuzz::fuzz_structured_pdf`     | Grammar-aware valid PDFs with adversarial content, then render/text/model/edit/PDF-A/linearize/signature paths |
 
 The `fuzz_*` entry points are gated behind the engine's `fuzzing` feature
 (enabled here via the `oxide-engine` dependency) so they are not part of the
@@ -58,6 +59,7 @@ cargo +nightly fuzz run linearize
 cargo +nightly fuzz run pdfa
 cargo +nightly fuzz run editing
 cargo +nightly fuzz run signature_validation
+cargo +nightly fuzz run structured_pdf
 
 # Time-box a run (e.g. 15 minutes) and cap input size:
 cargo +nightly fuzz run parse_pdf -- -max_total_time=900 -max_len=65536

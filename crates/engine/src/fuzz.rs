@@ -11,7 +11,9 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+use crate::authoring::{GraphicsStyle, PageSize, PdfBuilder, StandardFont, TextStyle};
 use crate::compliance::{convert_to_pdfa, validate_pdfa, PdfAProfile};
+use crate::content::Color;
 use crate::crypto::{
     compute_encryption_key, decrypt_stream, derive_v5_file_key_from_owner,
     derive_v5_file_key_from_user, verify_user_password, verify_v5_owner_password, verify_v5_perms,
@@ -342,6 +344,37 @@ pub fn fuzz_signature_validation(data: &[u8]) {
     let _ = std::hint::black_box(engine.verify_signatures());
 }
 
+/// Generate structurally valid PDFs with adversarial-but-bounded content and
+/// drive them through deep operations.
+///
+/// Byte-level fuzzing mostly explores parser rejection paths. This target uses
+/// the authoring API plus a raw valid-PDF generator to reach the renderer,
+/// content interpreter, document model, editing, PDF/A, linearization, and
+/// signature-validation code with PDFs that parse successfully.
+pub fn fuzz_structured_pdf(data: &[u8]) {
+    for bytes in structured_pdf_samples_for_seed(data) {
+        drive_structured_pdf(&bytes, data);
+    }
+}
+
+/// Materialize the grammar-aware samples for a seed input.
+///
+/// Exposed under the `fuzzing` feature so the structured generator can be
+/// regression-tested for "valid PDF" claims without linking libFuzzer.
+pub fn structured_pdf_samples_for_seed(data: &[u8]) -> Vec<Vec<u8>> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut samples = Vec::new();
+    if let Some(bytes) = authored_adversarial_pdf(data) {
+        samples.push(bytes);
+    }
+    if let Some(bytes) = raw_operator_pdf(data) {
+        samples.push(bytes);
+    }
+    samples
+}
+
 /// Drive the font-program parsers with arbitrary bytes (TrueType / CFF /
 /// OpenType / bare-CFF paths via the glyph-outline extractor). Font parsing is
 /// a classic crash source; this exercises `ttf-parser` + the bare-CFF fallback
@@ -363,6 +396,401 @@ pub fn fuzz_parse_font(data: &[u8]) {
             data, gid,
         ));
     }
+}
+
+fn drive_structured_pdf(bytes: &[u8], data: &[u8]) {
+    let Ok(engine) = ContentEngine::open_bytes(bytes.to_vec()) else {
+        return;
+    };
+    let page_count = engine.page_count().unwrap_or(0).min(4);
+    for page in 1..=page_count {
+        let _ = std::hint::black_box(engine.get_page_content(page));
+        let _ = std::hint::black_box(engine.get_page_text(page));
+        let _ = std::hint::black_box(engine.render_page_png_fast(page, 36));
+    }
+    if page_count > 0 {
+        let pages: Vec<usize> = (1..=page_count).collect();
+        let _ = std::hint::black_box(engine.build_document_model(&pages));
+    }
+
+    if let Ok(mut editor) = PdfEditor::open_bytes(bytes.to_vec()) {
+        let rect = ImageRect::new(
+            bounded_coord(data.get(0).copied().unwrap_or(0), 180.0),
+            bounded_coord(data.get(1).copied().unwrap_or(0), 180.0),
+            4.0 + f64::from(data.get(2).copied().unwrap_or(8) % 48),
+            4.0 + f64::from(data.get(3).copied().unwrap_or(8) % 48),
+        );
+        let _ = editor.draw_rect(1, rect, EditRectStyle::default(), OverlayLayer::Overlay);
+        let _ = editor.redact(1, rect, RedactionOptions::default());
+        editor.flatten_forms();
+        let _ = std::hint::black_box(editor.save_to_bytes(EditMode::FullRewrite));
+    }
+
+    let _ = std::hint::black_box(crate::structural::linearize::linearize(&engine));
+    let _ = std::hint::black_box(engine.verify_signatures());
+    for profile in [
+        PdfAProfile::PdfA1B,
+        PdfAProfile::PdfA2B,
+        PdfAProfile::PdfA3B,
+    ] {
+        let _ = std::hint::black_box(validate_pdfa(engine.document(), profile));
+        let _ = std::hint::black_box(convert_to_pdfa(engine.document(), profile));
+    }
+}
+
+fn authored_adversarial_pdf(data: &[u8]) -> Option<Vec<u8>> {
+    let mut doc = PdfBuilder::new().with_writer_mode(match data[0] % 3 {
+        0 => WriterMode::ClassicXref,
+        1 => WriterMode::XrefStream,
+        _ => WriterMode::XrefStreamWithObjStm,
+    });
+    doc.set_title("structured fuzz");
+    let page_count = 1 + usize::from(data.get(1).copied().unwrap_or(0) % 3);
+    let text_style = TextStyle::standard(StandardFont::Helvetica, 8.0 + f64::from(data[0] % 24));
+    let stroke = GraphicsStyle::stroke(Color::device_rgb(0.8, 0.1, 0.1), 0.25);
+    let fill = GraphicsStyle::fill_stroke(
+        Color::device_rgb(0.1, 0.35, 0.75),
+        Color::device_rgb(0.0, 0.0, 0.0),
+        0.5,
+    );
+
+    let mut cursor = 2usize;
+    for page_index in 0..page_count {
+        let width = 144.0 + f64::from(next_byte(data, &mut cursor) % 160);
+        let height = 144.0 + f64::from(next_byte(data, &mut cursor) % 220);
+        let page = doc.add_page(PageSize::custom(width, height));
+        let lines = 1 + usize::from(next_byte(data, &mut cursor) % 5);
+        for line in 0..lines {
+            let text = adversarial_ascii(data, &mut cursor);
+            let x = bounded_coord(next_byte(data, &mut cursor), width);
+            let y = bounded_coord(next_byte(data, &mut cursor), height);
+            let _ = page.draw_text(&text, x, y, &text_style);
+
+            let x2 = bounded_coord(next_byte(data, &mut cursor), width);
+            let y2 = bounded_coord(next_byte(data, &mut cursor), height);
+            page.draw_line(x, y, x2, y2, &stroke);
+            page.draw_rect(
+                x.min(x2),
+                y.min(y2),
+                (x - x2).abs().max(1.0),
+                (y - y2).abs().max(1.0),
+                &fill,
+            );
+            if (line + page_index) % 2 == 0 {
+                page.draw_circle(
+                    x,
+                    y,
+                    1.0 + f64::from(next_byte(data, &mut cursor) % 24),
+                    &stroke,
+                );
+            }
+        }
+    }
+
+    doc.to_bytes().ok()
+}
+
+fn raw_operator_pdf(data: &[u8]) -> Option<Vec<u8>> {
+    let mut objects = Vec::new();
+    objects.push(OutputObject {
+        number: 1,
+        object: catalog_object(2),
+    });
+
+    let page_count = 1 + usize::from(data.get(2).copied().unwrap_or(0) % 3);
+    let mut next_obj = 4u32;
+    let mut page_refs = Vec::new();
+    let mut cursor = 3usize;
+
+    objects.push(OutputObject {
+        number: 3,
+        object: font_object(),
+    });
+
+    for _ in 0..page_count {
+        let page_obj = next_obj;
+        next_obj += 1;
+        page_refs.push(ref_obj(page_obj));
+
+        let stream_count = 1 + usize::from(next_byte(data, &mut cursor) % 4);
+        let mut content_refs = Vec::new();
+        for stream_index in 0..stream_count {
+            let content_obj = next_obj;
+            next_obj += 1;
+            let raw = adversarial_content_stream(data, &mut cursor, stream_index);
+            content_refs.push(ref_obj(content_obj));
+            objects.push(OutputObject {
+                number: content_obj,
+                object: stream_object(raw),
+            });
+        }
+
+        let annot_obj = next_obj;
+        next_obj += 1;
+        objects.push(OutputObject {
+            number: annot_obj,
+            object: text_annotation_object(data, &mut cursor),
+        });
+
+        objects.push(OutputObject {
+            number: page_obj,
+            object: page_object(2, &content_refs, annot_obj, data, &mut cursor),
+        });
+    }
+
+    objects.insert(
+        1,
+        OutputObject {
+            number: 2,
+            object: pages_object(&page_refs),
+        },
+    );
+
+    PdfWriter::new(objects, 1)
+        .with_mode(match data[0] % 3 {
+            0 => WriterMode::ClassicXref,
+            1 => WriterMode::XrefStream,
+            _ => WriterMode::XrefStreamWithObjStm,
+        })
+        .write()
+        .ok()
+}
+
+fn catalog_object(pages: u32) -> PdfObject {
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Type", PdfObject::Name("Catalog".to_string()));
+    dict.insert("Pages", ref_obj(pages));
+    PdfObject::Dictionary(dict)
+}
+
+fn pages_object(kids: &[PdfObject]) -> PdfObject {
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Type", PdfObject::Name("Pages".to_string()));
+    dict.insert("Kids", PdfObject::Array(kids.to_vec()));
+    dict.insert("Count", PdfObject::Integer(kids.len() as i64));
+    PdfObject::Dictionary(dict)
+}
+
+fn page_object(
+    parent: u32,
+    contents: &[PdfObject],
+    annot: u32,
+    data: &[u8],
+    cursor: &mut usize,
+) -> PdfObject {
+    let mut font_map = PdfDictionary::empty();
+    font_map.insert("F1", ref_obj(3));
+    let mut resources = PdfDictionary::empty();
+    resources.insert("Font", PdfObject::Dictionary(font_map));
+
+    let width = 144.0 + f64::from(next_byte(data, cursor) % 180);
+    let height = 144.0 + f64::from(next_byte(data, cursor) % 220);
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Type", PdfObject::Name("Page".to_string()));
+    dict.insert("Parent", ref_obj(parent));
+    dict.insert(
+        "MediaBox",
+        PdfObject::Array(vec![
+            PdfObject::Real(-12.0),
+            PdfObject::Real(-12.0),
+            PdfObject::Real(width),
+            PdfObject::Real(height),
+        ]),
+    );
+    dict.insert("Resources", PdfObject::Dictionary(resources));
+    dict.insert("Contents", PdfObject::Array(contents.to_vec()));
+    dict.insert("Annots", PdfObject::Array(vec![ref_obj(annot)]));
+    PdfObject::Dictionary(dict)
+}
+
+fn font_object() -> PdfObject {
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Type", PdfObject::Name("Font".to_string()));
+    dict.insert("Subtype", PdfObject::Name("Type1".to_string()));
+    dict.insert("BaseFont", PdfObject::Name("Helvetica".to_string()));
+    dict.insert("Encoding", PdfObject::Name("WinAnsiEncoding".to_string()));
+    PdfObject::Dictionary(dict)
+}
+
+fn text_annotation_object(data: &[u8], cursor: &mut usize) -> PdfObject {
+    let x = bounded_coord(next_byte(data, cursor), 240.0);
+    let y = bounded_coord(next_byte(data, cursor), 240.0);
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Type", PdfObject::Name("Annot".to_string()));
+    dict.insert("Subtype", PdfObject::Name("Text".to_string()));
+    dict.insert(
+        "Rect",
+        PdfObject::Array(vec![
+            PdfObject::Real(x),
+            PdfObject::Real(y),
+            PdfObject::Real(x + 12.0),
+            PdfObject::Real(y + 12.0),
+        ]),
+    );
+    dict.insert("Contents", PdfObject::String(b"structured fuzz".to_vec()));
+    PdfObject::Dictionary(dict)
+}
+
+fn stream_object(raw: Vec<u8>) -> PdfObject {
+    let mut dict = PdfDictionary::empty();
+    dict.insert("Length", PdfObject::Integer(raw.len() as i64));
+    PdfObject::Stream { dict, raw }
+}
+
+fn adversarial_content_stream(data: &[u8], cursor: &mut usize, stream_index: usize) -> Vec<u8> {
+    let mut out = String::new();
+    let mut q_depth = 0usize;
+    let ops = 8 + usize::from(next_byte(data, cursor) % 56);
+    for index in 0..ops {
+        match next_byte(data, cursor) % 10 {
+            0 if q_depth < 12 => {
+                out.push_str("q\n");
+                q_depth += 1;
+            }
+            1 if q_depth > 0 => {
+                out.push_str("Q\n");
+                q_depth -= 1;
+            }
+            2 => {
+                let a = matrix_value(next_byte(data, cursor));
+                let d = matrix_value(next_byte(data, cursor));
+                let e = coord_value(next_byte(data, cursor));
+                let f = coord_value(next_byte(data, cursor));
+                out.push_str(&format!("{a:.4} 0 0 {d:.4} {e:.2} {f:.2} cm\n"));
+            }
+            3 => {
+                let x = coord_value(next_byte(data, cursor));
+                let y = coord_value(next_byte(data, cursor));
+                let w = 1.0 + f64::from(next_byte(data, cursor) % 96);
+                let h = 1.0 + f64::from(next_byte(data, cursor) % 96);
+                out.push_str(&format!("{x:.2} {y:.2} {w:.2} {h:.2} re S\n"));
+            }
+            4 => {
+                let x = coord_value(next_byte(data, cursor));
+                let y = coord_value(next_byte(data, cursor));
+                let x2 = coord_value(next_byte(data, cursor));
+                let y2 = coord_value(next_byte(data, cursor));
+                out.push_str(&format!("{x:.2} {y:.2} m {x2:.2} {y2:.2} l S\n"));
+            }
+            5 => {
+                let text = adversarial_ascii(data, cursor);
+                let x = coord_value(next_byte(data, cursor));
+                let y = coord_value(next_byte(data, cursor));
+                let size = 1.0 + f64::from(next_byte(data, cursor) % 72);
+                out.push_str(&format!(
+                    "BT /F1 {size:.2} Tf {x:.2} {y:.2} Td ({}) Tj ET\n",
+                    escape_pdf_literal(&text)
+                ));
+            }
+            6 => {
+                let r = color_value(next_byte(data, cursor));
+                let g = color_value(next_byte(data, cursor));
+                let b = color_value(next_byte(data, cursor));
+                out.push_str(&format!(
+                    "{r:.4} {g:.4} {b:.4} rg {r:.4} {g:.4} {b:.4} RG\n"
+                ));
+            }
+            7 => {
+                let w = f64::from(next_byte(data, cursor) % 24) / 4.0;
+                let dash = 1 + usize::from(next_byte(data, cursor) % 16);
+                out.push_str(&format!("{w:.2} w [{dash}] 0 d\n"));
+            }
+            8 => {
+                let x = coord_value(next_byte(data, cursor));
+                let y = coord_value(next_byte(data, cursor));
+                let x1 = coord_value(next_byte(data, cursor));
+                let y1 = coord_value(next_byte(data, cursor));
+                let x2 = coord_value(next_byte(data, cursor));
+                let y2 = coord_value(next_byte(data, cursor));
+                out.push_str(&format!(
+                    "{x:.2} {y:.2} m {x1:.2} {y1:.2} {x2:.2} {y2:.2} {x:.2} {y:.2} c f\n"
+                ));
+            }
+            _ => {
+                let x = coord_value(next_byte(data, cursor));
+                let y = coord_value(next_byte(data, cursor));
+                let w = 1.0 + f64::from(next_byte(data, cursor) % 80);
+                let h = 1.0 + f64::from(next_byte(data, cursor) % 80);
+                out.push_str(&format!("{x:.2} {y:.2} {w:.2} {h:.2} re W n\n"));
+            }
+        }
+        if index % 13 == 0 {
+            out.push_str("% structured-fuzz\n");
+        }
+    }
+    while q_depth > 0 {
+        out.push_str("Q\n");
+        q_depth -= 1;
+    }
+    if stream_index % 2 == 0 {
+        out.push_str("BT /F1 9 Tf 12 12 Td (structured fuzz) Tj ET\n");
+    }
+    out.into_bytes()
+}
+
+fn ref_obj(number: u32) -> PdfObject {
+    PdfObject::Reference {
+        number,
+        generation: 0,
+    }
+}
+
+fn next_byte(data: &[u8], cursor: &mut usize) -> u8 {
+    if data.is_empty() {
+        return 0;
+    }
+    let byte = data[*cursor % data.len()];
+    *cursor = (*cursor).wrapping_add(1);
+    byte
+}
+
+fn adversarial_ascii(data: &[u8], cursor: &mut usize) -> String {
+    let len = 1 + usize::from(next_byte(data, cursor) % 24);
+    let mut out = String::with_capacity(len);
+    for _ in 0..len {
+        let byte = next_byte(data, cursor);
+        let ch = match byte % 8 {
+            0 => ' ',
+            1 => '-',
+            2 => '.',
+            3 => '(',
+            4 => ')',
+            _ => char::from(0x41 + (byte % 26)),
+        };
+        out.push(ch);
+    }
+    out
+}
+
+fn escape_pdf_literal(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)")
+}
+
+fn bounded_coord(byte: u8, max: f64) -> f64 {
+    f64::from(byte) / 255.0 * max
+}
+
+fn coord_value(byte: u8) -> f64 {
+    f64::from(byte) - 128.0
+}
+
+fn matrix_value(byte: u8) -> f64 {
+    match byte % 8 {
+        0 => 0.001,
+        1 => 0.01,
+        2 => 0.1,
+        3 => 1.0,
+        4 => 10.0,
+        5 => -1.0,
+        6 => -0.1,
+        _ => 2.0,
+    }
+}
+
+fn color_value(byte: u8) -> f64 {
+    f64::from(byte) / 255.0
 }
 
 fn take_padded(data: &[u8], offset: usize, len: usize) -> Vec<u8> {

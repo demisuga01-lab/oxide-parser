@@ -46,6 +46,10 @@ Property-based invariants run in normal tests and in
 [`property_testing.md`](property_testing.md) for the round-trip, determinism,
 and structural guarantees.
 
+Grammar-aware fuzzing is included as the `structured_pdf` cargo-fuzz target.
+See [`grammar_aware_fuzzing.md`](grammar_aware_fuzzing.md) for the valid-PDF
+generator and deep-operation coverage.
+
 ## What was set up
 
 A `cargo-fuzz` / libFuzzer harness lives in the out-of-tree [`fuzz/`](../fuzz)

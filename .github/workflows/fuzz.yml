@@ -48,6 +48,7 @@ jobs:
           - pdfa
           - editing
           - signature_validation
+          - structured_pdf
 
     steps:
       - name: Check out repository

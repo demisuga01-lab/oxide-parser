@@ -32,6 +32,7 @@ DEFAULT_TARGETS = [
     "pdfa",
     "editing",
     "signature_validation",
+    "structured_pdf",
 ]
 
 
