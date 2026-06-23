@@ -59,7 +59,10 @@ jobs:
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -ne 0 ]; then
-            message="$(tail -n 80 target/ci-logs/cargo-test.log)"
+            message="$(grep -n -E "FAILED|failures:|panicked at|thread '.*' panicked|test result: FAILED|error:" target/ci-logs/cargo-test.log | tail -n 120 || true)"
+            if [ -z "$message" ]; then
+              message="$(tail -n 120 target/ci-logs/cargo-test.log)"
+            fi
             message="${message//'%'/'%25'}"
             message="${message//$'\r'/'%0D'}"
             message="${message//$'\n'/'%0A'}"
