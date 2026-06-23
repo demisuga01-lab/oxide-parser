@@ -23,7 +23,7 @@ branch, not permission to tag this exact dirty worktree.
 The post-GA hardening consolidation adds continuous fuzzing, differential
 fuzzing, property tests, grammar-aware deep fuzzing, dependency audit gates, and
 an audit-readiness packet. The current authoritative security/robustness
-posture is `docs/security/posture.md`.
+posture is `docs/security/posture.md`. Prompt 3 added a renderer follow-up on 2026-06-23, raising the latest 265-entry renderer score to 86.94% visual pass / 91.82 weighted while preserving 100% hostile safety and 24/24 deterministic samples.
 
 Tools used:
 
@@ -199,16 +199,26 @@ GA4 follow-up result on the same 265-entry slice:
 | Hostile safety | 100.0% crash/timeout/memory-safe | 100.0% crash/timeout/memory-safe |
 | Determinism sample | 24/24 stable | 24/24 stable |
 
-Weakest real-world categories:
+Prompt 3 follow-up result on the same 265-entry slice:
+
+| Metric | GA6 final | Prompt 3 final |
+| --- | ---: | ---: |
+| Weighted score | 91.29 | 91.82 |
+| Visual pass | 86.12% | 86.94% |
+| File pass | 88.68% | 88.68% |
+| Hostile safety | 100.0% crash/timeout/memory-safe | 100.0% crash/timeout/memory-safe |
+| Determinism sample | 24/24 stable | 24/24 stable |
+
+Weakest real-world categories after Prompt 3:
 
 | Category | Visual pass |
 | --- | ---: |
-| real-jpeg2000 | 0.00% |
-| real-complex-vector | 13.33% |
-| real-multi-column | 29.41% |
-| real-scanned | 33.33% |
 | real-rtl-text | 40.00% |
+| real-scanned | 44.44% |
+| real-multi-column | 47.06% |
 | real-forms | 57.14% |
+| real-cjk-text | 61.54% |
+| real-complex-vector | 80.00% |
 
 The full 1,335-entry manifest run was not taken in this capstone because the
 265-file slice already took roughly 16 minutes. Exact deferred full command:
@@ -279,7 +289,7 @@ claims.
 | Signatures | RSA/SHA-256 signing and verification over ByteRange with incremental update; offline PAdES B-T/B-LT timestamp-token and DSS material embedding/reporting | Core signing plus deterministic LTV substrate exists. Live TSA/OCSP fetching, trust-store policy, timestamp imprint validation, PAdES-B-LTA, and ECDSA breadth remain follow-ups. |
 | Surfaces | Rust library, CLI, C ABI, WASM, HTTP server | Strong embeddability and self-hosting story. |
 | Packaging | Feature flags, dry-run packaging docs, license docs | Commercially friendly MIT OR Apache-2.0 posture. Some feature dependency slimming remains. |
-| Rendering | 86.12% visual pass / 91.29 weighted on the final 265-entry slice, with 100% hostile safety | Materially improved from Prompt 11, but still trails Poppler/MuPDF/PDFium for visual-proof workflows. |
+| Rendering | 86.94% visual pass / 91.82 weighted on the Prompt 3 265-entry slice, with 100% hostile safety | Materially improved from Prompt 11, but still trails Poppler/MuPDF/PDFium for visual-proof workflows. |
 
 ## Positioning
 
@@ -320,7 +330,7 @@ Blocker status after GA1-GA5 plus GA6 verification:
 | --- | --- |
 | Linearization | Cleared: qpdf-clean check/show-linearization on the seven-fixture breadth. |
 | PDF/A matrix | Cleared: qpdf + veraPDF PASS for 1b/2b/2a/3b/3a examples. |
-| Renderer fidelity | Cleared as a meaningful improvement: 86.12% visual pass / 91.29 weighted, still preview/OCR-grade. |
+| Renderer fidelity | Cleared as a meaningful improvement: 86.94% visual pass / 91.82 weighted after Prompt 3, still preview/OCR-grade. |
 | Whole-SDK hardening | Cleared for the measured slice: 1,590 operations, 0 crashes, 0 timeouts, 0 invalid transformed outputs from qpdf-clean inputs. |
 | Signature LTV | Partially cleared: offline timestamp/DSS/CRL substrate works; live TSA/OCSP/trust-store/B-LTA and external LTV UI recognition remain known limitations. |
 | Continuous hardening | Cleared as code-level posture: all 16 fuzz target corpora replayed, property tests passed, differential smoke passed, cargo-audit and cargo-deny passed with the documented RSA advisory exception. |

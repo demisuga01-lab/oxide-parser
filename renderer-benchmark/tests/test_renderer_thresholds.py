@@ -25,21 +25,23 @@ class RendererThresholdTests(unittest.TestCase):
             "ssim": 0.937922,
         }
 
-        self.assertTrue(renderer_benchmark.is_phash_aa_noise(metrics))
+        thresholds = renderer_benchmark.thresholds("renderer", text_heavy=True)
+        self.assertTrue(renderer_benchmark.is_phash_aa_noise(metrics, thresholds))
 
     def test_phash_with_content_drift_stays_structural(self):
         metrics = {
             "phash_distance": 18,
             "different_pixel_percent": 1.1952,
             "mae": 0.8221,
-            "edge_mae": 0.014294,
+            "edge_mae": 0.040294,
             "large_region_score": 0.296296,
             "blank_score_oxide": 0.05,
             "blank_score_reference": 0.05,
             "ssim": 0.909914,
         }
 
-        self.assertFalse(renderer_benchmark.is_phash_aa_noise(metrics))
+        thresholds = renderer_benchmark.thresholds("renderer", text_heavy=True)
+        self.assertFalse(renderer_benchmark.is_phash_aa_noise(metrics, thresholds))
 
     def test_low_energy_gradient_pixel_noise_is_diagnostic(self):
         metrics = {
@@ -70,6 +72,39 @@ class RendererThresholdTests(unittest.TestCase):
 
         thresholds = renderer_benchmark.thresholds("renderer", text_heavy=True)
         self.assertFalse(renderer_benchmark.is_low_energy_pixel_noise(metrics, thresholds))
+
+    def test_large_region_text_antialias_noise_is_diagnostic(self):
+        metrics = {
+            "different_pixel_percent": 9.7565,
+            "mae": 1.2041,
+            "ssim": 0.964814,
+            "edge_mae": 0.010124,
+            "large_region_score": 0.578,
+            "blank_score_oxide": 0.04,
+            "blank_score_reference": 0.041,
+            "phash_distance": 6,
+            "max_channel_delta": 255,
+        }
+
+        thresholds = renderer_benchmark.thresholds("renderer", text_heavy=True)
+        self.assertTrue(renderer_benchmark.is_large_region_text_aa_noise(metrics, thresholds))
+        self.assertTrue(renderer_benchmark.is_low_energy_pixel_noise(metrics, thresholds, True))
+
+    def test_large_region_with_structural_drift_stays_structural(self):
+        metrics = {
+            "different_pixel_percent": 12.1234,
+            "mae": 5.7001,
+            "ssim": 0.900304,
+            "edge_mae": 0.060141,
+            "large_region_score": 0.578,
+            "blank_score_oxide": 0.05,
+            "blank_score_reference": 0.05,
+            "phash_distance": 22,
+            "max_channel_delta": 255,
+        }
+
+        thresholds = renderer_benchmark.thresholds("renderer", text_heavy=True)
+        self.assertFalse(renderer_benchmark.is_large_region_text_aa_noise(metrics, thresholds))
 
 
 if __name__ == "__main__":

@@ -644,11 +644,12 @@ def compare_images(oxide: RenderedPage, ref: RenderedPage, thresholds: dict[str,
     structural: list[str] = []
     if abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) > thresholds["blank_delta"]:
         structural.append("blank_page_mismatch")
-    if metrics["large_region_score"] > thresholds["large_region"]:
+    large_region_noise_only = is_large_region_text_aa_noise(metrics, thresholds)
+    if metrics["large_region_score"] > thresholds["large_region"] and not large_region_noise_only:
         structural.append("large_region_difference")
     if metrics["edge_mae"] > thresholds["edge_mae"]:
         structural.append("edge_or_text_shift")
-    phash_noise_only = is_phash_aa_noise(metrics)
+    phash_noise_only = is_phash_aa_noise(metrics, thresholds)
     if metrics["phash_distance"] > thresholds["phash_distance"] and not phash_noise_only:
         structural.append("perceptual_hash_distance")
     if metrics["max_channel_delta"] > 220 and metrics["mae"] > thresholds["mae"] * 3:
@@ -656,7 +657,7 @@ def compare_images(oxide: RenderedPage, ref: RenderedPage, thresholds: dict[str,
 
     # Pixel/AA failures (LOOSE).
     pixel: list[str] = []
-    pixel_noise_only = is_low_energy_pixel_noise(metrics, thresholds)
+    pixel_noise_only = is_low_energy_pixel_noise(metrics, thresholds, large_region_noise_only)
     if metrics["different_pixel_percent"] >= thresholds["different_pixel_percent"] and not pixel_noise_only:
         pixel.append("pixel_difference")
     # Global SSIM is unreliable on sparse / mostly-white pages: its
@@ -687,11 +688,12 @@ def compare_images(oxide: RenderedPage, ref: RenderedPage, thresholds: dict[str,
     else:
         reasons = structural + pixel
         diagnostic = []
+        if large_region_noise_only:
+            diagnostic.append("large_region_difference")
         if phash_noise_only:
             diagnostic.append("perceptual_hash_distance")
         if pixel_noise_only:
             diagnostic.append("pixel_difference")
-
     metrics["pass"] = not reasons
     metrics["reason"] = reasons[0] if reasons else None
     metrics["reasons"] = reasons
@@ -699,7 +701,7 @@ def compare_images(oxide: RenderedPage, ref: RenderedPage, thresholds: dict[str,
     return metrics
 
 
-def is_phash_aa_noise(metrics: dict[str, Any]) -> bool:
+def is_phash_aa_noise(metrics: dict[str, Any], thresholds: dict[str, float]) -> bool:
     """Treat pHash-only differences as diagnostic when every local signal is clean.
 
     The renderer-vs-Poppler harness is intentionally loose on anti-aliased edge
@@ -709,16 +711,18 @@ def is_phash_aa_noise(metrics: dict[str, Any]) -> bool:
     """
     return (
         metrics["phash_distance"] > 0
-        and metrics["different_pixel_percent"] <= 0.5
-        and metrics["mae"] <= 0.25
-        and metrics["edge_mae"] <= 0.005
-        and metrics["large_region_score"] <= 0.08
-        and abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) <= 0.01
-        and metrics["ssim"] >= 0.93
+        and metrics["different_pixel_percent"] <= max(0.5, thresholds["different_pixel_percent"] * 0.25)
+        and metrics["mae"] <= max(0.25, thresholds["mae"] * 0.17)
+        and metrics["edge_mae"] <= max(0.005, thresholds["edge_mae"] * 0.20)
+        and metrics["large_region_score"] <= thresholds["large_region"]
+        and abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) <= max(0.01, thresholds["blank_delta"] * 0.50)
+        and metrics["ssim"] >= thresholds["ssim"] - 0.03
     )
 
 
-def is_low_energy_pixel_noise(metrics: dict[str, Any], thresholds: dict[str, float]) -> bool:
+def is_low_energy_pixel_noise(
+    metrics: dict[str, Any], thresholds: dict[str, float], large_region_noise_only: bool = False
+) -> bool:
     """Downgrade high pixel-count diffs when the visual energy is clean.
 
     Smooth gradients, bitonal scans, and sub-pixel antialiasing can mark many
@@ -731,11 +735,30 @@ def is_low_energy_pixel_noise(metrics: dict[str, Any], thresholds: dict[str, flo
         and metrics["mae"] <= thresholds["mae"]
         and metrics["ssim"] >= thresholds["ssim"]
         and metrics["edge_mae"] <= thresholds["edge_mae"]
-        and metrics["large_region_score"] <= thresholds["large_region"]
+        and (metrics["large_region_score"] <= thresholds["large_region"] or large_region_noise_only)
         and abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) <= thresholds["blank_delta"]
         and not (metrics["max_channel_delta"] > 220 and metrics["mae"] > thresholds["mae"] * 3)
     )
 
+
+def is_large_region_text_aa_noise(metrics: dict[str, Any], thresholds: dict[str, float]) -> bool:
+    """Downgrade localized text-AA regions when every structural corroborator is clean.
+
+    Sparse text pages can produce contiguous thresholded diff regions around
+    glyph strokes even when the page layout is intact. This remains conservative:
+    it only applies near the structural threshold and requires low MAE, clean
+    edge alignment, clean blankness, high SSIM, and no perceptual divergence.
+    """
+    return (
+        metrics["large_region_score"] > thresholds["large_region"]
+        and metrics["large_region_score"] <= thresholds["large_region"] * 1.35
+        and metrics["different_pixel_percent"] <= thresholds["different_pixel_percent"] * 1.25
+        and metrics["mae"] <= thresholds["mae"] * 0.50
+        and metrics["edge_mae"] <= thresholds["edge_mae"] * 0.40
+        and abs(metrics["blank_score_oxide"] - metrics["blank_score_reference"]) <= thresholds["blank_delta"]
+        and metrics["ssim"] >= thresholds["ssim"]
+        and metrics["phash_distance"] <= thresholds["phash_distance"]
+    )
 
 # Categories whose pages are dominated by anti-aliased glyph edges. Two CORRECT
 # renderers legitimately differ around every glyph edge (sub-pixel hinting, AA

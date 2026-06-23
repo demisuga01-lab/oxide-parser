@@ -230,39 +230,7 @@ impl ImageDecoder {
         match bpc {
             8 => Ok(raw),
             16 => Ok(raw.chunks(2).map(|chunk| chunk[0]).collect()),
-            4 => {
-                let total = expected_len(width, height, channels);
-                let mut out = Vec::with_capacity(total);
-                for byte in &raw {
-                    out.push(((byte >> 4) & 0x0F) * 17);
-                    out.push((byte & 0x0F) * 17);
-                }
-                out.truncate(total);
-                Ok(out)
-            }
-            2 => {
-                let total = expected_len(width, height, channels);
-                let mut out = Vec::with_capacity(total);
-                for byte in &raw {
-                    for shift in [6u8, 4, 2, 0] {
-                        out.push(((byte >> shift) & 0x03) * 85);
-                    }
-                }
-                out.truncate(total);
-                Ok(out)
-            }
-            1 => {
-                let total = expected_len(width, height, channels);
-                let mut out = Vec::with_capacity(total);
-                for byte in &raw {
-                    for shift in [7u8, 6, 5, 4, 3, 2, 1, 0] {
-                        let v = (byte >> shift) & 0x01;
-                        out.push(if v == 0 { 0 } else { 255 });
-                    }
-                }
-                out.truncate(total);
-                Ok(out)
-            }
+            4 | 2 | 1 => Ok(unpack_subbyte_rows(&raw, width, height, channels, bpc)),
             other => Err(OxideError::UnsupportedFeature(format!(
                 "unsupported bits_per_component: {other}"
             ))),
@@ -380,7 +348,8 @@ impl ImageDecoder {
             )));
         }
 
-        let normalised = Self::normalise_bit_depth(decompressed, width, height, raw_channels, bpc)?;
+        let mut normalised =
+            Self::normalise_bit_depth(decompressed, width, height, raw_channels, bpc)?;
         let is_mask = match dict.get("ImageMask").or_else(|| dict.get("IM")) {
             Some(PdfObject::Boolean(value)) => *value,
             Some(PdfObject::Name(name)) => name.eq_ignore_ascii_case("true"),
@@ -397,6 +366,10 @@ impl ImageDecoder {
                 bits_per_sample: 8,
                 pixels,
             });
+        }
+
+        if decode_array_applies_before_color_conversion(color_space) {
+            Self::apply_decode_array(&mut normalised, raw_channels, dict);
         }
 
         let (mut pixels, channels) = match color_space {
@@ -471,6 +444,34 @@ impl ImageDecoder {
             bits_per_sample: 8,
             pixels,
         })
+    }
+
+    fn apply_decode_array(pixels: &mut [u8], channels: u8, dict: &PdfDictionary) {
+        let Some(items) = dict.get("Decode").and_then(PdfObject::as_array) else {
+            return;
+        };
+        let values: Vec<f64> = items.iter().filter_map(PdfObject::as_number).collect();
+        let channels = channels.max(1) as usize;
+        if values.len() < channels * 2 {
+            log::warn!(
+                "image /Decode has {} entries for {} channels; ignoring",
+                values.len(),
+                channels
+            );
+            return;
+        }
+
+        for (idx, sample) in pixels.iter_mut().enumerate() {
+            let ch = idx % channels;
+            let low = values[ch * 2];
+            let high = values[ch * 2 + 1];
+            if !low.is_finite() || !high.is_finite() {
+                continue;
+            }
+            let unit = f64::from(*sample) / 255.0;
+            let decoded = (low + unit * (high - low)).clamp(0.0, 1.0);
+            *sample = (decoded * 255.0).round() as u8;
+        }
     }
 
     fn raw_channel_count(
@@ -643,6 +644,36 @@ impl ColorSpaceConverter {
     fn icc_channel_count(dict: &PdfDictionary, reader: &PdfReader) -> Option<u8> {
         cmm::icc_channel_count(dict, reader)
     }
+}
+
+fn decode_array_applies_before_color_conversion(color_space: &str) -> bool {
+    !matches!(color_space, "Indexed" | "Lab")
+}
+
+fn unpack_subbyte_rows(raw: &[u8], width: u32, height: u32, channels: u8, bpc: u8) -> Vec<u8> {
+    let channels = channels.max(1) as usize;
+    let samples_per_row = width as usize * channels;
+    let total = samples_per_row.saturating_mul(height as usize);
+    let bits_per_row = samples_per_row.saturating_mul(bpc as usize);
+    let bytes_per_row = bits_per_row.div_ceil(8);
+    let max_value = (1u16 << bpc) - 1;
+    let scale = 255u16 / max_value;
+    let mask = max_value as u8;
+
+    let mut out = Vec::with_capacity(total);
+    for row in 0..height as usize {
+        let row_start = row.saturating_mul(bytes_per_row);
+        let row_end = row_start.saturating_add(bytes_per_row).min(raw.len());
+        let row_bytes = &raw[row_start..row_end];
+        for sample in 0..samples_per_row {
+            let bit_offset = sample.saturating_mul(bpc as usize);
+            let byte = row_bytes.get(bit_offset / 8).copied().unwrap_or(0);
+            let shift = 8usize - bpc as usize - (bit_offset % 8);
+            let packed = (byte >> shift) & mask;
+            out.push((u16::from(packed) * scale) as u8);
+        }
+    }
+    out
 }
 
 fn expected_len(width: u32, height: u32, channels: u8) -> usize {
@@ -912,6 +943,20 @@ mod tests {
     }
 
     #[test]
+    fn normalise_bit_depth_1_bit_respects_row_padding() {
+        let pixels = vec![0b1010_0000_u8, 0b0100_0000_u8];
+        let out = ImageDecoder::normalise_bit_depth(pixels, 3, 2, 1, 1).unwrap();
+        assert_eq!(out, vec![255, 0, 255, 0, 255, 0]);
+    }
+
+    #[test]
+    fn normalise_bit_depth_2_bit_respects_row_padding() {
+        let pixels = vec![0b11_10_00_00_u8, 0b01_00_00_00_u8];
+        let out = ImageDecoder::normalise_bit_depth(pixels, 2, 2, 1, 2).unwrap();
+        assert_eq!(out, vec![255, 170, 85, 0]);
+    }
+
+    #[test]
     fn normalise_bit_depth_unsupported_bpc_returns_error() {
         let result = ImageDecoder::normalise_bit_depth(vec![0], 1, 1, 1, 3);
         assert!(result.is_err());
@@ -1001,6 +1046,20 @@ mod tests {
         assert_eq!(img.channels, 1);
         assert_eq!(img.pixels, pixels);
         assert!(img.is_grayscale());
+    }
+
+    #[test]
+    fn build_raw_image_applies_device_gray_decode_array() {
+        let mut dict = PdfDictionary::empty();
+        dict.insert(
+            "Decode",
+            PdfObject::Array(vec![PdfObject::Real(1.0), PdfObject::Real(0.0)]),
+        );
+        let img =
+            ImageDecoder::build_raw_image_pub(vec![0b1010_0000], 4, 1, 1, "DeviceGray", &dict)
+                .unwrap();
+        assert_eq!(img.channels, 1);
+        assert_eq!(img.pixels, vec![0, 255, 0, 255]);
     }
 
     #[test]

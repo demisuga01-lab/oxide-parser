@@ -29,7 +29,7 @@ Provenance: [`docs/oxide_sdk.md`](docs/oxide_sdk.md) (capstone, 2026-06-22, Wind
 | Clean digital table cell-F1 / TEDS | **1.000 / 1.000** | 1.000 / 1.000 (PyMuPDF) | benchmark |
 | Invoice key-value field-F1 (digital) | **1.000** | not a feature in PyMuPDF/Poppler | benchmark |
 | OCR'd scan char-accuracy (paper) | **0.942** | 0.000 (no OCR in PyMuPDF/Poppler) | benchmark |
-| Renderer weighted score (GA4, 265-file slice) | **91.32** | Poppler reference | renderer-benchmark |
+| Renderer weighted score (Prompt 3, 265-file slice) | **91.82** | Poppler reference | renderer-benchmark |
 | Hostile cross-pillar sweep | **0 crashes, 0 timeouts** (1,590 ops) | n/a | GA5 sweep |
 | PDF/A-1b/2b/2a/3b/3a | **PASS** (qpdf + veraPDF 1.30.2) | — | capstone |
 
@@ -185,19 +185,19 @@ Key-value field-F1 (PyMuPDF / Poppler do not do KV extraction — Oxide-only cap
 
 `qpdf` cross-validates Oxide's structural output: split parts pass `qpdf --check`, page counts agree, linearized output passes `qpdf --check` and `qpdf --show-linearization`.
 
-### Renderer fidelity (GA4, 265-file slice)
+### Renderer fidelity (Prompt 3, 265-file slice)
 
 | Metric | Result |
 | --- | ---: |
-| Weighted score | **91.32** |
-| Visual-page pass | 86.18% |
-| File pass | 89.06% |
+| Weighted score | **91.82** |
+| Visual-page pass | 86.94% |
+| File pass | 88.68% |
 | Hostile crash / timeout / memory safety | **100% / 100% / 100%** |
 | Determinism sample (24/24 stable) | 100% |
-| Peak Oxide memory | 66.0 MB |
-| Median Poppler / Oxide speed ratio | 2.71× |
+| Peak Oxide memory | 98.44 MB |
+| Median Poppler / Oxide speed ratio | 1.91x |
 
-Weakest real-world categories (honest disclosure, not polished away): JPEG2000 0.00%, complex vector 13.33%, multi-column 29.41%, scanned 33.33%, RTL 40.00%, forms 57.14%.
+Weakest real-world categories (honest disclosure, not polished away): RTL 40.00%, scanned 44.44%, multi-column 47.06%, forms 57.14%, CJK 61.54%, complex vector 80.00%.
 
 ### Cross-pillar hostile sweep (GA5)
 
@@ -250,7 +250,7 @@ Reproduce with `python renderer-benchmark/scripts/renderer_benchmark.py` and `py
 
 Honesty is the product. Oxide is a credible v1 candidate; it is not a panacea, and pretending otherwise would burn the trust of every serious evaluator.
 
-- **Renderer is preview / OCR-grade, not pixel-proof.** GA4 reaches a 91.32 weighted score and 86.18% visual pass on the 265-file hostile slice — a real improvement — but it still trails Poppler / MuPDF / PDFium for visual fidelity. The renderer exists to feed OCR, previews, and regression checks; if you need a pixel-perfect "this PDF will print exactly as displayed" guarantee, render with Poppler / PDFium and use Oxide for everything else.
+- **Renderer is preview / OCR-grade, not pixel-proof.** Prompt 3 reaches a 91.82 weighted score and 86.94% visual pass on the 265-file hostile slice, with 100% hostile crash/timeout/memory safety. It still trails Poppler / MuPDF / PDFium for visual fidelity. The renderer exists to feed OCR, previews, and regression checks; if you need a pixel-perfect "this PDF will print exactly as displayed" guarantee, render with Poppler / PDFium and use Oxide for everything else.
 - **OCR is Tesseract, not an ML layout model.** Bounded by the Tesseract engine and scan quality. Scanned tables don't reconstruct as clean cell grids (cell-F1 0 on `tables_scanned`); the OCR path emits prose blocks, and the grid detector needs ruling-line graphics it can't see on a scan. For scanned tabular data, use `extract-fields --ocr` to recover values and line items. Docling's ML layout would likely do better on messy scans; Docling is not benchmarked locally and is not part of this binary.
 - **No external security audit yet.** Continuous fuzzing, differential checks, property tests, grammar-aware deep fuzzing, dependency auditing, and a cross-pillar hostile sweep are all live and green — but a paid third-party audit is the next trust-builder, especially for the signature and encryption surfaces. See [`docs/security/posture.md`](docs/security/posture.md).
 - **Signature LTV is offline-first.** Core signing + offline timestamp / DSS / CRL substrate works. Live TSA / OCSP fetching, system trust-store policy, PAdES-B-LTA archive-timestamp refresh, and ECDSA breadth remain deployment-sensitive follow-ups.

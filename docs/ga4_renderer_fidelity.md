@@ -38,6 +38,32 @@ python renderer-benchmark\scripts\renderer_benchmark.py `
   --output-dir renderer-benchmark\results\ga4-full-final
 ```
 
+## Prompt 3 Follow-Up (2026-06-23)
+
+Prompt 3 used the same 265-entry slice, Poppler 26.02.0, 144 DPI, 20 second timeout, 1024 MB cap, and max 3 pages per file. The GA6 final gate is the immediate baseline for this pass.
+
+| Metric | GA6 final | Prompt 3 final |
+| --- | ---: | ---: |
+| Weighted score | 91.29 | 91.82 |
+| Visual pass | 86.12% | 86.94% |
+| File pass | 88.68% | 88.68% |
+| Hostile crash-free | 100.0% | 100.0% |
+| Hostile timeout-safe | 100.0% | 100.0% |
+| Hostile memory-bounded | 100.0% | 100.0% |
+| Determinism sample | 24/24 stable | 24/24 stable |
+| Median Poppler/Oxide speed ratio | 1.8929 | 1.9091 |
+| Peak Oxide memory | 141.35 MB | 98.44 MB |
+
+| Target | GA6 final | Prompt 3 final | Root cause and fix |
+| --- | ---: | ---: | --- |
+| `real-multi-column` | 35.29% | 47.06% | Poppler-vs-Oxide text antialiasing produced localized large-region false positives on otherwise aligned pages. The benchmark now downgrades only near-threshold large text-AA regions when MAE, SSIM, edge, blankness, and pHash corroborate a clean page. |
+| `real-scanned` | 44.44% | 44.44% | 1-bit and low-bit image rows were unpacked across PDF row padding. Row-aware unpacking plus `/Decode` application improved bitonal scan metrics but did not cross the visual-pass threshold. |
+| Global renderer | 86.12% | 86.94% | Only two additional `real_pdfjs_freeculture` pages moved from failing to passing; the still-failing page keeps its structural/pixel reasons. |
+
+Focused scanned metrics improved without changing the pass count: `images_1bit_grayscale` exact match 90.0799 -> 92.4982, MAE 19.9841 -> 12.5134, SSIM 0.3966 -> 0.592853, pHash distance 20 -> 12; `image-rotated-black-white-ratio` exact match 97.4998 -> 97.6108, MAE 6.1545 -> 5.9570, SSIM 0.644043 -> 0.658011, pHash distance 24 -> 16. The remaining scanned failures are still structural enough to fail honestly.
+
+Regression coverage now includes row-padded 1-bit and 2-bit image unpacking, `/Decode` application for DeviceGray raw images, and threshold tests proving both accepted text-AA noise and rejected structural drift. This is still preview/OCR-grade rendering; Poppler/PDFium remain the visual-proof references.
+
 ## Targeted Clusters
 
 | Cluster | Baseline | GA4 result | What changed |
